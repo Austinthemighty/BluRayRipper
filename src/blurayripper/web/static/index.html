@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BluRayRipper</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: #0e1116; color: #e6edf3; }
+  header { padding: 14px 20px; background: #161b22; border-bottom: 1px solid #30363d; display:flex; align-items:center; gap:12px;}
+  header h1 { font-size: 18px; margin: 0; }
+  header .cap { color:#8b949e; font-size:12px; }
+  .wrap { display: grid; grid-template-columns: 300px 1fr; gap: 16px; padding: 16px 20px; }
+  .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: #8b949e; margin: 0 0 10px; }
+  button { background: #238636; color: #fff; border: 0; border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+  button.sec { background: #30363d; }
+  button:disabled { opacity:.5; cursor: default; }
+  .drive { display:flex; justify-content:space-between; align-items:center; padding:8px; border:1px solid #30363d; border-radius:6px; margin-bottom:8px; }
+  .drive small { color:#8b949e; display:block; }
+  .job { border:1px solid #30363d; border-radius:8px; padding:12px; margin-bottom:12px; }
+  .job .top { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .badge { font-size:11px; padding:2px 8px; border-radius:999px; background:#30363d; text-transform:uppercase; letter-spacing:.04em;}
+  .badge.done{background:#238636;} .badge.failed{background:#da3633;} .badge.await{background:#9e6a03;}
+  .bar { height: 8px; background:#30363d; border-radius:999px; overflow:hidden; margin:8px 0; }
+  .bar > div { height:100%; background:#1f6feb; width:0; transition:width .3s; }
+  .stage { color:#8b949e; font-size:12px; }
+  table { width:100%; border-collapse: collapse; margin-top:8px; font-size:13px; }
+  th, td { text-align:left; padding:4px 6px; border-bottom:1px solid #21262d; }
+  .log { font-family: ui-monospace, monospace; font-size:11px; color:#8b949e; max-height:120px; overflow:auto; margin-top:8px; white-space:pre-wrap; }
+  input, select { background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:6px; padding:5px 8px; font-size:13px; }
+  .row { display:flex; gap:8px; align-items:center; margin:6px 0; flex-wrap:wrap; }
+  .muted { color:#8b949e; }
+</style>
+</head>
+<body>
+<header>
+  <h1>BluRayRipper</h1>
+  <span class="cap" id="cap"></span>
+</header>
+<div class="wrap">
+  <div>
+    <div class="panel">
+      <h2>Drives</h2>
+      <div id="drives"><span class="muted">Loading…</span></div>
+      <button class="sec" onclick="loadDrives()">Refresh</button>
+    </div>
+    <div class="panel" style="margin-top:16px;">
+      <h2>Add by selector</h2>
+      <div class="row">
+        <input id="manualSrc" placeholder="disc:0 / iso:/path" style="flex:1;" />
+        <button onclick="addManual()">Add</button>
+      </div>
+      <div class="muted" style="font-size:12px;">disc:N, dev:/dev/srN, file:/BDMV, iso:/x.iso</div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>Queue</h2>
+    <div id="jobs"><span class="muted">No jobs yet. Add a disc from the left.</span></div>
+  </div>
+</div>
+
+<script>
+let TMDB_OK = true;
+const renderedState = {};   // jobId -> last state we built a card for
+
+async function api(method, url, body) {
+  const r = await fetch(url, {method, headers: {'Content-Type':'application/json'}, body: body ? JSON.stringify(body) : undefined});
+  if (!r.ok) { const e = await r.json().catch(()=>({detail:r.statusText})); throw new Error(e.detail || r.statusText); }
+  return r.status === 204 ? null : r.json();
+}
+
+async function loadDrives() {
+  const el = document.getElementById('drives');
+  try {
+    const drives = await api('GET', '/api/drives');
+    if (!drives.length) { el.innerHTML = '<span class="muted">No optical drives found.</span>'; return; }
+    el.innerHTML = '';
+    for (const d of drives) {
+      const div = document.createElement('div');
+      div.className = 'drive';
+      div.innerHTML = `<div><b>${d.disc_name || 'No disc'}</b><small>${d.name} · disc:${d.index} ${d.device||''}</small></div>`;
+      const b = document.createElement('button');
+      b.textContent = 'Add'; b.onclick = () => addDisc('disc:' + d.index);
+      div.appendChild(b); el.appendChild(div);
+    }
+  } catch (e) { el.innerHTML = `<span class="muted">${e.message}</span>`; }
+}
+
+async function addDisc(source) { try { await api('POST','/api/jobs',{source}); } catch(e){ alert(e.message);} }
+function addManual(){ const v=document.getElementById('manualSrc').value.trim(); if(v) addDisc(v); }
+
+function badgeClass(s){ if(s==='done')return'done'; if(s==='failed')return'failed'; if(s.startsWith('awaiting'))return'await'; return''; }
+
+function renderJobs(snap) {
+  const host = document.getElementById('jobs');
+  if (!snap.jobs.length) { host.innerHTML = '<span class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); return; }
+  if (host.querySelector('.muted')) host.innerHTML='';
+  const seen = new Set();
+  for (const j of snap.jobs) {
+    seen.add(j.id);
+    let card = document.getElementById('job-'+j.id);
+    const needsForm = j.state==='awaiting_titles' || j.state==='awaiting_mapping';
+    // Rebuild the card if state changed (so forms appear/disappear); else live-update.
+    if (!card || renderedState[j.id] !== j.state) {
+      card = card || Object.assign(document.createElement('div'), {id:'job-'+j.id, className:'job'});
+      card.innerHTML = cardHtml(j);
+      if (!card.parentNode) host.appendChild(card);
+      renderedState[j.id] = j.state;
+      if (j.state==='awaiting_titles') buildTitles(card, j);
+      if (j.state==='awaiting_mapping') buildMapping(card, j);
+    }
+    liveUpdate(card, j);
+  }
+  // remove cards for jobs no longer present
+  for (const c of [...host.children]) {
+    const id = +(c.id||'').split('-')[1];
+    if (id && !seen.has(id)) c.remove();
+  }
+}
+function renderedStateClear(){ for(const k of Object.keys(renderedState)) delete renderedState[k]; }
+
+function cardHtml(j){
+  return `<div class="top">
+      <div><b>${j.disc_name || j.source}</b> <span class="muted">#${j.id}</span></div>
+      <span class="badge ${badgeClass(j.state)}" data-badge>${j.state.replace(/_/g,' ')}</span>
+    </div>
+    <div class="bar"><div data-bar></div></div>
+    <div class="stage" data-stage></div>
+    <div data-body></div>
+    <div class="log" data-log></div>`;
+}
+
+function liveUpdate(card, j){
+  card.querySelector('[data-badge]').textContent = j.state.replace(/_/g,' ');
+  card.querySelector('[data-badge]').className = 'badge '+badgeClass(j.state);
+  card.querySelector('[data-bar]').style.width = Math.round(j.progress*100)+'%';
+  card.querySelector('[data-stage]').textContent = j.error ? ('⚠ '+j.error) : (j.stage||'');
+  card.querySelector('[data-log]').textContent = (j.log||[]).join('\n');
+  if ((j.state==='done'||j.state==='failed') && !card.querySelector('[data-rm]')) {
+    const b=document.createElement('button'); b.className='sec'; b.textContent='Dismiss'; b.dataset.rm='1';
+    b.style.marginTop='8px'; b.onclick=()=>api('DELETE','/api/jobs/'+j.id);
+    card.querySelector('[data-body]').appendChild(b);
+    if (j.outputs && j.outputs.length) {
+      const o=document.createElement('div'); o.className='muted'; o.style.fontSize='12px';
+      o.textContent = j.outputs.join('\n'); card.querySelector('[data-body]').prepend(o);
+    }
+  }
+}
+
+function buildTitles(card, j){
+  const body = card.querySelector('[data-body]');
+  let rows = j.titles.map(t => `<tr>
+      <td><input type="checkbox" data-t="${t.id}" ${t.suggested?'checked':''}></td>
+      <td>${t.id}</td><td>${t.duration}</td><td>${t.chapters}</td><td>${t.size_gb} GB</td>
+      <td>${(t.audio||[]).join(',')||'-'}</td><td>${(t.subs||[]).join(',')||'-'}</td></tr>`).join('');
+  body.innerHTML = `<div class="muted" style="font-size:12px;">Detected: ${j.kind_guess||'?'} — suggested titles pre-checked</div>
+    <table><tr><th></th><th>ID</th><th>Dur</th><th>Ch</th><th>Size</th><th>Audio</th><th>Subs</th></tr>${rows}</table>
+    <div class="row"><button data-go>Confirm titles</button></div>`;
+  body.querySelector('[data-go]').onclick = async () => {
+    const ids = [...body.querySelectorAll('input[data-t]:checked')].map(c=>+c.dataset.t);
+    try { await api('POST',`/api/jobs/${j.id}/titles`,{title_ids: ids}); } catch(e){ alert(e.message);} };
+}
+
+function buildMapping(card, j){
+  const body = card.querySelector('[data-body]');
+  const movie = (j.kind_guess !== 'tv');
+  body.innerHTML = `
+    <div class="row">
+      <label><input type="radio" name="k${j.id}" value="movie" ${movie?'checked':''}> Movie</label>
+      <label><input type="radio" name="k${j.id}" value="tv" ${!movie?'checked':''}> TV</label>
+    </div>
+    <div class="row"><input data-q placeholder="Title to search" value="${(j.disc_name||'').replace(/_/g,' ')}" style="flex:1;">
+      <button class="sec" data-search>Search TMDB</button></div>
+    <div data-results class="row"></div>
+    <div data-tv></div>
+    <div class="row"><button data-confirm disabled>Confirm naming</button></div>`;
+  const state = { chosen:null, kind: movie?'movie':'tv', episodes:[] };
+  body.querySelectorAll(`input[name=k${j.id}]`).forEach(r=>r.onchange=()=>{state.kind=r.value; body.querySelector('[data-tv]').innerHTML=''; });
+  body.querySelector('[data-search]').onclick = async () => {
+    const q = body.querySelector('[data-q]').value.trim(); if(!q) return;
+    try {
+      const res = await api('GET',`/api/tmdb/search?kind=${state.kind}&query=${encodeURIComponent(q)}`);
+      const sel = document.createElement('select');
+      res.slice(0,15).forEach(c=>{ const o=document.createElement('option'); o.value=JSON.stringify(c); o.textContent=`${c.title} (${c.year||'?'})`; sel.appendChild(o); });
+      const rdiv = body.querySelector('[data-results]'); rdiv.innerHTML=''; rdiv.appendChild(sel);
+      const pick=()=>{ state.chosen=JSON.parse(sel.value); afterChoose(); }; sel.onchange=pick; pick();
+    } catch(e){ alert(e.message); }
+  };
+  async function afterChoose(){
+    const tv = body.querySelector('[data-tv]');
+    if (state.kind==='tv') {
+      tv.innerHTML = `<div class="row">Season <input data-season type="number" value="1" min="0" style="width:70px;"> <button class="sec" data-load>Load episodes</button></div><div data-eps></div>`;
+      tv.querySelector('[data-load]').onclick = async () => {
+        const s=+tv.querySelector('[data-season]').value;
+        try { state.episodes = await api('GET',`/api/tmdb/season?tv_id=${state.chosen.id}&season=${s}`);} catch(e){ state.episodes=[]; }
+        const eps = tv.querySelector('[data-eps]');
+        eps.innerHTML = j.titles.filter(t=>j.selected.includes(t.id)).map((t,i)=>`
+          <div class="row">Title ${t.id} (${t.duration}) → S${String(s).padStart(2,'0')}E
+            <input data-ep="${t.id}" type="number" value="${i+1}" min="0" style="width:70px;"></div>`).join('');
+        body.querySelector('[data-confirm]').disabled=false;
+      };
+    } else {
+      tv.innerHTML = `<div class="muted">Will name ${j.selected.length} selected title(s) as this movie.</div>`;
+      body.querySelector('[data-confirm]').disabled=false;
+    }
+  }
+  body.querySelector('[data-confirm]').onclick = async () => {
+    if(!state.chosen){ alert('Pick a title first'); return; }
+    let assignments=[];
+    if (state.kind==='movie') {
+      assignments = j.selected.map(tid=>({title_id:tid, kind:'movie', show_or_movie_title:state.chosen.title, year:state.chosen.year}));
+    } else {
+      const s=+body.querySelector('[data-season]').value;
+      const byNum={}; state.episodes.forEach(e=>byNum[e.episode]=e.name);
+      assignments = [...body.querySelectorAll('input[data-ep]')].map(inp=>({
+        title_id:+inp.dataset.ep, kind:'tv', show_or_movie_title:state.chosen.title, year:state.chosen.year,
+        season:s, episode:+inp.value, episode_title: byNum[+inp.value]||null }));
+    }
+    try { await api('POST',`/api/jobs/${j.id}/mapping`,{assignments}); } catch(e){ alert(e.message); }
+  };
+}
+
+// live updates via SSE
+const ev = new EventSource('/api/events');
+ev.onmessage = (m) => renderJobs(JSON.parse(m.data));
+loadDrives();
+fetch('/api/jobs').then(r=>r.json()).then(renderJobs).catch(()=>{});
+</script>
+</body>
+</html>

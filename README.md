@@ -68,10 +68,31 @@ blurayripper scan disc:0
 # Run the full pipeline (interactive naming)
 blurayripper rip disc:0
 
+# Rip several discs at once across drives. You confirm each disc's naming up
+# front, then they run concurrently. A weighted scheduler keeps two heavy UHD
+# encodes from running at the same time (they'd just split the CPU), while
+# letting a UHD overlap with a 1080p disc or several DVDs.
+blurayripper queue disc:0 disc:1
+
 # Other sources: a ripped BDMV folder or an ISO (handy for testing)
 blurayripper scan file:/path/to/BDMV_parent
 blurayripper rip  iso:/path/to/disc.iso
 ```
+
+### Web UI
+
+A browser dashboard manages the whole queue: see your drives, add discs,
+confirm naming, and watch live progress — with the same smart encode
+scheduling running in the background.
+
+```bash
+pip install -e ".[web]"     # one-time: installs FastAPI + uvicorn
+blurayripper serve          # then open http://127.0.0.1:8723
+```
+
+In the UI: click a drive's **Add**, pick the titles, search TMDB to name it,
+and **Confirm** — the job rips and encodes on its own. Load the next disc and
+repeat; heavy UHD encodes are automatically kept from doubling up.
 
 ## Development
 

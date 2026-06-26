@@ -22,6 +22,21 @@ class SubtitleTrack:
     default: bool = False
 
 
+def parse_video_height(stdout: str) -> int | None:
+    """Pure parser: first video track's pixel height from ``mkvmerge -J``."""
+    data = json.loads(stdout)
+    for track in data.get("tracks", []):
+        if track.get("type") != "video":
+            continue
+        dims = track.get("properties", {}).get("pixel_dimensions", "")
+        if "x" in dims:
+            try:
+                return int(dims.split("x")[1])
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
 def parse_identify(stdout: str) -> list[SubtitleTrack]:
     """Pure parser for ``mkvmerge -J`` JSON output -> subtitle tracks.
 
@@ -71,6 +86,11 @@ class MkvTools:
         cmd = [self._settings.tools.require("mkvmerge"), "-J", str(mkv_path)]
         result = await process.run(cmd)
         return parse_identify("\n".join(result.stdout_lines))
+
+    async def video_height(self, mkv_path: Path) -> int | None:
+        cmd = [self._settings.tools.require("mkvmerge"), "-J", str(mkv_path)]
+        result = await process.run(cmd)
+        return parse_video_height("\n".join(result.stdout_lines))
 
     async def extract_track(self, mkv_path: Path, track_id: int, out_path: Path) -> Path:
         """Extract one track to ``out_path`` (e.g. a .sup for a PGS subtitle)."""

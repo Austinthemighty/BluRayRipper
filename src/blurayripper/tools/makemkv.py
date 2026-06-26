@@ -23,11 +23,41 @@ from __future__ import annotations
 import csv
 import io
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import Settings
 from ..models import DiscInfo, Stream, StreamType, Title
 from . import process
+
+
+@dataclass
+class Drive:
+    index: int           # makemkvcon disc:N selector index
+    name: str            # drive model
+    device: str | None   # OS device, e.g. "F:" or "/dev/sr0"
+    disc_name: str | None  # loaded disc label, if any
+
+
+def parse_drives(lines: list[str]) -> list[Drive]:
+    """Parse DRV lines from `makemkvcon -r info disc:<big>` into present drives."""
+    drives: list[Drive] = []
+    for line in lines:
+        prefix, _, payload = line.partition(":")
+        if prefix != "DRV":
+            continue
+        fields = _split_robot_line(payload)
+        if len(fields) < 6 or not fields[4]:  # require a non-empty drive name
+            continue
+        drives.append(
+            Drive(
+                index=_to_int(fields[0]),
+                name=fields[4],
+                device=fields[6] if len(fields) >= 7 and fields[6] else None,
+                disc_name=fields[5] or None,
+            )
+        )
+    return drives
 
 # Attribute IDs we care about.
 ATTR_TYPE = 1
@@ -184,6 +214,12 @@ class MakeMKV:
     @property
     def _bin(self) -> str:
         return self._settings.tools.require("makemkvcon")
+
+    async def list_drives(self) -> list[Drive]:
+        """Enumerate optical drives (and any loaded disc) without opening a disc."""
+        cmd = [self._bin, "-r", "--cache=1", "info", "disc:99999"]
+        result = await process.run(cmd, check=False)
+        return parse_drives(result.stdout_lines)
 
     async def scan(
         self, source: str, *, on_message: Callable[[str], None] | None = None
