@@ -51,6 +51,12 @@ class AssignmentIn(BaseModel):
 
 class SetMapping(BaseModel):
     assignments: list[AssignmentIn]
+    grain_mode: str = "auto"      # "auto" | "on" | "off" | "preview"
+    tune_grain: bool | None = None
+
+
+class SetGrain(BaseModel):
+    tune_grain: bool
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -58,6 +64,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="BluRayRipper")
     manager = JobManager(settings)
     tmdb = TMDBClient(settings.tmdb_api_key, settings.metadata_language)
+
+    @app.on_event("startup")
+    async def _recover():
+        # Recover persisted jobs and resume any that were mid-flight.
+        try:
+            n = manager.recover()
+            if n:
+                print(f"Recovered {n} in-flight job(s) from the last run.")
+        except Exception as exc:  # don't block startup on a recovery hiccup
+            print(f"Job recovery skipped: {exc}")
 
     @app.get("/")
     async def index():
@@ -85,12 +101,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         wj = manager.add_disc(body.source)
         return {"id": wj.id}
 
+    def _gate(fn):
+        try:
+            fn()
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Job not found.")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
     @app.post("/api/jobs/{job_id}/titles")
     async def submit_titles(job_id: int, body: SetTitles):
-        try:
-            manager.set_titles(job_id, body.title_ids)
-        except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+        _gate(lambda: manager.set_titles(job_id, body.title_ids))
         return {"ok": True}
 
     @app.post("/api/jobs/{job_id}/mapping")
@@ -108,10 +129,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
                 for a in body.assignments
             ]
-            manager.set_mapping(job_id, assignments)
-        except (KeyError, ValueError) as exc:
+        except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        _gate(lambda: manager.set_mapping(job_id, assignments, body.grain_mode, body.tune_grain))
         return {"ok": True}
+
+    @app.post("/api/jobs/{job_id}/grain")
+    async def submit_grain(job_id: int, body: SetGrain):
+        _gate(lambda: manager.set_grain(job_id, body.tune_grain))
+        return {"ok": True}
+
+    @app.get("/api/jobs/{job_id}/preview/{which}")
+    async def preview_image(job_id: int, which: str):
+        wj = manager.jobs.get(job_id)
+        path = wj and (wj.preview_on if which == "on" else wj.preview_off)
+        if not path or not Path(path).exists():
+            raise HTTPException(status_code=404, detail="No preview.")
+        return FileResponse(path)
 
     @app.delete("/api/jobs/{job_id}")
     async def remove_job(job_id: int):

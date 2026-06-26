@@ -49,5 +49,27 @@ def test_audio_all_vs_main_mode():
 
 
 def test_subtitles_are_disabled():
-    cmd = HandBrake(_settings()).build_command(Path("in.mkv"), Path("out.mp4"))
+    cmd = HandBrake(_settings()).build_command(Path("in.mkv"), Path("out.mkv"))
     assert cmd[cmd.index("--subtitle") + 1] == "none"
+
+
+def test_grain_tune_toggle():
+    hb = HandBrake(_settings())
+    off = hb.build_command(Path("i.mkv"), Path("o.mkv"), tune_grain=False)
+    on = hb.build_command(Path("i.mkv"), Path("o.mkv"), tune_grain=True)
+    assert "--encoder-tune" not in off
+    assert on[on.index("--encoder-tune") + 1] == "grain"
+
+
+def test_grain_default_from_settings():
+    s = _settings()
+    s.encode.tune_grain = True
+    cmd = HandBrake(s).build_command(Path("i.mkv"), Path("o.mkv"))  # no explicit override
+    assert "grain" in cmd
+
+
+def test_clip_command_has_start_stop():
+    cmd = HandBrake(_settings()).build_command(
+        Path("i.mkv"), Path("o.mkv"), tune_grain=True, start=600, duration=4)
+    assert cmd[cmd.index("--start-at") + 1] == "seconds:600"
+    assert cmd[cmd.index("--stop-at") + 1] == "seconds:4"

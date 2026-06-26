@@ -110,6 +110,7 @@ function renderJobs(snap) {
       renderedState[j.id] = j.state;
       if (j.state==='awaiting_titles') buildTitles(card, j);
       if (j.state==='awaiting_mapping') buildMapping(card, j);
+      if (j.state==='awaiting_grain') buildGrain(card, j);
     }
     liveUpdate(card, j);
   }
@@ -175,6 +176,11 @@ function buildMapping(card, j){
       <button class="sec" data-search>Search TMDB</button></div>
     <div data-results class="row"></div>
     <div data-tv></div>
+    <div class="row">Film grain:
+      <label><input type="radio" name="g${j.id}" value="off" checked> Off</label>
+      <label><input type="radio" name="g${j.id}" value="on"> On</label>
+      <label><input type="radio" name="g${j.id}" value="preview"> Preview after rip</label>
+    </div>
     <div class="row"><button data-confirm disabled>Confirm naming</button></div>`;
   const state = { chosen:null, kind: movie?'movie':'tv', episodes:[] };
   body.querySelectorAll(`input[name=k${j.id}]`).forEach(r=>r.onchange=()=>{state.kind=r.value; body.querySelector('[data-tv]').innerHTML=''; });
@@ -218,8 +224,23 @@ function buildMapping(card, j){
         title_id:+inp.dataset.ep, kind:'tv', show_or_movie_title:state.chosen.title, year:state.chosen.year,
         season:s, episode:+inp.value, episode_title: byNum[+inp.value]||null }));
     }
-    try { await api('POST',`/api/jobs/${j.id}/mapping`,{assignments}); } catch(e){ alert(e.message); }
+    const gmode = body.querySelector(`input[name=g${j.id}]:checked`).value;
+    const tune_grain = gmode==='on' ? true : (gmode==='off' ? false : null);
+    try { await api('POST',`/api/jobs/${j.id}/mapping`,{assignments, grain_mode:gmode, tune_grain}); } catch(e){ alert(e.message); }
   };
+}
+
+function buildGrain(card, j){
+  const body = card.querySelector('[data-body]');
+  if (!j.preview){ body.innerHTML='<div class="muted">Rendering grain preview…</div>'; return; }
+  body.innerHTML = `<div class="muted" style="font-size:12px;">Same frame encoded both ways — click to open full-size and zoom flat areas (skies, walls). Grain shows best in motion, so this still is an approximation.</div>
+    <div class="row" style="align-items:flex-start;">
+      <div><div class="muted">Grain OFF</div><img src="${j.preview.off}" style="width:320px;max-width:46vw;border:1px solid #30363d;cursor:zoom-in;" onclick="window.open('${j.preview.off}')"></div>
+      <div><div class="muted">Grain ON</div><img src="${j.preview.on}" style="width:320px;max-width:46vw;border:1px solid #30363d;cursor:zoom-in;" onclick="window.open('${j.preview.on}')"></div>
+    </div>
+    <div class="row"><button class="sec" data-off>Use grain OFF</button><button data-on>Use grain ON</button></div>`;
+  body.querySelector('[data-off]').onclick=()=>api('POST',`/api/jobs/${j.id}/grain`,{tune_grain:false}).catch(e=>alert(e.message));
+  body.querySelector('[data-on]').onclick=()=>api('POST',`/api/jobs/${j.id}/grain`,{tune_grain:true}).catch(e=>alert(e.message));
 }
 
 // live updates via SSE

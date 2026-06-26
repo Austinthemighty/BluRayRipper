@@ -71,6 +71,11 @@ _TOOL_CANDIDATES: dict[str, dict[str, list[str]]] = {
         "darwin": ["/Applications/Subtitle Edit.app/Contents/MacOS/SubtitleEdit"],
         "linux": ["/usr/bin/SubtitleEdit", "/usr/local/bin/SubtitleEdit"],
     },
+    "ffmpeg": {
+        "win32": [r"C:\Program Files\ffmpeg\bin\ffmpeg.exe"],
+        "darwin": ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"],
+        "linux": ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"],
+    },
 }
 
 # The binary basename to look for on PATH for each tool key.
@@ -80,6 +85,7 @@ _TOOL_PATH_NAMES: dict[str, list[str]] = {
     "mkvmerge": ["mkvmerge"],
     "mkvextract": ["mkvextract"],
     "subtitleedit": ["seconv", "SubtitleEdit"],
+    "ffmpeg": ["ffmpeg"],
 }
 
 
@@ -118,6 +124,7 @@ class ToolPaths:
     mkvextract: str | None = None
     subtitleedit: str | None = None
     subtitleedit_runner: str | None = None
+    ffmpeg: str | None = None
 
     def require(self, tool_key: str) -> str:
         value = getattr(self, tool_key, None)
@@ -169,6 +176,7 @@ class EncodeSettings:
     container: str = "mp4"  # "mp4" or "mkv"
     preset_file: Path = DEFAULT_CONFIG_DIR / "presets.json"
     preset_name: str = "Plex H265 1080p"
+    tune_grain: bool = False  # default; can be overridden per job in the UI
 
 
 @dataclass
@@ -206,6 +214,7 @@ class Settings:
     queue: QueueSettings = field(default_factory=QueueSettings)
     auto_eject: bool = True
     min_length_seconds: int = 120
+    database_url: str | None = None  # Postgres URL for crash recovery; None = in-memory
     tmdb_api_key: str | None = None
     metadata_language: str = "en-US"
     config_dir: Path = DEFAULT_CONFIG_DIR
@@ -268,6 +277,7 @@ def load_settings(config_dir: Path | None = None) -> Settings:
             "subtitleedit", _override("BLURAYRIPPER_SUBTITLEEDIT", tools_cfg.get("subtitleedit"))),
         subtitleedit_runner=_override(
             "BLURAYRIPPER_SUBTITLEEDIT_RUNNER", tools_cfg.get("subtitleedit_runner")),
+        ffmpeg=autodetect_tool("ffmpeg", _override("BLURAYRIPPER_FFMPEG", tools_cfg.get("ffmpeg"))),
     )
 
     storage_cfg = data.get("storage", {})
@@ -287,6 +297,7 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         container=encode_cfg.get("container", "mp4"),
         preset_file=_resolve_path(encode_cfg.get("preset_file", "config/presets.json"), REPO_ROOT),
         preset_name=encode_cfg.get("preset_name", "Plex H265 1080p"),
+        tune_grain=bool(encode_cfg.get("tune_grain", False)),
     )
 
     lang_cfg = data.get("languages", {})
@@ -310,6 +321,8 @@ def load_settings(config_dir: Path | None = None) -> Settings:
     scan_cfg = data.get("scan", {})
     disc_cfg = data.get("disc", {})
     meta_cfg = data.get("metadata", {})
+    db_cfg = data.get("database", {})
+    database_url = _override("BLURAYRIPPER_DATABASE_URL", db_cfg.get("url"))
 
     return Settings(
         tools=tools,
@@ -321,6 +334,7 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         queue=queue,
         auto_eject=bool(disc_cfg.get("auto_eject", True)),
         min_length_seconds=int(scan_cfg.get("min_length_seconds", 120)),
+        database_url=database_url,
         tmdb_api_key=secrets.get("TMDB_API_KEY") or None,
         metadata_language=meta_cfg.get("language", "en-US"),
         config_dir=cfg_dir,

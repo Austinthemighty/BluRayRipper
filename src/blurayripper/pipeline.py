@@ -22,6 +22,7 @@ from .services import library, naming
 from .services.mapping_store import MappingStore
 from .tools import discinfo
 from .tools.eject import eject
+from .tools.ffmpeg import FFmpeg
 from .tools.handbrake import EncodeProgress, HandBrake
 from .tools.makemkv import MakeMKV
 from .tools.mkvtools import MkvTools, SubtitleTrack
@@ -35,6 +36,7 @@ class JobState(str, Enum):
     # Web-driven human gates (parked until the UI submits a decision):
     AWAITING_TITLES = "awaiting_titles"
     AWAITING_MAPPING = "awaiting_mapping"
+    AWAITING_GRAIN = "awaiting_grain"
     READY = "ready"
     RIPPING = "ripping"
     CONFIRMING = "confirming"
@@ -64,6 +66,12 @@ class Job:
     results: list[TitleResult] = field(default_factory=list)
     error: str | None = None
     auto_mapped: bool = False
+    # Grain handling: mode is "auto" (use config default / tune_grain), "on",
+    # "off", or "preview" (generate a still comparison and ask via the reporter).
+    grain_mode: str = "auto"
+    tune_grain: bool | None = None
+    # Per-title resume checkpoints: {title_id: {"ripped_path": str, "placed": bool}}
+    checkpoints: dict[int, dict] = field(default_factory=dict)
 
 
 class PipelineCallbacks(Protocol):
@@ -92,6 +100,7 @@ class Pipeline:
         self.handbrake = HandBrake(settings)
         self.mkvtools = MkvTools(settings)
         self.subtitleedit = SubtitleEdit(settings)
+        self.ffmpeg = FFmpeg(settings)
         self.mapping_store = MappingStore(settings.storage.output_dir / ".blurayripper" / "mappings.db")
 
     async def run(self, source: str, job_name: str | None = None) -> Job:
@@ -183,27 +192,47 @@ class Pipeline:
         rip_dir = staging_root / "rip" / f"t{title_id:03d}"
         encode_dir = staging_root / "encode"
         sub_dir = staging_root / "sub" / f"t{title_id:03d}"
+        cp = job.checkpoints.setdefault(title_id, {})
 
-        # Rip
-        job.state = JobState.RIPPING
-        report.on_event(f"Ripping title {title_id} ...")
-        title = job.disc.title(title_id) if job.disc else None
-        speed = _RipSpeed(total_bytes=title.size_bytes if title else 0)
-        ripped = await self.makemkv.rip_title(
-            job.source, title_id, rip_dir,
-            on_progress=lambda label, frac: report.on_progress(
-                f"Rip t{title_id}: {label}{speed.update(frac)}", frac
-            ),
-            on_message=report.on_event,
-        )
-        if not ripped:
-            raise RuntimeError(f"MakeMKV produced no output for title {title_id}.")
-        ripped_mkv = ripped[0]
+        # Resume: if this title already finished in a prior run, skip it entirely.
+        video_dest = self._video_path_for(assignment)
+        if cp.get("placed") and video_dest.exists():
+            report.on_event(f"Title {title_id} already done (resume) — skipping.")
+            result.video_path = video_dest
+            return result
+
+        # Rip — but if a prior run's ripped file is still on disk, reuse it
+        # (the rip is the disc-dependent step we most want to avoid redoing).
+        prior_rip = cp.get("ripped_path")
+        did_rip = False
+        if prior_rip and Path(prior_rip).exists():
+            report.on_event(f"Resuming title {title_id}: reusing ripped file.")
+            ripped_mkv = Path(prior_rip)
+        else:
+            job.state = JobState.RIPPING
+            report.on_event(f"Ripping title {title_id} ...")
+            title = job.disc.title(title_id) if job.disc else None
+            speed = _RipSpeed(total_bytes=title.size_bytes if title else 0)
+            ripped = await self.makemkv.rip_title(
+                job.source, title_id, rip_dir,
+                on_progress=lambda label, frac: report.on_progress(
+                    f"Rip t{title_id}: {label}{speed.update(frac)}", frac
+                ),
+                on_message=report.on_event,
+            )
+            if not ripped:
+                raise RuntimeError(f"MakeMKV produced no output for title {title_id}.")
+            ripped_mkv = ripped[0]
+            cp["ripped_path"] = str(ripped_mkv)
+            did_rip = True
+            _checkpoint(report)
 
         # Eject after the last title's rip so the disc is free while the long
-        # encode runs (the encode/OCR stages don't need the disc).
+        # encode runs. Only when we actually ripped this run (on resume the disc
+        # may already be gone).
         if (
-            self.settings.auto_eject
+            did_rip
+            and self.settings.auto_eject
             and title_id == job.selected_title_ids[-1]
             and job.source.split(":", 1)[0] in ("disc", "dev")
         ):
@@ -216,10 +245,12 @@ class Pipeline:
             except Exception as exc:
                 report.on_event(f"Auto-eject failed ({device or 'no device'}): {exc}")
 
-        # Compute the final destination + extract subtitles (before encode drops them).
-        video_dest = self._video_path_for(assignment)
+        # Extract subtitles (before encode drops them).
         job.state = JobState.EXTRACTING_SUBS
         sub_jobs = await self._extract_subs(ripped_mkv, sub_dir, report)
+
+        # Resolve grain (may park at a preview gate) before reserving CPU.
+        tune_grain = await self._resolve_grain(job, ripped_mkv, title_id, staging_root, report)
 
         # Encode video, gated by the weighted scheduler so heavy UHD encodes
         # don't run two-at-a-time (they'd just split the CPU).
@@ -229,17 +260,20 @@ class Pipeline:
         try:
             job.state = JobState.ENCODING
             report.on_event(
-                f"Encoding title {title_id} ({height or '?'}p, weight {weight}) "
-                f"-> {video_dest.name} ..."
+                f"Encoding title {title_id} ({height or '?'}p, weight {weight}, "
+                f"grain={'on' if tune_grain else 'off'}) -> {video_dest.name} ..."
             )
             encoded = encode_dir / video_dest.name
             await self.handbrake.encode(
                 ripped_mkv, encoded,
                 on_progress=lambda p: self._encode_progress(p, report),
+                tune_grain=tune_grain,
             )
         finally:
             await scheduler.release(acquired)
         result.video_path = library.place(encoded, video_dest)
+        cp["placed"] = True
+        _checkpoint(report)
         report.on_event(f"Placed video: {result.video_path}")
 
         # OCR each extracted subtitle and place the SRT sidecar. Same-language
@@ -274,6 +308,57 @@ class Pipeline:
 
         job.state = JobState.PLACING
         return result
+
+    async def _resolve_grain(
+        self, job: Job, ripped_mkv: Path, title_id: int, staging_root: Path, report
+    ) -> bool:
+        """Decide whether to encode with --tune grain.
+
+        Modes: "on"/"off" force it; "auto" uses job/config default; "preview"
+        renders a still comparison and asks the reporter (web UI) to choose.
+        """
+        default = self.settings.encode.tune_grain if job.tune_grain is None else job.tune_grain
+        if job.grain_mode == "on":
+            return True
+        if job.grain_mode == "off":
+            return False
+        if job.grain_mode != "preview":
+            return default
+
+        resolver = getattr(report, "resolve_grain", None)
+        if resolver is None or not self.ffmpeg.available:
+            if job.grain_mode == "preview":
+                report.on_event("Grain preview unavailable here; using default.")
+            return default
+        try:
+            report.on_event("Rendering grain preview (short sample, both ways)…")
+            off_png, on_png = await self._generate_grain_preview(
+                job, ripped_mkv, title_id, staging_root / "preview", report
+            )
+            return await resolver(job, off_png, on_png)
+        except Exception as exc:
+            report.on_event(f"Grain preview failed ({exc}); using default.")
+            return default
+
+    async def _generate_grain_preview(
+        self, job: Job, ripped_mkv: Path, title_id: int, preview_dir: Path, report
+    ) -> tuple[Path, Path]:
+        title = job.disc.title(title_id) if job.disc else None
+        duration_s = title.duration_seconds if title else 1800
+        start = max(1, int(duration_s * 0.33))  # sample ~1/3 in
+        clip_secs = 4.0
+        off_clip = preview_dir / "off.mkv"
+        on_clip = preview_dir / "on.mkv"
+        await self.handbrake.encode_clip(
+            ripped_mkv, off_clip, start=start, duration=clip_secs, tune_grain=False)
+        await self.handbrake.encode_clip(
+            ripped_mkv, on_clip, start=start, duration=clip_secs, tune_grain=True)
+        off_png = preview_dir / "grain_off.png"
+        on_png = preview_dir / "grain_on.png"
+        await self.ffmpeg.extract_frame(off_clip, off_png, at_seconds=clip_secs / 2)
+        await self.ffmpeg.extract_frame(on_clip, on_png, at_seconds=clip_secs / 2)
+        report.on_event("Grain preview ready — choose grain on/off in the UI.")
+        return off_png, on_png
 
     async def _probe_height(self, ripped_mkv: Path, report) -> int | None:
         try:
@@ -348,6 +433,13 @@ class Pipeline:
 
 def _slug(text: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in text)[:40] or "job"
+
+
+def _checkpoint(report) -> None:
+    """Ask the reporter to persist the job, if it supports durable checkpoints."""
+    fn = getattr(report, "checkpoint", None)
+    if fn is not None:
+        fn()
 
 
 # Blu-ray (including UHD BD) 1x read speed = 36 Mbit/s = 4.5 MB/s.

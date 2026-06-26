@@ -108,7 +108,13 @@ class HandBrake:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
-    def build_command(self, src: Path, dst: Path) -> list[str]:
+    def _effective_grain(self, tune_grain: bool | None) -> bool:
+        return self._settings.encode.tune_grain if tune_grain is None else tune_grain
+
+    def build_command(
+        self, src: Path, dst: Path, *, tune_grain: bool | None = None,
+        start: float | None = None, duration: float | None = None,
+    ) -> list[str]:
         enc = self._settings.encode
         langs = self._settings.languages
         # Put the default language first so HandBrake flags it as default.
@@ -137,6 +143,12 @@ class HandBrake:
             "--subtitle",
             "none",
         ]
+        if self._effective_grain(tune_grain):
+            cmd += ["--encoder-tune", "grain"]
+        if start is not None:
+            cmd += ["--start-at", f"seconds:{start:.0f}"]
+        if duration is not None:
+            cmd += ["--stop-at", f"seconds:{duration:.0f}"]
         return cmd
 
     async def encode(
@@ -145,6 +157,7 @@ class HandBrake:
         dst: Path,
         *,
         on_progress: ProgressHandler | None = None,
+        tune_grain: bool | None = None,
     ) -> Path:
         import json as _json
 
@@ -168,5 +181,16 @@ class HandBrake:
                 if res is not None and hasattr(res, "__await__"):
                     await res
 
-        await process.run(self.build_command(src, dst), on_line=handle)
+        await process.run(self.build_command(src, dst, tune_grain=tune_grain), on_line=handle)
+        return dst
+
+    async def encode_clip(
+        self, src: Path, dst: Path, *, start: float, duration: float, tune_grain: bool
+    ) -> Path:
+        """Encode a short segment (no audio/subs) for grain previews."""
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        cmd = self.build_command(src, dst, tune_grain=tune_grain, start=start, duration=duration)
+        # Drop audio for a quick, small preview clip.
+        cmd += ["-a", "none"]
+        await process.run(cmd)
         return dst
