@@ -178,12 +178,25 @@ class SubtitleSettings:
 
 
 @dataclass
+class AudioSettings:
+    # "all" keeps every track in the kept languages (incl. commentaries);
+    # "main" keeps only the first (primary) track per language.
+    tracks: str = "all"
+
+    @property
+    def main_only(self) -> bool:
+        return self.tracks.strip().lower() == "main"
+
+
+@dataclass
 class Settings:
     tools: ToolPaths
     storage: StorageSettings
     encode: EncodeSettings
     languages: LanguageSettings
     subtitles: SubtitleSettings
+    audio: AudioSettings = field(default_factory=AudioSettings)
+    auto_eject: bool = True
     min_length_seconds: int = 120
     tmdb_api_key: str | None = None
     metadata_language: str = "en-US"
@@ -259,7 +272,11 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         remove_text_for_hi=bool(sub_cfg.get("remove_text_for_hi", False)),
     )
 
+    audio_cfg = data.get("audio", {})
+    audio = AudioSettings(tracks=audio_cfg.get("tracks", "all"))
+
     scan_cfg = data.get("scan", {})
+    disc_cfg = data.get("disc", {})
     meta_cfg = data.get("metadata", {})
     secrets = _load_secrets(cfg_dir)
 
@@ -269,6 +286,8 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         encode=encode,
         languages=languages,
         subtitles=subtitles,
+        audio=audio,
+        auto_eject=bool(disc_cfg.get("auto_eject", True)),
         min_length_seconds=int(scan_cfg.get("min_length_seconds", 120)),
         tmdb_api_key=secrets.get("TMDB_API_KEY") or None,
         metadata_language=meta_cfg.get("language", "en-US"),

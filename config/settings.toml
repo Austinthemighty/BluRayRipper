@@ -38,6 +38,16 @@ default = "eng"
 [scan]
 min_length_seconds = 120   # ignore titles shorter than this (drops menus/trailers)
 
+[disc]
+# Eject the disc automatically once ripping finishes (before the encode runs),
+# so you can swap in the next disc while encoding continues.
+auto_eject = true
+
+[audio]
+# "all"  = keep every track in your kept languages (incl. commentaries)
+# "main" = keep only the first (primary) track per language
+tracks = "all"
+
 [subtitles]
 fix_common_errors = true
 remove_text_for_hi = false  # strip hearing-impaired tags during OCR

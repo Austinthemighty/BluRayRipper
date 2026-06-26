@@ -19,7 +19,7 @@ def test_parses_multiline_progress_block():
         '}\n'
         'Progress: {\n'
         ' "State": "WORKING",\n'
-        ' "Working": { "Progress": 0.42, "ETASeconds": 90 }\n'
+        ' "Working": { "Progress": 0.42, "ETASeconds": 90, "RateAvg": 24.5 }\n'
         '}\n'
     )
     parser = HandBrakeJsonParser()
@@ -33,6 +33,7 @@ def test_parses_multiline_progress_block():
     assert prog.state == "WORKING"
     assert abs(prog.fraction - 0.42) < 1e-9
     assert prog.eta_seconds == 90
+    assert abs(prog.fps - 24.5) < 1e-9
 
 
 def test_workdone_state():

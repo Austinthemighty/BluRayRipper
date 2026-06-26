@@ -5,6 +5,7 @@ workflow from preset burn-in behavior."""
 from pathlib import Path
 
 from blurayripper.config import (
+    AudioSettings,
     EncodeSettings,
     LanguageSettings,
     Settings,
@@ -15,15 +16,16 @@ from blurayripper.config import (
 from blurayripper.tools.handbrake import HandBrake
 
 
-def _settings() -> Settings:
+def _settings(audio_tracks: str = "all") -> Settings:
     return Settings(
         tools=ToolPaths(handbrakecli="HandBrakeCLI"),
         storage=StorageSettings(staging_dir=Path("/tmp/s"), output_dir=Path("/tmp/o")),
         encode=EncodeSettings(
-            container="mp4", preset_file=Path("config/presets.json"), preset_name="BluRay UHD"
+            container="mkv", preset_file=Path("config/presets.json"), preset_name="BluRay UHD"
         ),
         languages=LanguageSettings(keep=["eng", "pol"], default="eng"),
         subtitles=SubtitleSettings(),
+        audio=AudioSettings(tracks=audio_tracks),
     )
 
 
@@ -34,10 +36,16 @@ def test_command_imports_preset_and_selects_it():
 
 
 def test_default_language_is_first_in_audio_list():
-    cmd = HandBrake(_settings()).build_command(Path("in.mkv"), Path("out.mp4"))
+    cmd = HandBrake(_settings()).build_command(Path("in.mkv"), Path("out.mkv"))
     lang_arg = cmd[cmd.index("--audio-lang-list") + 1]
     assert lang_arg == "eng,pol"  # default (eng) first so Plex flags it default
-    assert "--all-audio" in cmd
+
+
+def test_audio_all_vs_main_mode():
+    all_cmd = HandBrake(_settings("all")).build_command(Path("in.mkv"), Path("out.mkv"))
+    main_cmd = HandBrake(_settings("main")).build_command(Path("in.mkv"), Path("out.mkv"))
+    assert "--all-audio" in all_cmd and "--first-audio" not in all_cmd
+    assert "--first-audio" in main_cmd and "--all-audio" not in main_cmd
 
 
 def test_subtitles_are_disabled():
