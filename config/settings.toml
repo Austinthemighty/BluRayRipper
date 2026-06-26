@@ -1,0 +1,47 @@
+# BluRayRipper configuration.
+# Copy/edit this file. Secrets (API keys) live in config/secrets.env, not here.
+# Any value left blank/omitted falls back to an OS-specific default or auto-detection.
+
+[tools]
+# Absolute paths to the external binaries. Leave blank to auto-detect from PATH
+# and common install locations (Program Files on Windows, PATH on Linux/macOS).
+makemkvcon = ""
+handbrakecli = ""
+mkvmerge = ""
+mkvextract = ""
+# SubtitleEdit launcher. On Windows this is the path to SubtitleEdit.exe.
+# On Linux/macOS, either a native "seconv"/"SubtitleEdit" binary, or leave
+# subtitleedit pointing at SubtitleEdit.exe and set subtitleedit_runner = "mono".
+subtitleedit = ""
+subtitleedit_runner = ""   # e.g. "mono" on Linux/macOS; blank to run directly
+
+[storage]
+# Temp/staging root: per-job intermediates live here and are cleaned up after.
+# Output root: final Plex library destination. Either may point at a NAS share.
+staging_dir = "./staging"
+output_dir = "./output"
+# Sub-folders created under output_dir for each library type.
+movies_subdir = "Movies"
+tv_subdir = "TV Shows"
+
+[encode]
+container = "mkv"          # "mp4" or "mkv" (must match the preset's FileFormat)
+preset_file = "config/presets.json"
+preset_name = "BluRay UHD"
+
+[languages]
+# ISO 639-2/B 3-letter codes (as MakeMKV/mkvmerge report them) to KEEP.
+keep = ["eng", "pol"]
+# Default/primary language flagged for Plex.
+default = "eng"
+
+[scan]
+min_length_seconds = 120   # ignore titles shorter than this (drops menus/trailers)
+
+[subtitles]
+fix_common_errors = true
+remove_text_for_hi = false  # strip hearing-impaired tags during OCR
+
+[metadata]
+provider = "tmdb"
+language = "en-US"
