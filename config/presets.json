@@ -28,18 +28,6 @@
           "AudioTrackQuality": -1,
           "AudioTrackGainSlider": 0,
           "AudioTrackDRCSlider": 0
-        },
-        {
-          "AudioBitrate": 160,
-          "AudioCompressionLevel": 0,
-          "AudioEncoder": "av_aac",
-          "AudioMixdown": "dpl2",
-          "AudioNormalizeMixLevel": false,
-          "AudioSamplerate": "48",
-          "AudioTrackQualityEnable": false,
-          "AudioTrackQuality": 3,
-          "AudioTrackGainSlider": 0,
-          "AudioTrackDRCSlider": 0
         }
       ],
       "AudioSecondaryEncoderMode": true,
