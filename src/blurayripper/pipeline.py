@@ -17,6 +17,7 @@ from typing import Protocol
 
 from .config import Settings
 from .models import DiscInfo, EpisodeAssignment, MediaKind
+from .scheduler import EncodeScheduler, encode_weight
 from .services import library, naming
 from .services.mapping_store import MappingStore
 from .tools import discinfo
@@ -31,6 +32,10 @@ class JobState(str, Enum):
     QUEUED = "queued"
     SCANNING = "scanning"
     SELECTING = "selecting"
+    # Web-driven human gates (parked until the UI submits a decision):
+    AWAITING_TITLES = "awaiting_titles"
+    AWAITING_MAPPING = "awaiting_mapping"
+    READY = "ready"
     RIPPING = "ripping"
     CONFIRMING = "confirming"
     ENCODING = "encoding"
@@ -80,9 +85,9 @@ class PipelineCallbacks(Protocol):
 
 
 class Pipeline:
-    def __init__(self, settings: Settings, callbacks: PipelineCallbacks) -> None:
+    def __init__(self, settings: Settings, callbacks: PipelineCallbacks | None = None) -> None:
         self.settings = settings
-        self.cb = callbacks
+        self.cb = callbacks  # only needed for the interactive run()/prepare() path
         self.makemkv = MakeMKV(settings)
         self.handbrake = HandBrake(settings)
         self.mkvtools = MkvTools(settings)
@@ -90,71 +95,89 @@ class Pipeline:
         self.mapping_store = MappingStore(settings.storage.output_dir / ".blurayripper" / "mappings.db")
 
     async def run(self, source: str, job_name: str | None = None) -> Job:
-        job = Job(source=source)
-        staging_root = self.settings.storage.staging_dir / (job_name or _slug(source))
-        try:
-            await self._scan(job)
-            self._resolve_mapping(job)
-            await self._process_titles(job, staging_root)
-            self._persist_mapping(job)
-            library.cleanup(staging_root)
-            job.state = JobState.DONE
-            self.cb.on_event("Done.")
-        except Exception as exc:  # surface which stage failed
-            job.state = JobState.FAILED
-            job.error = f"{type(exc).__name__}: {exc}"
-            self.cb.on_event(f"FAILED during {job.state.value}: {job.error}")
-            raise
+        """Single-job convenience: interactive prepare, then execute."""
+        job = await self.prepare(source)
+        scheduler = EncodeScheduler(self.settings.queue.encode_capacity)
+        return await self.execute(job, scheduler, self.cb, job_name)
+
+    async def prepare(self, source: str) -> Job:
+        """Interactive phase: scan + resolve the title/naming mapping.
+
+        Kept separate from execute() so a queue can collect all user input up
+        front, then run the (non-interactive) rips/encodes concurrently.
+        """
+        job = await self.scan_disc(source, self.cb)
+        if not job.auto_mapped:
+            job.state = JobState.SELECTING
+            job.selected_title_ids = self.cb.select_titles(job.disc)
+            if not job.selected_title_ids:
+                raise RuntimeError("No titles selected to rip.")
+            job.state = JobState.CONFIRMING
+            job.assignments = await self.cb.confirm_mapping(job.disc, job.selected_title_ids)
         return job
 
-    # --- stages ---------------------------------------------------------
-
-    async def _scan(self, job: Job) -> None:
+    async def scan_disc(self, source: str, report) -> Job:
+        """Non-interactive scan: probe the disc, fingerprint it, and auto-fill
+        the mapping if this disc was confirmed before. The web layer drives the
+        title/naming gates explicitly instead of via callbacks."""
+        job = Job(source=source)
         job.state = JobState.SCANNING
-        self.cb.on_event(f"Scanning {job.source} ...")
-        job.disc = await self.makemkv.scan(job.source)
+        report.on_event(f"Scanning {source} ...")
+        job.disc = await self.makemkv.scan(source, on_message=report.on_event)
         job.fingerprint = discinfo.disc_fingerprint(job.disc)
-        self.cb.on_event(
+        report.on_event(
             f"Found {len(job.disc.titles)} titles "
             f"(disc: {job.disc.disc_name or 'unknown'}, fp: {job.fingerprint[:10]})."
         )
-
-    def _resolve_mapping(self, job: Job) -> None:
-        assert job.disc is not None
         remembered = self.mapping_store.get(job.fingerprint or "")
         if remembered:
             job.assignments = {a.title_id: a for a in remembered}
             job.selected_title_ids = [a.title_id for a in remembered]
             job.auto_mapped = True
-            job.state = JobState.CONFIRMING
-            self.cb.on_event("Recognized disc from a previous rip — using saved mapping.")
-            return
+            report.on_event("Recognized disc from a previous rip — using saved mapping.")
+        return job
 
-        job.state = JobState.SELECTING
-        job.selected_title_ids = self.cb.select_titles(job.disc)
-        if not job.selected_title_ids:
-            raise RuntimeError("No titles selected to rip.")
+    async def execute(
+        self, job: Job, scheduler: EncodeScheduler, report, job_name: str | None = None
+    ) -> Job:
+        """Non-interactive phase: rip -> (gated) encode -> subs -> place.
 
-    async def _ensure_mapping(self, job: Job) -> None:
-        if job.assignments:
-            return
+        ``report`` receives on_event/on_progress; ``scheduler`` gates the encode
+        stage by weight so heavy UHD encodes don't pile up on the CPU.
+        """
+        staging_root = self.settings.storage.staging_dir / (job_name or _slug(job.source))
+        try:
+            await self._process_titles(job, staging_root, scheduler, report)
+            self._persist_mapping(job, report)
+            library.cleanup(staging_root)
+            job.state = JobState.DONE
+            report.on_event("Done.")
+        except Exception as exc:  # surface which stage failed
+            job.state = JobState.FAILED
+            job.error = f"{type(exc).__name__}: {exc}"
+            report.on_event(f"FAILED during {job.state.value}: {job.error}")
+            raise
+        return job
+
+    # --- stages ---------------------------------------------------------
+
+    async def _process_titles(
+        self, job: Job, staging_root: Path, scheduler: EncodeScheduler, report
+    ) -> None:
         assert job.disc is not None
-        job.state = JobState.CONFIRMING
-        job.assignments = await self.cb.confirm_mapping(job.disc, job.selected_title_ids)
-
-    async def _process_titles(self, job: Job, staging_root: Path) -> None:
-        assert job.disc is not None
-        await self._ensure_mapping(job)
         for title_id in job.selected_title_ids:
             assignment = job.assignments.get(title_id)
             if assignment is None:
-                self.cb.on_event(f"Skipping title {title_id}: no naming assignment.")
+                report.on_event(f"Skipping title {title_id}: no naming assignment.")
                 continue
-            result = await self._process_one(job, title_id, assignment, staging_root)
+            result = await self._process_one(
+                job, title_id, assignment, staging_root, scheduler, report
+            )
             job.results.append(result)
 
     async def _process_one(
-        self, job: Job, title_id: int, assignment: EpisodeAssignment, staging_root: Path
+        self, job: Job, title_id: int, assignment: EpisodeAssignment, staging_root: Path,
+        scheduler: EncodeScheduler, report,
     ) -> TitleResult:
         result = TitleResult(title_id=title_id)
         rip_dir = staging_root / "rip" / f"t{title_id:03d}"
@@ -163,15 +186,15 @@ class Pipeline:
 
         # Rip
         job.state = JobState.RIPPING
-        self.cb.on_event(f"Ripping title {title_id} ...")
+        report.on_event(f"Ripping title {title_id} ...")
         title = job.disc.title(title_id) if job.disc else None
         speed = _RipSpeed(total_bytes=title.size_bytes if title else 0)
         ripped = await self.makemkv.rip_title(
             job.source, title_id, rip_dir,
-            on_progress=lambda label, frac: self.cb.on_progress(
+            on_progress=lambda label, frac: report.on_progress(
                 f"Rip t{title_id}: {label}{speed.update(frac)}", frac
             ),
-            on_message=self.cb.on_event,
+            on_message=report.on_event,
         )
         if not ripped:
             raise RuntimeError(f"MakeMKV produced no output for title {title_id}.")
@@ -184,27 +207,40 @@ class Pipeline:
             and title_id == job.selected_title_ids[-1]
             and job.source.split(":", 1)[0] in ("disc", "dev")
         ):
+            device = job.disc.drive_device if job.disc else None
             try:
-                eject(job.disc.drive_device if job.disc else None)
-                self.cb.on_event("Ejected disc — safe to load the next one.")
+                eject(device)
+                report.on_event(
+                    f"Ejected disc ({device or 'default drive'}) — safe to load the next one."
+                )
             except Exception as exc:
-                self.cb.on_event(f"Auto-eject failed: {exc}")
+                report.on_event(f"Auto-eject failed ({device or 'no device'}): {exc}")
 
         # Compute the final destination + extract subtitles (before encode drops them).
         video_dest = self._video_path_for(assignment)
         job.state = JobState.EXTRACTING_SUBS
-        sub_jobs = await self._extract_subs(ripped_mkv, sub_dir)
+        sub_jobs = await self._extract_subs(ripped_mkv, sub_dir, report)
 
-        # Encode video to the staging encode dir, then place it.
-        job.state = JobState.ENCODING
-        self.cb.on_event(f"Encoding title {title_id} -> {video_dest.name} ...")
-        encoded = encode_dir / video_dest.name
-        await self.handbrake.encode(
-            ripped_mkv, encoded,
-            on_progress=lambda p: self._encode_progress(p),
-        )
+        # Encode video, gated by the weighted scheduler so heavy UHD encodes
+        # don't run two-at-a-time (they'd just split the CPU).
+        height = await self._probe_height(ripped_mkv, report)
+        weight = encode_weight(height)
+        acquired = await scheduler.acquire(weight)
+        try:
+            job.state = JobState.ENCODING
+            report.on_event(
+                f"Encoding title {title_id} ({height or '?'}p, weight {weight}) "
+                f"-> {video_dest.name} ..."
+            )
+            encoded = encode_dir / video_dest.name
+            await self.handbrake.encode(
+                ripped_mkv, encoded,
+                on_progress=lambda p: self._encode_progress(p, report),
+            )
+        finally:
+            await scheduler.release(acquired)
         result.video_path = library.place(encoded, video_dest)
-        self.cb.on_event(f"Placed video: {result.video_path}")
+        report.on_event(f"Placed video: {result.video_path}")
 
         # OCR each extracted subtitle and place the SRT sidecar. Same-language
         # tracks are disambiguated by forced/SDH flags and an index so they
@@ -217,7 +253,7 @@ class Pipeline:
             try:
                 srt = await self.subtitleedit.ocr_to_srt(sup_path, language, sub_dir)
             except Exception as exc:
-                self.cb.on_event(f"Subtitle OCR failed ({language}): {exc}")
+                report.on_event(f"Subtitle OCR failed ({language}): {exc}")
                 continue
             is_default = False
             index: int | None = None
@@ -234,13 +270,20 @@ class Pipeline:
             )
             library.place(srt, srt_dest)
             result.subtitle_paths.append(srt_dest)
-            self.cb.on_event(f"Placed subtitle: {srt_dest.name}")
+            report.on_event(f"Placed subtitle: {srt_dest.name}")
 
         job.state = JobState.PLACING
         return result
 
+    async def _probe_height(self, ripped_mkv: Path, report) -> int | None:
+        try:
+            return await self.mkvtools.video_height(ripped_mkv)
+        except Exception as exc:
+            report.on_event(f"Could not probe resolution ({exc}); assuming non-UHD weight.")
+            return None
+
     async def _extract_subs(
-        self, ripped_mkv: Path, sub_dir: Path
+        self, ripped_mkv: Path, sub_dir: Path, report
     ) -> list[tuple[Path, SubtitleTrack]]:
         """Extract kept-language PGS tracks to .sup files. Returns (sup, track).
 
@@ -251,7 +294,7 @@ class Pipeline:
         try:
             tracks = await self.mkvtools.identify_subtitles(ripped_mkv)
         except Exception as exc:
-            self.cb.on_event(f"Subtitle identify failed: {exc}")
+            report.on_event(f"Subtitle identify failed: {exc}")
             return jobs
         for track in tracks:
             if not track.is_pgs:
@@ -265,20 +308,20 @@ class Pipeline:
                 jobs.append((sup_path, track))
                 flags = "".join(f" [{f}]" for f, on in
                                 (("forced", track.forced), ("sdh", track.sdh)) if on)
-                self.cb.on_event(f"Extracted {lang} PGS subtitle (track {track.track_id}){flags}.")
+                report.on_event(f"Extracted {lang} PGS subtitle (track {track.track_id}){flags}.")
             except Exception as exc:
-                self.cb.on_event(f"Subtitle extract failed (track {track.track_id}): {exc}")
+                report.on_event(f"Subtitle extract failed (track {track.track_id}): {exc}")
         return jobs
 
-    def _encode_progress(self, p: EncodeProgress) -> None:
+    def _encode_progress(self, p: EncodeProgress, report) -> None:
         parts = [p.state.lower()]
         if p.fps:
             parts.append(f"{p.fps:.0f} fps")
         if p.eta_seconds:
             parts.append(f"ETA {_fmt_eta(p.eta_seconds)}")
-        self.cb.on_progress(f"Encode: {' · '.join(parts)}", p.fraction)
+        report.on_progress(f"Encode: {' · '.join(parts)}", p.fraction)
 
-    def _persist_mapping(self, job: Job) -> None:
+    def _persist_mapping(self, job: Job, report) -> None:
         if job.auto_mapped or not job.assignments or not job.fingerprint:
             return
         assert job.disc is not None
@@ -287,7 +330,7 @@ class Pipeline:
             job.disc.disc_name,
             list(job.assignments.values()),
         )
-        self.cb.on_event("Saved disc mapping for automatic future re-rips.")
+        report.on_event("Saved disc mapping for automatic future re-rips.")
 
     # --- naming ---------------------------------------------------------
 

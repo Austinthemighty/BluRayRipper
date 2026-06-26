@@ -17,12 +17,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Phase 2 web UI (not required for the Phase 1 CLI pipeline).
+# Web UI (not required for the CLI pipeline).
 web = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
-    "sse-starlette>=2.1",
-    "sqlmodel>=0.0.16",
 ]
 dev = [
     "pytest>=8.0",

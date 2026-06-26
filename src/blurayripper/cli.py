@@ -22,6 +22,7 @@ from rich.table import Table
 from .config import Settings, ToolNotFoundError, load_settings
 from .models import DiscInfo, EpisodeAssignment, MediaKind
 from .pipeline import Pipeline
+from .scheduler import EncodeScheduler
 from .services.metadata import MetadataError, TMDBClient
 from .tools import discinfo
 from .tools.makemkv import MakeMKV
@@ -343,6 +344,121 @@ def _check_writable(path) -> bool:
         return False
 
 
+class _QueueDisplay:
+    """Multi-lane live progress: one bar per concurrent job."""
+
+    def __init__(self) -> None:
+        self.progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[bold magenta]{task.fields[lane]}"),
+            TextColumn("{task.description}"),
+            BarColumn(bar_width=30),
+            TaskProgressColumn(),
+            console=console,
+        )
+
+    def start(self) -> None:
+        self.progress.start()
+
+    def stop(self) -> None:
+        self.progress.stop()
+
+    def lane(self, name: str) -> "_LaneReporter":
+        task = self.progress.add_task("queued…", lane=name, total=1000)
+        return _LaneReporter(self, task, name)
+
+    def update(self, task, stage: str, fraction: float | None) -> None:
+        if fraction is None:
+            self.progress.update(task, description=stage)
+        else:
+            self.progress.update(task, description=stage, completed=int(fraction * 1000))
+
+    def event(self, name: str, message: str) -> None:
+        self.progress.console.print(f"[dim][{name}][/dim] {message}")
+
+
+class _LaneReporter:
+    """Per-job reporter (on_event/on_progress) routed to one display lane."""
+
+    def __init__(self, display: _QueueDisplay, task, name: str) -> None:
+        self._display = display
+        self._task = task
+        self.name = name
+
+    def on_event(self, message: str) -> None:
+        self._display.event(self.name, message)
+
+    def on_progress(self, stage: str, fraction: float | None) -> None:
+        self._display.update(self._task, stage, fraction)
+
+
+async def _cmd_queue(args: argparse.Namespace) -> int:
+    settings = load_settings(args.config)
+    interactive = CliCallbacks(settings)
+    if not settings.tmdb_api_key:
+        console.print("[yellow]No TMDB key configured; naming will be manual.[/yellow]")
+    pipeline = Pipeline(settings, interactive)
+
+    # 1) Interactive setup for each disc, one at a time (scan + title/naming).
+    prepared: list = []
+    for source in args.sources:
+        console.rule(f"Setup: {source}")
+        try:
+            job = await pipeline.prepare(source)
+            prepared.append(job)
+        except Exception as exc:
+            console.print(f"[red]Skipping {source}: {type(exc).__name__}: {exc}[/red]")
+    if not prepared:
+        console.print("[red]Nothing to do.[/red]")
+        return 1
+
+    # 2) Run all jobs concurrently; the shared scheduler gates encodes by weight.
+    console.rule("Running queue")
+    console.print(
+        f"[dim]Encode budget: {settings.queue.encode_capacity} units "
+        f"(UHD=2, others=1) — heavy encodes won't double up.[/dim]"
+    )
+    scheduler = EncodeScheduler(settings.queue.encode_capacity)
+    display = _QueueDisplay()
+    display.start()
+
+    async def run_one(job) -> object | None:
+        disc_name = job.disc.disc_name if job.disc else None
+        reporter = display.lane((disc_name or job.source)[:24])
+        try:
+            return await pipeline.execute(job, scheduler, reporter)
+        except Exception:
+            return None  # already reported on the lane
+
+    try:
+        results = await asyncio.gather(*(run_one(j) for j in prepared))
+    finally:
+        display.stop()
+
+    done = [j for j in results if j is not None]
+    console.print(f"[bold green]Queue finished[/bold green] — {len(done)}/{len(prepared)} succeeded.")
+    for j in done:
+        for r in j.results:
+            console.print(f"  {r.video_path}")
+    return 0 if len(done) == len(prepared) else 1
+
+
+async def _cmd_serve(args: argparse.Namespace) -> int:
+    try:
+        import uvicorn
+    except ImportError:
+        console.print("[red]Web UI needs extra deps. Install with: pip install -e \".[web]\"[/red]")
+        return 2
+    from .web.app import create_app
+
+    settings = load_settings(args.config)
+    app = create_app(settings)
+    console.print(f"[bold green]BluRayRipper UI[/bold green] → http://{args.host}:{args.port}")
+    config = uvicorn.Config(app, host=args.host, port=args.port, log_level="warning")
+    await uvicorn.Server(config).serve()
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="blurayripper", description=__doc__)
     parser.add_argument("--config", help="Path to config directory", default=None)
@@ -359,6 +475,22 @@ def _build_parser() -> argparse.ArgumentParser:
     rip.add_argument("source", help="makemkvcon source, e.g. disc:0 / file:/path / iso:/path")
     rip.add_argument("--name", help="Optional job name (staging subfolder)", default=None)
     rip.set_defaults(func=_cmd_rip)
+
+    queue = sub.add_parser(
+        "queue",
+        help="Rip several discs at once: confirm each up front, then run "
+        "concurrently with smart encode scheduling (no two UHD encodes at once)",
+    )
+    queue.add_argument(
+        "sources", nargs="+",
+        help="Multiple makemkvcon sources, e.g. disc:0 disc:1",
+    )
+    queue.set_defaults(func=_cmd_queue)
+
+    serve = sub.add_parser("serve", help="Launch the local web UI to manage the rip queue")
+    serve.add_argument("--host", default="127.0.0.1", help="Bind host (default 127.0.0.1)")
+    serve.add_argument("--port", type=int, default=8723, help="Port (default 8723)")
+    serve.set_defaults(func=_cmd_serve)
     return parser
 
 

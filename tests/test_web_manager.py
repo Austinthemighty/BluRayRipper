@@ -1,0 +1,86 @@
+"""JobManager state-machine flow, with the pipeline's tool calls stubbed out."""
+
+import asyncio
+
+import pytest
+
+from blurayripper.config import load_settings
+from blurayripper.models import DiscInfo, EpisodeAssignment, MediaKind, Title
+from blurayripper.pipeline import Job, JobState
+from blurayripper.web.manager import JobManager
+
+
+def _fake_disc():
+    return DiscInfo(
+        source="disc:0",
+        disc_name="WarGames",
+        titles=[Title(title_id=0, duration_seconds=6762, chapter_count=12, source_filename="00002.mpls")],
+    )
+
+
+@pytest.fixture
+def manager(tmp_path, monkeypatch):
+    settings = load_settings()
+    # Keep the mapping DB + any output under tmp.
+    monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    m = JobManager(settings)
+
+    async def fake_scan(source, report):
+        job = Job(source=source)
+        job.disc = _fake_disc()
+        job.fingerprint = "fp_test"
+        report.on_event("scanned")
+        return job
+
+    executed = {}
+
+    async def fake_execute(job, scheduler, report, job_name=None):
+        executed["job"] = job
+        report.on_progress("encoding", 1.0)
+        from blurayripper.pipeline import TitleResult
+        job.results = [TitleResult(title_id=0, video_path=tmp_path / "WarGames (1983).mkv")]
+        return job
+
+    monkeypatch.setattr(m.pipeline, "scan_disc", fake_scan)
+    monkeypatch.setattr(m.pipeline, "execute", fake_execute)
+    m._executed = executed
+    return m
+
+
+async def _settle():
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+
+async def test_full_gate_flow(manager):
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    assert wj.state is JobState.AWAITING_TITLES
+    assert wj.disc.disc_name == "WarGames"
+
+    manager.set_titles(wj.id, [0])
+    assert wj.state is JobState.AWAITING_MAPPING
+
+    manager.set_mapping(wj.id, [
+        EpisodeAssignment(0, MediaKind.MOVIE, "WarGames", 1983),
+    ])
+    await _settle()
+    assert wj.state is JobState.DONE
+    assert wj.outputs and "WarGames" in wj.outputs[0]
+    assert manager._executed["job"].assignments[0].show_or_movie_title == "WarGames"
+
+
+async def test_set_titles_rejected_in_wrong_state(manager):
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    manager.set_titles(wj.id, [0])  # -> AWAITING_MAPPING
+    with pytest.raises(ValueError):
+        manager.set_titles(wj.id, [0])  # no longer awaiting titles
+
+
+async def test_snapshot_shape(manager):
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    snap = manager.snapshot()
+    assert snap["jobs"][0]["disc_name"] == "WarGames"
+    assert snap["jobs"][0]["titles"][0]["id"] == 0

@@ -178,6 +178,13 @@ class SubtitleSettings:
 
 
 @dataclass
+class QueueSettings:
+    # Total encode "budget". UHD encodes cost 2 units, others 1, so the default
+    # of 3 allows 1 UHD + 1 lighter disc, or up to 3 DVDs, but never 2 UHDs.
+    encode_capacity: int = 3
+
+
+@dataclass
 class AudioSettings:
     # "all" keeps every track in the kept languages (incl. commentaries);
     # "main" keeps only the first (primary) track per language.
@@ -196,6 +203,7 @@ class Settings:
     languages: LanguageSettings
     subtitles: SubtitleSettings
     audio: AudioSettings = field(default_factory=AudioSettings)
+    queue: QueueSettings = field(default_factory=QueueSettings)
     auto_eject: bool = True
     min_length_seconds: int = 120
     tmdb_api_key: str | None = None
@@ -296,6 +304,9 @@ def load_settings(config_dir: Path | None = None) -> Settings:
     audio_cfg = data.get("audio", {})
     audio = AudioSettings(tracks=audio_cfg.get("tracks", "all"))
 
+    queue_cfg = data.get("queue", {})
+    queue = QueueSettings(encode_capacity=int(queue_cfg.get("encode_capacity", 3)))
+
     scan_cfg = data.get("scan", {})
     disc_cfg = data.get("disc", {})
     meta_cfg = data.get("metadata", {})
@@ -307,6 +318,7 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         languages=languages,
         subtitles=subtitles,
         audio=audio,
+        queue=queue,
         auto_eject=bool(disc_cfg.get("auto_eject", True)),
         min_length_seconds=int(scan_cfg.get("min_length_seconds", 120)),
         tmdb_api_key=secrets.get("TMDB_API_KEY") or None,
