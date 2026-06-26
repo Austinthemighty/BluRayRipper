@@ -204,7 +204,12 @@ class Settings:
 
 
 def _load_secrets(config_dir: Path) -> dict[str, str]:
-    """Parse config/secrets.env into a dict; also honors process env vars."""
+    """Parse config/secrets.env into a dict; also honors process env vars.
+
+    secrets.env is gitignored, so machine-specific values (API keys, tool paths,
+    storage folders) placed here survive `git pull` instead of being clobbered
+    by the tracked settings.toml.
+    """
     secrets: dict[str, str] = {}
     env_file = config_dir / "secrets.env"
     if env_file.exists():
@@ -214,10 +219,10 @@ def _load_secrets(config_dir: Path) -> dict[str, str]:
                 continue
             key, _, value = line.partition("=")
             secrets[key.strip()] = value.strip().strip('"').strip("'")
-    # Process environment overrides the file.
-    for key in ("TMDB_API_KEY",):
-        if os.environ.get(key):
-            secrets[key] = os.environ[key]
+    # Process environment overrides the file (any BLURAYRIPPER_* var + TMDB key).
+    for key, value in os.environ.items():
+        if key == "TMDB_API_KEY" or key.startswith("BLURAYRIPPER_"):
+            secrets[key] = value
     return secrets
 
 
@@ -235,20 +240,36 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         with settings_file.open("rb") as fh:
             data = tomllib.load(fh)
 
+    # Load gitignored env overrides first so they win over the tracked TOML.
+    secrets = _load_secrets(cfg_dir)
+
+    def _override(env_key: str, toml_value) -> str | None:
+        return secrets.get(env_key) or (toml_value or None)
+
     tools_cfg = data.get("tools", {})
     tools = ToolPaths(
-        makemkvcon=autodetect_tool("makemkvcon", tools_cfg.get("makemkvcon") or None),
-        handbrakecli=autodetect_tool("handbrakecli", tools_cfg.get("handbrakecli") or None),
-        mkvmerge=autodetect_tool("mkvmerge", tools_cfg.get("mkvmerge") or None),
-        mkvextract=autodetect_tool("mkvextract", tools_cfg.get("mkvextract") or None),
-        subtitleedit=autodetect_tool("subtitleedit", tools_cfg.get("subtitleedit") or None),
-        subtitleedit_runner=(tools_cfg.get("subtitleedit_runner") or None),
+        makemkvcon=autodetect_tool(
+            "makemkvcon", _override("BLURAYRIPPER_MAKEMKVCON", tools_cfg.get("makemkvcon"))),
+        handbrakecli=autodetect_tool(
+            "handbrakecli", _override("BLURAYRIPPER_HANDBRAKECLI", tools_cfg.get("handbrakecli"))),
+        mkvmerge=autodetect_tool(
+            "mkvmerge", _override("BLURAYRIPPER_MKVMERGE", tools_cfg.get("mkvmerge"))),
+        mkvextract=autodetect_tool(
+            "mkvextract", _override("BLURAYRIPPER_MKVEXTRACT", tools_cfg.get("mkvextract"))),
+        subtitleedit=autodetect_tool(
+            "subtitleedit", _override("BLURAYRIPPER_SUBTITLEEDIT", tools_cfg.get("subtitleedit"))),
+        subtitleedit_runner=_override(
+            "BLURAYRIPPER_SUBTITLEEDIT_RUNNER", tools_cfg.get("subtitleedit_runner")),
     )
 
     storage_cfg = data.get("storage", {})
     storage = StorageSettings(
-        staging_dir=_resolve_path(storage_cfg.get("staging_dir", "./staging"), REPO_ROOT),
-        output_dir=_resolve_path(storage_cfg.get("output_dir", "./output"), REPO_ROOT),
+        staging_dir=_resolve_path(
+            _override("BLURAYRIPPER_STAGING_DIR", storage_cfg.get("staging_dir")) or "./staging",
+            REPO_ROOT),
+        output_dir=_resolve_path(
+            _override("BLURAYRIPPER_OUTPUT_DIR", storage_cfg.get("output_dir")) or "./output",
+            REPO_ROOT),
         movies_subdir=storage_cfg.get("movies_subdir", "Movies"),
         tv_subdir=storage_cfg.get("tv_subdir", "TV Shows"),
     )
@@ -278,7 +299,6 @@ def load_settings(config_dir: Path | None = None) -> Settings:
     scan_cfg = data.get("scan", {})
     disc_cfg = data.get("disc", {})
     meta_cfg = data.get("metadata", {})
-    secrets = _load_secrets(cfg_dir)
 
     return Settings(
         tools=tools,
