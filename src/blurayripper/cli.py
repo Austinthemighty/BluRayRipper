@@ -266,6 +266,12 @@ async def _cmd_check(args: argparse.Namespace) -> int:
             ok = False
     runner = settings.tools.subtitleedit_runner
     tool_table.add_row("subtitleedit_runner", runner or "[dim](none — runs directly)[/dim]")
+    # ffmpeg is optional (only the grain preview uses it) — don't fail on it.
+    tool_table.add_row(
+        "ffmpeg [dim](optional)[/dim]",
+        f"[green]{settings.tools.ffmpeg}[/green]" if settings.tools.ffmpeg
+        else "[yellow]not found — grain preview disabled[/yellow]",
+    )
     console.print(tool_table)
 
     # Folders (writability)
@@ -443,6 +449,30 @@ async def _cmd_queue(args: argparse.Namespace) -> int:
     return 0 if len(done) == len(prepared) else 1
 
 
+async def _cmd_db_init(args: argparse.Namespace) -> int:
+    from .persistence import MemoryStore, make_store
+
+    settings = load_settings(args.config)
+    store = make_store(settings.database_url)
+    if isinstance(store, MemoryStore):
+        console.print(
+            "[yellow]No database configured — running in memory (no crash recovery).[/yellow]\n"
+            "Set [database].url in settings.toml or BLURAYRIPPER_DATABASE_URL in secrets.env "
+            "to enable Postgres persistence."
+        )
+        return 1
+    try:
+        store.init()
+    except Exception as exc:
+        console.print(f"[red]Database init failed: {exc}[/red]")
+        return 2
+    existing = len(store.load_all())
+    console.print(
+        f"[bold green]Database ready.[/bold green] Schema ensured; {existing} job(s) currently stored."
+    )
+    return 0
+
+
 async def _cmd_serve(args: argparse.Namespace) -> int:
     try:
         import uvicorn
@@ -491,6 +521,9 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1", help="Bind host (default 127.0.0.1)")
     serve.add_argument("--port", type=int, default=8723, help="Port (default 8723)")
     serve.set_defaults(func=_cmd_serve)
+
+    db_init = sub.add_parser("db-init", help="Create/verify the Postgres schema for crash recovery")
+    db_init.set_defaults(func=_cmd_db_init)
     return parser
 
 

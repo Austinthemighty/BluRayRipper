@@ -84,3 +84,28 @@ async def test_snapshot_shape(manager):
     snap = manager.snapshot()
     assert snap["jobs"][0]["disc_name"] == "WarGames"
     assert snap["jobs"][0]["titles"][0]["id"] == 0
+
+
+async def test_grain_preview_gate(manager, monkeypatch, tmp_path):
+    async def exec_with_grain(job, scheduler, report, job_name=None):
+        chosen = await report.resolve_grain(job, tmp_path / "off.png", tmp_path / "on.png")
+        manager._executed["grain"] = chosen
+        from blurayripper.pipeline import TitleResult
+        job.results = [TitleResult(title_id=0, video_path=tmp_path / "x.mkv")]
+        return job
+
+    monkeypatch.setattr(manager.pipeline, "execute", exec_with_grain)
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    manager.set_titles(wj.id, [0])
+    manager.set_mapping(
+        wj.id, [EpisodeAssignment(0, MediaKind.MOVIE, "WarGames", 1983)], grain_mode="preview"
+    )
+    await _settle()
+    assert wj.state is JobState.AWAITING_GRAIN
+    assert manager.snapshot()["jobs"][0]["preview"]["on"].endswith("/preview/on")
+
+    manager.set_grain(wj.id, True)
+    await _settle()
+    assert wj.state is JobState.DONE
+    assert manager._executed["grain"] is True

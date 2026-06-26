@@ -15,7 +15,16 @@ from dataclasses import dataclass, field
 
 from ..config import Settings
 from ..models import DiscInfo, EpisodeAssignment, MediaKind
-from ..pipeline import JobState, Pipeline
+from ..persistence import (
+    JobRecord,
+    Store,
+    assignment_from_dict,
+    assignment_to_dict,
+    disc_from_dict,
+    disc_to_dict,
+    make_store,
+)
+from ..pipeline import Job, JobState, Pipeline
 from ..scheduler import EncodeScheduler
 from ..tools import discinfo
 from ..tools.makemkv import Drive
@@ -55,7 +64,12 @@ class WebJob:
     selected_title_ids: list[int] = field(default_factory=list)
     assignments: dict[int, EpisodeAssignment] = field(default_factory=dict)
     outputs: list[str] = field(default_factory=list)
+    grain_mode: str = "auto"
+    tune_grain: bool | None = None
+    preview_off: object = None  # Path to grain-off still
+    preview_on: object = None   # Path to grain-on still
     _pipeline_job: object = None  # the underlying pipeline.Job once scanned
+    _grain_future: object = None  # asyncio.Future resolved when user picks grain
 
 
 class _Reporter:
@@ -76,16 +90,103 @@ class _Reporter:
             self._wj.progress = fraction
         self._m.bus.publish()
 
+    def checkpoint(self) -> None:
+        """Pipeline reached a durable checkpoint (rip done / output placed)."""
+        self._m._persist(self._wj)
+
+    async def resolve_grain(self, job, off_png, on_png) -> bool:
+        """Park the job at the grain gate with preview stills; wait for the pick."""
+        wj = self._wj
+        wj.preview_off = off_png
+        wj.preview_on = on_png
+        wj.state = JobState.AWAITING_GRAIN
+        wj._grain_future = asyncio.get_event_loop().create_future()
+        self._m._persist(wj)
+        self._m.bus.publish()
+        return await wj._grain_future
+
 
 class JobManager:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, store: Store | None = None) -> None:
         self.settings = settings
         self.pipeline = Pipeline(settings)  # no interactive callbacks; web drives gates
         self.scheduler = EncodeScheduler(settings.queue.encode_capacity)
         self.bus = EventBus()
         self.jobs: dict[int, WebJob] = {}
+        self.store = store or make_store(settings.database_url)
         self._ids = itertools.count(1)
         self._tasks: set[asyncio.Task] = set()
+
+    # --- persistence / recovery ----------------------------------------
+
+    def _persist(self, wj: WebJob) -> None:
+        try:
+            self.store.save(self._to_record(wj))
+        except Exception as exc:  # never let a persistence hiccup kill a job
+            wj.log.append(f"persist failed: {exc}")
+
+    def _to_record(self, wj: WebJob) -> JobRecord:
+        job = wj._pipeline_job
+        checkpoints = {str(k): v for k, v in (job.checkpoints.items() if job else {})}
+        return JobRecord(
+            id=wj.id,
+            source=wj.source,
+            state=self._live_state(wj).value,
+            fingerprint=wj.fingerprint,
+            disc=disc_to_dict(wj.disc),
+            selected_title_ids=wj.selected_title_ids,
+            assignments=[assignment_to_dict(a) for a in wj.assignments.values()],
+            grain_mode=wj.grain_mode,
+            tune_grain=wj.tune_grain,
+            checkpoints=checkpoints,
+            outputs=wj.outputs,
+            error=wj.error,
+        )
+
+    def _from_record(self, rec: JobRecord) -> WebJob:
+        wj = WebJob(
+            id=rec.id, source=rec.source, state=JobState(rec.state), error=rec.error,
+            fingerprint=rec.fingerprint, outputs=list(rec.outputs),
+            selected_title_ids=list(rec.selected_title_ids),
+            grain_mode=rec.grain_mode, tune_grain=rec.tune_grain,
+        )
+        wj.disc = disc_from_dict(rec.disc)
+        wj.assignments = {a.title_id: a for a in (assignment_from_dict(d) for d in rec.assignments)}
+        job = Job(source=rec.source)
+        job.disc = wj.disc
+        job.fingerprint = rec.fingerprint
+        job.selected_title_ids = list(rec.selected_title_ids)
+        job.assignments = wj.assignments
+        job.grain_mode = rec.grain_mode
+        job.tune_grain = rec.tune_grain
+        job.checkpoints = {int(k): v for k, v in rec.checkpoints.items()}
+        wj._pipeline_job = job
+        return wj
+
+    def recover(self) -> int:
+        """Load persisted jobs and resume any that were mid-flight. Returns the
+        number of jobs re-queued for resumption."""
+        self.store.init()
+        records = self.store.load_all()
+        max_id = 0
+        resumed = 0
+        parked = (JobState.DONE, JobState.FAILED,
+                  JobState.AWAITING_TITLES, JobState.AWAITING_MAPPING)
+        for rec in records:
+            wj = self._from_record(rec)
+            self.jobs[wj.id] = wj
+            max_id = max(max_id, wj.id)
+            if wj.state not in parked:
+                # Was running (or parked at the ephemeral grain gate): resume.
+                wj.state = JobState.READY
+                wj.progress = 0.0
+                wj.log.append("Recovered after restart — resuming.")
+                self._spawn(self._run_job(wj))
+                resumed += 1
+        if max_id:
+            self._ids = itertools.count(max_id + 1)
+        self.bus.publish()
+        return resumed
 
     # --- queries --------------------------------------------------------
 
@@ -100,6 +201,7 @@ class JobManager:
     def add_disc(self, source: str) -> WebJob:
         wj = WebJob(id=next(self._ids), source=source)
         self.jobs[wj.id] = wj
+        self._persist(wj)
         self._spawn(self._scan_job(wj))
         self.bus.publish()
         return wj
@@ -112,23 +214,40 @@ class JobManager:
             raise ValueError("No titles selected.")
         wj.selected_title_ids = title_ids
         wj.state = JobState.AWAITING_MAPPING
+        self._persist(wj)
         self.bus.publish()
 
-    def set_mapping(self, job_id: int, assignments: list[EpisodeAssignment]) -> None:
+    def set_mapping(
+        self, job_id: int, assignments: list[EpisodeAssignment],
+        grain_mode: str = "auto", tune_grain: bool | None = None,
+    ) -> None:
         wj = self.jobs[job_id]
         if wj.state not in (JobState.AWAITING_MAPPING, JobState.AWAITING_TITLES):
             raise ValueError(f"Job {job_id} is not awaiting a naming mapping.")
         wj.assignments = {a.title_id: a for a in assignments}
         wj.selected_title_ids = [a.title_id for a in assignments]
+        wj.grain_mode = grain_mode
+        wj.tune_grain = tune_grain
         wj.state = JobState.READY
+        self._persist(wj)
         self.bus.publish()
         self._spawn(self._run_job(wj))
+
+    def set_grain(self, job_id: int, tune_grain: bool) -> None:
+        wj = self.jobs[job_id]
+        fut = wj._grain_future
+        if wj.state is not JobState.AWAITING_GRAIN or fut is None or fut.done():
+            raise ValueError(f"Job {job_id} is not awaiting a grain decision.")
+        fut.set_result(tune_grain)
+        self._persist(wj)
+        self.bus.publish()
 
     def remove(self, job_id: int) -> None:
         wj = self.jobs.get(job_id)
         if wj and wj.state in (JobState.DONE, JobState.FAILED,
                                JobState.AWAITING_TITLES, JobState.AWAITING_MAPPING):
             del self.jobs[job_id]
+            self.store.delete(job_id)
             self.bus.publish()
 
     # --- internals ------------------------------------------------------
@@ -144,15 +263,18 @@ class JobManager:
                 wj.assignments = job.assignments
                 wj.selected_title_ids = job.selected_title_ids
                 wj.state = JobState.READY
+                self._persist(wj)
                 self.bus.publish()
                 self._spawn(self._run_job(wj))
             else:
                 wj.state = JobState.AWAITING_TITLES
+                self._persist(wj)
                 self.bus.publish()
         except Exception as exc:
             wj.state = JobState.FAILED
             wj.error = f"{type(exc).__name__}: {exc}"
             reporter.on_event(f"Scan failed: {wj.error}")
+            self._persist(wj)
             self.bus.publish()
 
     async def _run_job(self, wj: WebJob) -> None:
@@ -160,6 +282,8 @@ class JobManager:
         job = wj._pipeline_job
         job.selected_title_ids = wj.selected_title_ids
         job.assignments = wj.assignments
+        job.grain_mode = wj.grain_mode
+        job.tune_grain = wj.tune_grain
         try:
             await self.pipeline.execute(job, self.scheduler, reporter, job_name=f"job_{wj.id}")
             wj.state = JobState.DONE
@@ -168,7 +292,7 @@ class JobManager:
         except Exception as exc:
             wj.state = JobState.FAILED
             wj.error = f"{type(exc).__name__}: {exc}"
-        # Mirror the pipeline's intermediate state onto the web job as it runs.
+        self._persist(wj)
         self.bus.publish()
 
     def _spawn(self, coro) -> None:
@@ -177,13 +301,20 @@ class JobManager:
         task.add_done_callback(self._tasks.discard)
         # Reflect live pipeline state transitions onto the web job.
 
+    _PARKED = (
+        JobState.DONE, JobState.FAILED, JobState.AWAITING_TITLES,
+        JobState.AWAITING_MAPPING, JobState.AWAITING_GRAIN,
+    )
+
+    def _live_state(self, wj: WebJob) -> JobState:
+        # The pipeline mutates its Job.state during execute; surface it unless
+        # the web job is at a parked gate (which the pipeline doesn't know about).
+        if wj._pipeline_job is not None and wj.state not in self._PARKED:
+            return getattr(wj._pipeline_job, "state", wj.state)
+        return wj.state
+
     def _job_dict(self, wj: WebJob) -> dict:
-        # The pipeline mutates its Job.state during execute; surface it.
-        live_state = wj.state
-        if wj._pipeline_job is not None and wj.state not in (
-            JobState.DONE, JobState.FAILED, JobState.AWAITING_TITLES, JobState.AWAITING_MAPPING
-        ):
-            live_state = getattr(wj._pipeline_job, "state", wj.state)
+        live_state = self._live_state(wj)
         return {
             "id": wj.id,
             "source": wj.source,
@@ -196,6 +327,10 @@ class JobManager:
             "titles": self._title_dict(wj) if wj.disc else [],
             "selected": wj.selected_title_ids,
             "outputs": wj.outputs,
+            "preview": (
+                {"off": f"/api/jobs/{wj.id}/preview/off", "on": f"/api/jobs/{wj.id}/preview/on"}
+                if live_state == JobState.AWAITING_GRAIN and wj.preview_off else None
+            ),
             "log": wj.log[-20:],
         }
 
