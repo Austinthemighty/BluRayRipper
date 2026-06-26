@@ -84,6 +84,7 @@ def parse_info(lines: list[str], source: str) -> DiscInfo:
     disc = DiscInfo(source=source)
     titles: dict[int, Title] = {}
     streams: dict[tuple[int, int], Stream] = {}
+    drv_devices: dict[int, str] = {}
 
     for line in lines:
         prefix, _, payload = line.partition(":")
@@ -102,9 +103,12 @@ def parse_info(lines: list[str], source: str) -> DiscInfo:
                 disc.volume_label = value
 
         elif prefix == "DRV" and len(fields) >= 6:
+            drv_index = _to_int(fields[0])
             disc_name = fields[5]
             if disc_name and not disc.disc_name:
                 disc.disc_name = disc_name
+            if len(fields) >= 7 and fields[6]:
+                drv_devices[drv_index] = fields[6]
 
         elif prefix == "TINFO" and len(fields) >= 4:
             title_id = _to_int(fields[0])
@@ -129,6 +133,14 @@ def parse_info(lines: list[str], source: str) -> DiscInfo:
         titles[title_id].streams.append(stream)
 
     disc.titles = [titles[k] for k in sorted(titles)]
+
+    # Resolve the OS device for the selected drive (for auto-eject).
+    if source.startswith(("disc:", "dev:")):
+        selector = source.split(":", 1)[1]
+        if selector.isdigit():
+            disc.drive_device = drv_devices.get(int(selector))
+        else:
+            disc.drive_device = selector  # dev:/dev/sr0 -> "/dev/sr0"
     return disc
 
 
@@ -173,9 +185,16 @@ class MakeMKV:
     def _bin(self) -> str:
         return self._settings.tools.require("makemkvcon")
 
-    async def scan(self, source: str) -> DiscInfo:
+    async def scan(
+        self, source: str, *, on_message: Callable[[str], None] | None = None
+    ) -> DiscInfo:
         """Scan a disc/folder/ISO. ``source`` is a makemkvcon selector:
-        e.g. 'disc:0', 'dev:/dev/sr0', 'file:/path/to/BDMV_parent', 'iso:/path'."""
+        e.g. 'disc:0', 'dev:/dev/sr0', 'file:/path/to/BDMV_parent', 'iso:/path'.
+
+        MakeMKV's MSG lines (registration state, disc-open errors, AACS/UHD
+        failures) are forwarded to ``on_message`` so the caller can surface the
+        real reason a scan returns no titles.
+        """
         cmd = [
             self._bin,
             "-r",
@@ -184,7 +203,14 @@ class MakeMKV:
             "info",
             source,
         ]
-        result = await process.run(cmd)
+
+        def handle(line: str) -> None:
+            if on_message is not None and line.startswith("MSG:"):
+                fields = _split_robot_line(line[4:])
+                if len(fields) >= 4:
+                    on_message(fields[3])
+
+        result = await process.run(cmd, on_line=handle)
         return parse_info(result.stdout_lines, source)
 
     async def rip_title(

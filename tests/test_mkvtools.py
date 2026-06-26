@@ -31,3 +31,28 @@ def test_pgs_detection_and_language():
     # SRT is not PGS; 'und' language becomes None.
     assert not tracks[4].is_pgs
     assert tracks[4].language is None
+
+
+FLAGGED = json.dumps(
+    {
+        "tracks": [
+            {"id": 0, "type": "subtitles", "codec": "HDMV PGS",
+             "properties": {"language": "eng", "default_track": True}},
+            {"id": 1, "type": "subtitles", "codec": "HDMV PGS",
+             "properties": {"language": "eng", "forced_track": True}},
+            {"id": 2, "type": "subtitles", "codec": "HDMV PGS",
+             "properties": {"language": "eng", "flag_hearing_impaired": True}},
+            {"id": 3, "type": "subtitles", "codec": "HDMV PGS",
+             "properties": {"language": "eng", "track_name": "English (SDH)"}},
+        ]
+    }
+)
+
+
+def test_forced_and_sdh_flags():
+    t = {x.track_id: x for x in parse_identify(FLAGGED)}
+    assert t[0].default and not t[0].forced and not t[0].sdh
+    assert t[1].forced
+    assert t[2].sdh
+    # Inferred from the track name when no explicit flag is set.
+    assert t[3].sdh

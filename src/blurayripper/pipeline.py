@@ -9,6 +9,7 @@ fingerprint is already known, the confirm gate is skipped automatically.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -19,9 +20,10 @@ from .models import DiscInfo, EpisodeAssignment, MediaKind
 from .services import library, naming
 from .services.mapping_store import MappingStore
 from .tools import discinfo
+from .tools.eject import eject
 from .tools.handbrake import EncodeProgress, HandBrake
 from .tools.makemkv import MakeMKV
-from .tools.mkvtools import MkvTools
+from .tools.mkvtools import MkvTools, SubtitleTrack
 from .tools.subtitleedit import SubtitleEdit
 
 
@@ -162,14 +164,31 @@ class Pipeline:
         # Rip
         job.state = JobState.RIPPING
         self.cb.on_event(f"Ripping title {title_id} ...")
+        title = job.disc.title(title_id) if job.disc else None
+        speed = _RipSpeed(total_bytes=title.size_bytes if title else 0)
         ripped = await self.makemkv.rip_title(
             job.source, title_id, rip_dir,
-            on_progress=lambda label, frac: self.cb.on_progress(f"rip:{label}", frac),
+            on_progress=lambda label, frac: self.cb.on_progress(
+                f"Rip t{title_id}: {label}{speed.update(frac)}", frac
+            ),
             on_message=self.cb.on_event,
         )
         if not ripped:
             raise RuntimeError(f"MakeMKV produced no output for title {title_id}.")
         ripped_mkv = ripped[0]
+
+        # Eject after the last title's rip so the disc is free while the long
+        # encode runs (the encode/OCR stages don't need the disc).
+        if (
+            self.settings.auto_eject
+            and title_id == job.selected_title_ids[-1]
+            and job.source.split(":", 1)[0] in ("disc", "dev")
+        ):
+            try:
+                eject(job.disc.drive_device if job.disc else None)
+                self.cb.on_event("Ejected disc — safe to load the next one.")
+            except Exception as exc:
+                self.cb.on_event(f"Auto-eject failed: {exc}")
 
         # Compute the final destination + extract subtitles (before encode drops them).
         video_dest = self._video_path_for(assignment)
@@ -187,16 +206,32 @@ class Pipeline:
         result.video_path = library.place(encoded, video_dest)
         self.cb.on_event(f"Placed video: {result.video_path}")
 
-        # OCR each extracted subtitle and place the SRT sidecar.
+        # OCR each extracted subtitle and place the SRT sidecar. Same-language
+        # tracks are disambiguated by forced/SDH flags and an index so they
+        # never collide on one filename.
         job.state = JobState.OCR_SUBS
-        for sup_path, language in sub_jobs:
+        default_lang = self.settings.languages.default.lower()
+        plain_counts: dict[str, int] = {}
+        for sup_path, track in sub_jobs:
+            language = track.language or "und"
             try:
                 srt = await self.subtitleedit.ocr_to_srt(sup_path, language, sub_dir)
             except Exception as exc:
                 self.cb.on_event(f"Subtitle OCR failed ({language}): {exc}")
                 continue
-            is_default = language.lower() == self.settings.languages.default.lower()
-            srt_dest = naming.subtitle_sidecar_path(video_dest, language, default=is_default)
+            is_default = False
+            index: int | None = None
+            if not track.forced and not track.sdh:
+                n = plain_counts.get(language, 0)
+                plain_counts[language] = n + 1
+                if n == 0:
+                    is_default = language.lower() == default_lang
+                else:
+                    index = n + 1  # second plain track -> .2, third -> .3, ...
+            srt_dest = naming.subtitle_sidecar_path(
+                video_dest, language,
+                default=is_default, forced=track.forced, sdh=track.sdh, index=index,
+            )
             library.place(srt, srt_dest)
             result.subtitle_paths.append(srt_dest)
             self.cb.on_event(f"Placed subtitle: {srt_dest.name}")
@@ -204,9 +239,15 @@ class Pipeline:
         job.state = JobState.PLACING
         return result
 
-    async def _extract_subs(self, ripped_mkv: Path, sub_dir: Path) -> list[tuple[Path, str]]:
-        """Extract kept-language PGS tracks to .sup files. Returns (sup, lang) list."""
-        jobs: list[tuple[Path, str]] = []
+    async def _extract_subs(
+        self, ripped_mkv: Path, sub_dir: Path
+    ) -> list[tuple[Path, SubtitleTrack]]:
+        """Extract kept-language PGS tracks to .sup files. Returns (sup, track).
+
+        The .sup filename includes the track id so multiple same-language tracks
+        get distinct files instead of overwriting each other.
+        """
+        jobs: list[tuple[Path, SubtitleTrack]] = []
         try:
             tracks = await self.mkvtools.identify_subtitles(ripped_mkv)
         except Exception as exc:
@@ -218,20 +259,24 @@ class Pipeline:
             if not self.settings.languages.is_kept(track.language):
                 continue
             lang = track.language or "und"
-            sup_path = sub_dir / f"{ripped_mkv.stem}.{lang}.sup"
+            sup_path = sub_dir / f"{ripped_mkv.stem}.t{track.track_id}.{lang}.sup"
             try:
                 await self.mkvtools.extract_track(ripped_mkv, track.track_id, sup_path)
-                jobs.append((sup_path, lang))
-                self.cb.on_event(f"Extracted {lang} PGS subtitle (track {track.track_id}).")
+                jobs.append((sup_path, track))
+                flags = "".join(f" [{f}]" for f, on in
+                                (("forced", track.forced), ("sdh", track.sdh)) if on)
+                self.cb.on_event(f"Extracted {lang} PGS subtitle (track {track.track_id}){flags}.")
             except Exception as exc:
                 self.cb.on_event(f"Subtitle extract failed (track {track.track_id}): {exc}")
         return jobs
 
     def _encode_progress(self, p: EncodeProgress) -> None:
-        label = p.state.lower()
+        parts = [p.state.lower()]
+        if p.fps:
+            parts.append(f"{p.fps:.0f} fps")
         if p.eta_seconds:
-            label = f"{label} (ETA {p.eta_seconds}s)"
-        self.cb.on_progress(f"encode:{label}", p.fraction)
+            parts.append(f"ETA {_fmt_eta(p.eta_seconds)}")
+        self.cb.on_progress(f"Encode: {' · '.join(parts)}", p.fraction)
 
     def _persist_mapping(self, job: Job) -> None:
         if job.auto_mapped or not job.assignments or not job.fingerprint:
@@ -260,3 +305,48 @@ class Pipeline:
 
 def _slug(text: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in text)[:40] or "job"
+
+
+# Blu-ray (including UHD BD) 1x read speed = 36 Mbit/s = 4.5 MB/s.
+_BD_1X_MBPS = 4.5
+
+
+class _RipSpeed:
+    """Estimates rip throughput (MB/s and BD x-rate) from progress + title size.
+
+    MakeMKV's robot output has no throughput field, so we infer it from how fast
+    the overall progress fraction advances against the title's byte size, with
+    light EMA smoothing and a ~1s recompute interval.
+    """
+
+    def __init__(self, total_bytes: int) -> None:
+        self._total = total_bytes
+        self._last_t = time.monotonic()
+        self._last_bytes = 0.0
+        self._mbps = 0.0
+
+    def update(self, frac: float | None) -> str:
+        if not self._total or frac is None:
+            return ""
+        now = time.monotonic()
+        bytes_done = frac * self._total
+        dt = now - self._last_t
+        if dt >= 1.0:
+            dbytes = bytes_done - self._last_bytes
+            if dbytes > 0:
+                inst = (dbytes / dt) / 1e6
+                self._mbps = inst if self._mbps == 0 else 0.6 * self._mbps + 0.4 * inst
+            self._last_t = now
+            self._last_bytes = bytes_done
+        if self._mbps <= 0:
+            return ""
+        return f" · {self._mbps:.1f} MB/s ({self._mbps / _BD_1X_MBPS:.1f}x)"
+
+
+def _fmt_eta(seconds: int) -> str:
+    s = int(seconds)
+    if s >= 3600:
+        return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+    if s >= 60:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s}s"

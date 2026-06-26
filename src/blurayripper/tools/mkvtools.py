@@ -16,10 +16,19 @@ class SubtitleTrack:
     codec: str
     language: str | None  # ISO 639-2/B 3-letter where available
     is_pgs: bool
+    forced: bool = False
+    sdh: bool = False  # hearing-impaired / SDH / closed-caption
+    name: str | None = None
+    default: bool = False
 
 
 def parse_identify(stdout: str) -> list[SubtitleTrack]:
-    """Pure parser for ``mkvmerge -J`` JSON output -> subtitle tracks."""
+    """Pure parser for ``mkvmerge -J`` JSON output -> subtitle tracks.
+
+    Captures forced / hearing-impaired flags (and infers them from the track
+    name when the explicit flags are absent) so same-language tracks can be
+    given distinct Plex sidecar names instead of colliding.
+    """
     data = json.loads(stdout)
     tracks: list[SubtitleTrack] = []
     for track in data.get("tracks", []):
@@ -30,12 +39,25 @@ def parse_identify(stdout: str) -> list[SubtitleTrack]:
         lang = props.get("language") or props.get("language_ietf")
         if lang in (None, "und", "", "zxx"):
             lang = None
+        name = props.get("track_name")
+        low = (name or "").lower()
+        forced = bool(props.get("forced_track", False)) or "forced" in low
+        sdh = (
+            bool(props.get("flag_hearing_impaired", False))
+            or "sdh" in low
+            or "hearing" in low
+            or low.strip() in ("cc", "closed caption", "closed captions")
+        )
         tracks.append(
             SubtitleTrack(
                 track_id=int(track["id"]),
                 codec=codec,
                 language=lang.lower() if lang else None,
                 is_pgs="PGS" in codec.upper(),
+                forced=forced,
+                sdh=sdh,
+                name=name,
+                default=bool(props.get("default_track", False)),
             )
         )
     return tracks

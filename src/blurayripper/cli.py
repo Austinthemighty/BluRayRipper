@@ -15,6 +15,7 @@ import asyncio
 import sys
 
 from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 
@@ -34,20 +35,43 @@ class CliCallbacks:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.tmdb = TMDBClient(settings.tmdb_api_key, settings.metadata_language)
-        self._last_pct = -1
-        self._last_stage = ""
+        self._progress: Progress | None = None
+        self._task = None
 
     # --- logging / progress ---
+    def _ensure_progress(self) -> Progress:
+        if self._progress is None:
+            self._progress = Progress(
+                SpinnerColumn(),
+                TextColumn("[bold cyan]{task.description}"),
+                BarColumn(bar_width=None),
+                TaskProgressColumn(),
+                console=console,
+                transient=False,
+            )
+            self._progress.start()
+            self._task = self._progress.add_task("starting…", total=1000)
+        return self._progress
+
     def on_event(self, message: str) -> None:
-        console.print(f"[dim]·[/dim] {message}")
+        # Route log lines through the progress console so they appear above the
+        # live bar instead of corrupting it.
+        if self._progress is not None:
+            self._progress.console.print(f"[dim]·[/dim] {message}")
+        else:
+            console.print(f"[dim]·[/dim] {message}")
 
     def on_progress(self, stage: str, fraction: float | None) -> None:
-        pct = int((fraction or 0) * 100)
-        if stage != self._last_stage or pct >= self._last_pct + 5:
-            self._last_stage = stage
-            self._last_pct = pct
-            bar = f"{pct:3d}%" if fraction is not None else "  …"
-            console.print(f"  [cyan]{bar}[/cyan] {stage}")
+        progress = self._ensure_progress()
+        if fraction is None:
+            progress.update(self._task, description=stage)
+        else:
+            progress.update(self._task, description=stage, completed=int(fraction * 1000))
+
+    def close(self) -> None:
+        if self._progress is not None:
+            self._progress.stop()
+            self._progress = None
 
     # --- title selection ---
     def select_titles(self, disc: DiscInfo) -> list[int]:
@@ -189,9 +213,19 @@ def _print_titles(disc: DiscInfo) -> None:
 
 async def _cmd_scan(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
-    disc = await MakeMKV(settings).scan(args.source)
+    messages: list[str] = []
+    disc = await MakeMKV(settings).scan(args.source, on_message=messages.append)
     console.print(f"[bold]Disc:[/bold] {disc.disc_name or 'unknown'}")
     _print_titles(disc)
+    if not disc.titles:
+        console.print("[yellow]No titles found. MakeMKV reported:[/yellow]")
+        for m in messages:
+            console.print(f"  [dim]{m}[/dim]")
+        console.print(
+            "[yellow]Common causes: no/again-unreadable disc, wrong drive index "
+            "(try `scan disc:99999` to list drives), MakeMKV registration expired, "
+            "or a UHD disc the drive can't open.[/yellow]"
+        )
     console.print(f"[dim]Fingerprint: {discinfo.disc_fingerprint(disc)}[/dim]")
     return 0
 
@@ -202,7 +236,10 @@ async def _cmd_rip(args: argparse.Namespace) -> int:
     if not settings.tmdb_api_key:
         console.print("[yellow]No TMDB key configured; naming will be manual.[/yellow]")
     pipeline = Pipeline(settings, callbacks)
-    job = await pipeline.run(args.source, job_name=args.name)
+    try:
+        job = await pipeline.run(args.source, job_name=args.name)
+    finally:
+        callbacks.close()
     console.print(f"[bold green]Finished[/bold green] with {len(job.results)} file(s).")
     for r in job.results:
         console.print(f"  {r.video_path}")
@@ -277,7 +314,8 @@ async def _cmd_check(args: argparse.Namespace) -> int:
 
     # Languages + TMDB
     console.print(
-        f"Languages: keep={settings.languages.keep}, default={settings.languages.default}"
+        f"Languages: keep={settings.languages.keep}, default={settings.languages.default}, "
+        f"audio tracks={settings.audio.tracks}"
     )
     if settings.tmdb_api_key:
         console.print("[green]TMDB key present[/green] (automatic naming lookups enabled).")

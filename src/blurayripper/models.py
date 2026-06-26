@@ -64,6 +64,7 @@ class DiscInfo:
     source: str  # makemkvcon source selector, e.g. "disc:0", "file:/path", "iso:/path"
     disc_name: str | None = None
     volume_label: str | None = None
+    drive_device: str | None = None  # OS device for eject, e.g. "F:" or "/dev/sr0"
     titles: list[Title] = field(default_factory=list)
 
     def title(self, title_id: int) -> Title | None:

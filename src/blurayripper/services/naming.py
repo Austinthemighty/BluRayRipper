@@ -73,10 +73,34 @@ def episode_video_path(
     return tv_root / show_folder / season_folder / f"{basename}.{container}"
 
 
-def subtitle_sidecar_path(video_path: Path, iso_639_2b: str, *, default: bool = False) -> Path:
-    """`Show - S01E09.en.srt` (or `.en.default.srt` for the primary language)."""
+def subtitle_sidecar_path(
+    video_path: Path,
+    iso_639_2b: str,
+    *,
+    default: bool = False,
+    forced: bool = False,
+    sdh: bool = False,
+    index: int | None = None,
+) -> Path:
+    """Plex subtitle sidecar name with language + optional modifiers.
+
+    Examples (basename ``Show - S01E09``):
+      main, default lang -> ``Show - S01E09.en.default.srt``
+      forced subtitles   -> ``Show - S01E09.en.forced.srt``
+      SDH / hearing-imp. -> ``Show - S01E09.en.sdh.srt``
+      extra plain track  -> ``Show - S01E09.en.2.srt`` (index disambiguator)
+
+    ``forced`` and ``sdh`` are Plex-recognized keywords; ``index`` keeps any
+    further same-language tracks from colliding.
+    """
     suffix = subtitle_lang_suffix(iso_639_2b)
     parts = [video_path.stem, suffix]
+    if forced:
+        parts.append("forced")
+    if sdh:
+        parts.append("sdh")
+    if index is not None:
+        parts.append(str(index))
     if default:
         parts.append("default")
     return video_path.with_name(".".join(parts) + ".srt")

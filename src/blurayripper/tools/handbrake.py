@@ -29,6 +29,7 @@ class EncodeProgress:
     state: str
     fraction: float | None = None
     eta_seconds: int | None = None
+    fps: float | None = None  # average encode rate (RateAvg) in frames/sec
 
 
 class HandBrakeJsonParser:
@@ -89,6 +90,7 @@ def _progress_from_block(obj: dict) -> EncodeProgress:
     state = obj.get("State", "")
     fraction = None
     eta = None
+    fps = None
     for key in ("Working", "Muxing", "Scanning", "WorkDone"):
         sub = obj.get(key)
         if isinstance(sub, dict):
@@ -96,8 +98,10 @@ def _progress_from_block(obj: dict) -> EncodeProgress:
                 fraction = sub.get("Progress")
             if "ETASeconds" in sub:
                 eta = sub.get("ETASeconds")
+            if "RateAvg" in sub:
+                fps = sub.get("RateAvg")
             break
-    return EncodeProgress(state=state, fraction=fraction, eta_seconds=eta)
+    return EncodeProgress(state=state, fraction=fraction, eta_seconds=eta, fps=fps)
 
 
 class HandBrake:
@@ -122,7 +126,9 @@ class HandBrake:
             "--json",
             "--audio-lang-list",
             ",".join(ordered),
-            "--all-audio",
+            # "main": only the first (primary) track per language; "all": every
+            # kept-language track including commentaries.
+            "--first-audio" if self._settings.audio.main_only else "--all-audio",
             # Override any subtitle handling in the preset. We extract PGS from
             # the ripped MKV and OCR to .srt sidecars separately, so HandBrake
             # must not select, embed, or burn-in subtitles (a preset with
