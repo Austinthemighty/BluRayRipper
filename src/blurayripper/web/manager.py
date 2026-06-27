@@ -32,6 +32,16 @@ from ..tools import discinfo
 from ..tools.makemkv import Drive
 
 
+_STATUS_CONTROL_C_EXIT = 3221225786  # 0xC000013A — Windows process terminated
+
+
+def _looks_interrupted(exc: Exception) -> bool:
+    """True if a failure looks like a killed subprocess (server shutdown) rather
+    than a genuine tool error — so the job should resume, not be marked failed."""
+    rc = getattr(getattr(exc, "result", None), "returncode", None)
+    return rc == _STATUS_CONTROL_C_EXIT or (isinstance(rc, int) and rc < 0)
+
+
 class EventBus:
     """Minimal fan-out: each subscriber gets a queue that receives a tick on
     any state change; the SSE handler then re-reads the snapshot."""
@@ -241,6 +251,22 @@ class JobManager:
         self.bus.publish()
         wj._task = self._spawn(self._run_job(wj))
 
+    def retry(self, job_id: int) -> None:
+        """Re-queue a failed job. It resumes from its checkpoints — a finished
+        rip is reused, so typically only the encode (and later stages) re-run."""
+        wj = self.jobs[job_id]
+        if wj.state is not JobState.FAILED:
+            raise ValueError(f"Job {job_id} is not failed.")
+        if wj._pipeline_job is None:
+            raise ValueError(f"Job {job_id} cannot be retried (no scan state).")
+        wj.error = None
+        wj.progress = 0.0
+        wj.state = JobState.READY
+        wj.log.append("Retrying…")
+        self._persist(wj)
+        self.bus.publish()
+        wj._task = self._spawn(self._run_job(wj))
+
     def set_grain(self, job_id: int, tune_grain: bool) -> None:
         wj = self.jobs[job_id]
         fut = wj._grain_future
@@ -311,8 +337,16 @@ class JobManager:
             wj.progress = 1.0
             wj.outputs = [str(r.video_path) for r in job.results if r.video_path]
         except Exception as exc:
-            wj.state = JobState.FAILED
-            wj.error = f"{type(exc).__name__}: {exc}"
+            if _looks_interrupted(exc):
+                # A tool was terminated (e.g. the server stopped mid-encode), not
+                # a real failure. Park as resumable so recovery picks it back up
+                # — its finished rip is reused, only the encode re-runs.
+                wj.state = JobState.READY
+                wj.error = None
+                wj.log.append("Interrupted (server stopping?) — will resume on restart.")
+            else:
+                wj.state = JobState.FAILED
+                wj.error = f"{type(exc).__name__}: {exc}"
         self._persist(wj)
         self.bus.publish()
 

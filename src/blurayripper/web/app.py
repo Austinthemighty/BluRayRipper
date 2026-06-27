@@ -154,6 +154,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _gate(lambda: manager.set_grain(job_id, body.tune_grain))
         return {"ok": True}
 
+    @app.post("/api/jobs/{job_id}/retry")
+    async def retry_job(job_id: int):
+        _gate(lambda: manager.retry(job_id))
+        return {"ok": True}
+
     @app.get("/api/jobs/{job_id}/preview/{which}")
     async def preview_image(job_id: int, which: str):
         wj = manager.jobs.get(job_id)
