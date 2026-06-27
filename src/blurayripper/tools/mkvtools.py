@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,12 +85,12 @@ class MkvTools:
 
     async def identify_subtitles(self, mkv_path: Path) -> list[SubtitleTrack]:
         cmd = [self._settings.tools.require("mkvmerge"), "-J", str(mkv_path)]
-        result = await process.run(cmd)
+        result = await asyncio.wait_for(process.run(cmd), timeout=120)
         return parse_identify("\n".join(result.stdout_lines))
 
     async def video_height(self, mkv_path: Path) -> int | None:
         cmd = [self._settings.tools.require("mkvmerge"), "-J", str(mkv_path)]
-        result = await process.run(cmd)
+        result = await asyncio.wait_for(process.run(cmd), timeout=120)
         return parse_video_height("\n".join(result.stdout_lines))
 
     async def extract_track(self, mkv_path: Path, track_id: int, out_path: Path) -> Path:
@@ -101,5 +102,7 @@ class MkvTools:
             str(mkv_path),
             f"{track_id}:{out_path}",
         ]
-        await process.run(cmd)
+        # Bounded so a stuck extraction (e.g. a flaky NAS handle) fails instead
+        # of hanging the job forever; generous enough for large UHD files.
+        await asyncio.wait_for(process.run(cmd), timeout=1800)
         return out_path
