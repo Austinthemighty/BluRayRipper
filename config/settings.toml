@@ -32,6 +32,9 @@ preset_name = "BluRay UHD"
 # Default film-grain handling (x265 --tune grain). Per-disc override in the web
 # UI; "preview" mode there renders a still comparison before encoding.
 tune_grain = false
+# Run encodes below normal OS priority so ripping and the UI stay responsive
+# (a 4K x265 encode otherwise pegs every core and starves new rips/drive scans).
+low_priority = true
 
 [languages]
 # ISO 639-2/B 3-letter codes (as MakeMKV/mkvmerge report them) to KEEP.

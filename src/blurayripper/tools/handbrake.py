@@ -181,7 +181,10 @@ class HandBrake:
                 if res is not None and hasattr(res, "__await__"):
                     await res
 
-        await process.run(self.build_command(src, dst, tune_grain=tune_grain), on_line=handle)
+        await process.run(
+            self.build_command(src, dst, tune_grain=tune_grain), on_line=handle,
+            low_priority=self._settings.encode.low_priority,
+        )
         return dst
 
     async def encode_clip(
@@ -192,5 +195,5 @@ class HandBrake:
         cmd = self.build_command(src, dst, tune_grain=tune_grain, start=start, duration=duration)
         # Drop audio for a quick, small preview clip.
         cmd += ["-a", "none"]
-        await process.run(cmd)
+        await process.run(cmd, low_priority=self._settings.encode.low_priority)
         return dst

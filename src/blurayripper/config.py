@@ -177,6 +177,7 @@ class EncodeSettings:
     preset_file: Path = DEFAULT_CONFIG_DIR / "presets.json"
     preset_name: str = "Plex H265 1080p"
     tune_grain: bool = False  # default; can be overridden per job in the UI
+    low_priority: bool = True  # run encodes below normal priority so rips stay fast
 
 
 @dataclass
@@ -300,6 +301,7 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         preset_file=_resolve_path(encode_cfg.get("preset_file", "config/presets.json"), REPO_ROOT),
         preset_name=encode_cfg.get("preset_name", "Plex H265 1080p"),
         tune_grain=bool(encode_cfg.get("tune_grain", False)),
+        low_priority=bool(encode_cfg.get("low_priority", True)),
     )
 
     lang_cfg = data.get("languages", {})
