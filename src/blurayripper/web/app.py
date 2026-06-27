@@ -149,7 +149,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.delete("/api/jobs/{job_id}")
     async def remove_job(job_id: int):
-        manager.remove(job_id)
+        await manager.remove(job_id)
         return {"ok": True}
 
     @app.get("/api/tmdb/search")
