@@ -419,7 +419,11 @@ class Pipeline:
                 report.on_event(
                     f"Extracting {lang} subtitle (track {track.track_id}) — "
                     "can take a few minutes on large files…")
-                await self.mkvtools.extract_track(ripped_mkv, track.track_id, sup_path)
+                await self.mkvtools.extract_track(
+                    ripped_mkv, track.track_id, sup_path,
+                    on_progress=lambda f, t=track.track_id, lg=lang: report.on_progress(
+                        f"Extracting {lg} subtitle (track {t})", f),
+                )
                 jobs.append((sup_path, track))
                 flags = "".join(f" [{f}]" for f, on in
                                 (("forced", track.forced), ("sdh", track.sdh)) if on)
