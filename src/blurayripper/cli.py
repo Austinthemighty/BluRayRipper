@@ -492,7 +492,10 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             "[yellow]Bound to all interfaces — reachable on your LAN with no login. "
             "Use only on a trusted network.[/yellow]"
         )
-    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    config = uvicorn.Config(
+        app, host=host, port=port, log_level="warning",
+        timeout_graceful_shutdown=5,  # don't wait forever on the SSE stream
+    )
     await uvicorn.Server(config).serve()
     return 0
 

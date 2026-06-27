@@ -159,6 +159,25 @@ async def test_interrupted_encode_becomes_ready_not_failed(manager, monkeypatch)
     assert wj.error is None
 
 
+async def test_shutdown_cancels_running_jobs(manager, monkeypatch):
+    started = asyncio.Event()
+
+    async def blocking_execute(job, scheduler, report, job_name=None):
+        started.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(manager.pipeline, "execute", blocking_execute)
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    manager.set_titles(wj.id, [0])
+    manager.set_mapping(wj.id, [EpisodeAssignment(0, MediaKind.MOVIE, "WarGames", 1983)])
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    await asyncio.wait_for(manager.shutdown(), timeout=2)  # must not hang
+    assert manager.closing is True
+    assert all(t.done() for t in manager._tasks)
+
+
 async def test_grain_preview_gate(manager, monkeypatch, tmp_path):
     async def exec_with_grain(job, scheduler, report, job_name=None):
         chosen = await report.resolve_grain(job, tmp_path / "off.png", tmp_path / "on.png")

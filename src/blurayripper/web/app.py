@@ -80,6 +80,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception as exc:  # don't block startup on a recovery hiccup
             print(f"Job recovery skipped: {exc}")
 
+    @app.on_event("shutdown")
+    async def _shutdown():
+        await manager.shutdown()
+
     @app.get("/")
     async def index():
         return FileResponse(_STATIC / "index.html")
@@ -202,13 +206,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             q = manager.bus.subscribe()
             try:
                 yield _sse(manager.snapshot())
-                while True:
+                while not manager.closing:
                     try:
                         await asyncio.wait_for(q.get(), timeout=15)
                         while not q.empty():
                             q.get_nowait()
                     except asyncio.TimeoutError:
                         pass  # heartbeat
+                    if manager.closing:
+                        break
                     yield _sse(manager.snapshot())
             finally:
                 manager.bus.unsubscribe(q)
