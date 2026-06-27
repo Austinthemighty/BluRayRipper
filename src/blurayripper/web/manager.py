@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import re
 from dataclasses import dataclass, field
 
 from ..config import Settings
@@ -40,6 +41,17 @@ def _looks_interrupted(exc: Exception) -> bool:
     than a genuine tool error — so the job should resume, not be marked failed."""
     rc = getattr(getattr(exc, "result", None), "returncode", None)
     return rc == _STATUS_CONTROL_C_EXIT or (isinstance(rc, int) and rc < 0)
+
+
+def _error_looks_interrupted(error: str | None) -> bool:
+    """Same idea, but for a persisted error string (used during recovery to tell
+    a shutdown-killed job from a genuinely failed one)."""
+    if not error:
+        return False
+    return (
+        str(_STATUS_CONTROL_C_EXIT) in error
+        or bool(re.search(r"Command failed \(-\d+\)", error))
+    )
 
 
 class EventBus:
@@ -194,10 +206,15 @@ class JobManager:
             wj = self._from_record(rec)
             self.jobs[wj.id] = wj
             max_id = max(max_id, wj.id)
-            if wj.state not in parked:
-                # Was running (or parked at the ephemeral grain gate): resume.
+            # Resume jobs that were mid-flight, plus FAILED jobs whose failure was
+            # actually a killed process (server shutdown), not a real error.
+            interrupted_fail = (
+                wj.state is JobState.FAILED and _error_looks_interrupted(wj.error)
+            )
+            if wj.state not in parked or interrupted_fail:
                 wj.state = JobState.READY
                 wj.progress = 0.0
+                wj.error = None
                 wj.log.append("Recovered after restart — resuming.")
                 wj._task = self._spawn(self._run_job(wj))
                 resumed += 1
