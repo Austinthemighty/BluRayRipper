@@ -141,8 +141,20 @@ class JobManager:
         self.store = store or make_store(settings.database_url)
         self.drive_names = DriveNames(
             settings.storage.output_dir / ".blurayripper" / "drive_names.json")
+        self.closing = False
         self._ids = itertools.count(1)
         self._tasks: set[asyncio.Task] = set()
+
+    async def shutdown(self) -> None:
+        """Stop cleanly: wake SSE streams, then cancel running job tasks (which
+        kills their rip/encode subprocesses) so the process can exit on Ctrl+C."""
+        self.closing = True
+        self.bus.publish()  # let SSE generators notice and close
+        tasks = [t for t in list(self._tasks) if not t.done()]
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def set_drive_name(self, device: str, name: str | None) -> None:
         self.drive_names.set(device, name)
