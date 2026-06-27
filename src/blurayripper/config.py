@@ -214,6 +214,8 @@ class Settings:
     queue: QueueSettings = field(default_factory=QueueSettings)
     auto_eject: bool = True
     min_length_seconds: int = 120
+    web_host: str = "127.0.0.1"  # set to 0.0.0.0 to allow LAN access (no auth!)
+    web_port: int = 8723
     database_url: str | None = None  # Postgres URL for crash recovery; None = in-memory
     tmdb_api_key: str | None = None
     metadata_language: str = "en-US"
@@ -323,6 +325,7 @@ def load_settings(config_dir: Path | None = None) -> Settings:
     meta_cfg = data.get("metadata", {})
     db_cfg = data.get("database", {})
     database_url = _override("BLURAYRIPPER_DATABASE_URL", db_cfg.get("url"))
+    web_cfg = data.get("web", {})
 
     return Settings(
         tools=tools,
@@ -334,6 +337,8 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         queue=queue,
         auto_eject=bool(disc_cfg.get("auto_eject", True)),
         min_length_seconds=int(scan_cfg.get("min_length_seconds", 120)),
+        web_host=web_cfg.get("host", "127.0.0.1"),
+        web_port=int(web_cfg.get("port", 8723)),
         database_url=database_url,
         tmdb_api_key=secrets.get("TMDB_API_KEY") or None,
         metadata_language=meta_cfg.get("language", "en-US"),

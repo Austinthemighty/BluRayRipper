@@ -482,9 +482,17 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     from .web.app import create_app
 
     settings = load_settings(args.config)
+    host = args.host or settings.web_host
+    port = args.port or settings.web_port
     app = create_app(settings)
-    console.print(f"[bold green]BluRayRipper UI[/bold green] → http://{args.host}:{args.port}")
-    config = uvicorn.Config(app, host=args.host, port=args.port, log_level="warning")
+    where = "all interfaces" if host == "0.0.0.0" else host
+    console.print(f"[bold green]BluRayRipper UI[/bold green] → http://{host}:{port}  ({where})")
+    if host == "0.0.0.0":
+        console.print(
+            "[yellow]Bound to all interfaces — reachable on your LAN with no login. "
+            "Use only on a trusted network.[/yellow]"
+        )
+    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     await uvicorn.Server(config).serve()
     return 0
 
@@ -518,8 +526,9 @@ def _build_parser() -> argparse.ArgumentParser:
     queue.set_defaults(func=_cmd_queue)
 
     serve = sub.add_parser("serve", help="Launch the local web UI to manage the rip queue")
-    serve.add_argument("--host", default="127.0.0.1", help="Bind host (default 127.0.0.1)")
-    serve.add_argument("--port", type=int, default=8723, help="Port (default 8723)")
+    serve.add_argument("--host", default=None,
+                       help="Bind host (overrides [web].host; use 0.0.0.0 for LAN access)")
+    serve.add_argument("--port", type=int, default=None, help="Port (overrides [web].port)")
     serve.set_defaults(func=_cmd_serve)
 
     db_init = sub.add_parser("db-init", help="Create/verify the Postgres schema for crash recovery")

@@ -59,6 +59,11 @@ class SetGrain(BaseModel):
     tune_grain: bool
 
 
+class NameDrive(BaseModel):
+    device: str
+    name: str | None = None  # null/empty clears the custom name
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
     app = FastAPI(title="BluRayRipper")
@@ -87,10 +92,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             found = await manager.list_drives()
         except ToolNotFoundError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        except (TimeoutError, asyncio.TimeoutError):
+            raise HTTPException(status_code=503, detail="Drive scan busy (rip in progress) — will retry.")
         return [
-            {"index": d.index, "name": d.name, "device": d.device, "disc_name": d.disc_name}
+            {
+                "index": d.index, "name": d.name, "device": d.device,
+                "disc_name": d.disc_name, "label": manager.drive_names.get(d.device),
+            }
             for d in found
         ]
+
+    @app.post("/api/drives/name")
+    async def name_drive(body: NameDrive):
+        manager.set_drive_name(body.device, body.name)
+        return {"ok": True}
 
     @app.get("/api/jobs")
     async def jobs():
