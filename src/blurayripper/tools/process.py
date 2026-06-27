@@ -28,11 +28,14 @@ class ProcessResult:
 
 class ProcessError(RuntimeError):
     def __init__(self, cmd: Sequence[str], result: ProcessResult) -> None:
-        tail = "\n".join(result.stdout_lines[-15:])
+        out_tail = "\n".join(result.stdout_lines[-15:])
+        # Show the END of stderr — the real error usually trails long banners
+        # (e.g. ffmpeg's build configuration) that would otherwise bury it.
+        err_tail = result.stderr.strip()[-2000:]
         super().__init__(
             f"Command failed ({result.returncode}): {cmd[0]}\n"
-            f"stderr: {result.stderr.strip()[:2000]}\n"
-            f"stdout tail:\n{tail}"
+            f"stderr tail: {err_tail}\n"
+            f"stdout tail:\n{out_tail}"
         )
         self.cmd = list(cmd)
         self.result = result
