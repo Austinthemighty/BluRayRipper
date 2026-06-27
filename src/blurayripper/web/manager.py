@@ -27,6 +27,7 @@ from ..persistence import (
 from ..pipeline import Job, JobState, Pipeline
 from ..scheduler import EncodeScheduler
 from ..services import library
+from ..services.drive_names import DriveNames
 from ..tools import discinfo
 from ..tools.makemkv import Drive
 
@@ -116,8 +117,13 @@ class JobManager:
         self.bus = EventBus()
         self.jobs: dict[int, WebJob] = {}
         self.store = store or make_store(settings.database_url)
+        self.drive_names = DriveNames(
+            settings.storage.output_dir / ".blurayripper" / "drive_names.json")
         self._ids = itertools.count(1)
         self._tasks: set[asyncio.Task] = set()
+
+    def set_drive_name(self, device: str, name: str | None) -> None:
+        self.drive_names.set(device, name)
 
     # --- persistence / recovery ----------------------------------------
 

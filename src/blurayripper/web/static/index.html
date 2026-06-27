@@ -71,7 +71,10 @@ async function api(method, url, body) {
   return r.status === 204 ? null : r.json();
 }
 
+let drivesLoading = false;
 async function loadDrives() {
+  if (drivesLoading) return;          // don't stack refreshes
+  drivesLoading = true;
   const el = document.getElementById('drives');
   try {
     const drives = await api('GET', '/api/drives');
@@ -80,15 +83,38 @@ async function loadDrives() {
     for (const d of drives) {
       const div = document.createElement('div');
       div.className = 'drive';
-      div.innerHTML = `<div><b>${d.disc_name || 'No disc'}</b><small>${d.name} · disc:${d.index} ${d.device||''}</small></div>`;
-      const b = document.createElement('button');
-      b.textContent = 'Add'; b.onclick = () => addDisc('disc:' + d.index);
-      div.appendChild(b); el.appendChild(div);
+      const title = d.label || ('Drive ' + (d.device || ('disc:' + d.index)));
+      const disc = d.disc_name ? d.disc_name : '<i>no disc / mounting…</i>';
+      div.innerHTML =
+        `<div><b>${title}</b><small>${disc} · disc:${d.index} ${d.device||''}</small></div>`;
+      const btns = document.createElement('div');
+      btns.style.cssText = 'display:flex;gap:6px;align-items:center;';
+      const add = document.createElement('button');
+      add.textContent = 'Add'; add.onclick = () => addDisc('disc:' + d.index);
+      const ren = document.createElement('button');
+      ren.className = 'sec'; ren.textContent = '✎'; ren.title = 'Name this drive';
+      ren.style.padding = '6px 9px';
+      ren.onclick = () => renameDrive(d);
+      btns.append(add, ren);
+      div.appendChild(btns); el.appendChild(div);
     }
-  } catch (e) { el.innerHTML = `<span class="muted">${e.message}</span>`; }
+  } catch (e) {
+    // Enumerating can be slow or briefly fail while a rip is active — keep the
+    // last-known list instead of blanking the panel; only show errors if empty.
+    if (!el.querySelector('.drive')) el.innerHTML = `<span class="muted">${e.message}</span>`;
+  } finally {
+    drivesLoading = false;
+  }
 }
 
 async function addDisc(source) { try { await api('POST','/api/jobs',{source}); } catch(e){ alert(e.message);} }
+async function renameDrive(d){
+  const current = d.label || '';
+  const name = prompt(`Name for drive ${d.device||('disc:'+d.index)} (blank to clear):`, current);
+  if (name === null) return;
+  try { await api('POST','/api/drives/name',{device:d.device,name}); await loadDrives(); }
+  catch(e){ alert(e.message); }
+}
 function addManual(){ const v=document.getElementById('manualSrc').value.trim(); if(v) addDisc(v); }
 
 function badgeClass(s){ if(s==='done')return'done'; if(s==='failed')return'failed'; if(s.startsWith('awaiting'))return'await'; return''; }
@@ -253,6 +279,7 @@ function buildGrain(card, j){
 const ev = new EventSource('/api/events');
 ev.onmessage = (m) => renderJobs(JSON.parse(m.data));
 loadDrives();
+setInterval(loadDrives, 10000);   // keep the drive list / loaded discs current
 fetch('/api/jobs').then(r=>r.json()).then(renderJobs).catch(()=>{});
 </script>
 </body>

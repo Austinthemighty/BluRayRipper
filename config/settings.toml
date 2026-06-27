@@ -66,6 +66,14 @@ remove_text_for_hi = false  # strip hearing-impaired tags during OCR
 provider = "tmdb"
 language = "en-US"
 
+[web]
+# Web UI bind address. "127.0.0.1" = this machine only (default, safest).
+# Set host = "0.0.0.0" to reach the UI from other devices on your LAN.
+# WARNING: there is no login — only expose on a trusted network, never to the
+# internet. You may also need to allow the port through Windows Firewall.
+host = "127.0.0.1"
+port = 8723
+
 [database]
 # Postgres URL enables crash recovery — jobs persist and resume after a restart
 # (a finished rip is never redone). Leave blank for in-memory (no persistence).

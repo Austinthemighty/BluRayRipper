@@ -20,6 +20,7 @@ Attribute IDs (AP_ItemAttributeId from MakeMKV's apdefs.h) we rely on:
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 from collections.abc import Awaitable, Callable
@@ -215,10 +216,16 @@ class MakeMKV:
     def _bin(self) -> str:
         return self._settings.tools.require("makemkvcon")
 
-    async def list_drives(self) -> list[Drive]:
-        """Enumerate optical drives (and any loaded disc) without opening a disc."""
+    async def list_drives(self, *, timeout: float = 30.0) -> list[Drive]:
+        """Enumerate optical drives (and any loaded disc) without opening a disc.
+
+        Bounded by a timeout: while a rip is active makemkvcon can be slow to
+        respond, and we don't want the drives endpoint to hang. On timeout the
+        subprocess is killed and a TimeoutError is raised so the UI keeps its
+        last-known list and retries on the next refresh.
+        """
         cmd = [self._bin, "-r", "--cache=1", "info", "disc:99999"]
-        result = await process.run(cmd, check=False)
+        result = await asyncio.wait_for(process.run(cmd, check=False), timeout=timeout)
         return parse_drives(result.stdout_lines)
 
     async def scan(
