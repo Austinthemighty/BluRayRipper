@@ -178,6 +178,47 @@ async def test_shutdown_cancels_running_jobs(manager, monkeypatch):
     assert all(t.done() for t in manager._tasks)
 
 
+async def test_add_mkv_file_skips_rip(manager, monkeypatch, tmp_path):
+    from blurayripper.tools.mkvtools import ProbedFile, SubtitleTrack
+
+    mkv = tmp_path / "WarGames.mkv"
+    mkv.write_bytes(b"data")
+
+    async def fake_probe(path):
+        return ProbedFile(
+            duration_seconds=6700, video_height=2160, audio_languages=["eng"],
+            subtitles=[SubtitleTrack(2, "HDMV PGS", "eng", True)],
+        )
+
+    monkeypatch.setattr(manager.pipeline.mkvtools, "probe", fake_probe)
+    ids = manager.add_source(str(mkv))
+    await _settle()
+
+    assert len(ids) == 1
+    wj = manager.jobs[ids[0]]
+    assert wj.state is JobState.AWAITING_MAPPING       # one title -> straight to naming
+    assert wj.selected_title_ids == [0]
+    assert wj.disc.disc_name == "WarGames"
+    # The provided file is pre-set as the "ripped" file so the rip is skipped.
+    assert wj._pipeline_job.checkpoints[0]["ripped_path"] == str(mkv)
+
+
+async def test_add_mkv_folder_creates_a_job_each(manager, monkeypatch, tmp_path):
+    from blurayripper.tools.mkvtools import ProbedFile
+
+    for n in ("a.mkv", "b.mkv"):
+        (tmp_path / n).write_bytes(b"x")
+
+    async def fake_probe(path):
+        return ProbedFile(0, None, [], [])
+
+    monkeypatch.setattr(manager.pipeline.mkvtools, "probe", fake_probe)
+    ids = manager.add_source(str(tmp_path))
+    await _settle()
+    assert len(ids) == 2
+    assert all(manager.jobs[i].state is JobState.AWAITING_MAPPING for i in ids)
+
+
 async def test_grain_preview_gate(manager, monkeypatch, tmp_path):
     async def exec_with_grain(job, scheduler, report, job_name=None):
         chosen = await report.resolve_grain(job, tmp_path / "off.png", tmp_path / "on.png")
