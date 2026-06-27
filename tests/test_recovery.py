@@ -61,6 +61,38 @@ async def test_recover_resumes_running_and_restores_others(tmp_path, monkeypatch
     assert next(manager._ids) == 8
 
 
+async def test_recover_resumes_interrupted_failed_job(tmp_path, monkeypatch):
+    settings = load_settings()
+    monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    store = MemoryStore()
+    # A job persisted FAILED by old code, but the error is a killed process.
+    store.save(JobRecord(
+        id=6, source="disc:0", state="failed", disc=_disc_dict(),
+        selected_title_ids=[0],
+        assignments=[assignment_to_dict(EpisodeAssignment(0, MediaKind.MOVIE, "WarGames", 1983))],
+        checkpoints={"0": {"ripped_path": "/x.mkv"}},
+        error="ProcessError: Command failed (3221225786): HandBrakeCLI.exe ...",
+    ))
+    # A genuinely failed job should NOT be resumed.
+    store.save(JobRecord(id=9, source="disc:1", state="failed",
+                         error="ProcessError: Command failed (2): bad disc"))
+
+    manager = JobManager(settings, store=store)
+    resumed = []
+
+    async def fake_execute(job, scheduler, report, job_name=None):
+        resumed.append(job)
+        return job
+
+    monkeypatch.setattr(manager.pipeline, "execute", fake_execute)
+    n = manager.recover()
+    await _settle()
+
+    assert n == 1
+    assert manager.jobs[6].state is JobState.DONE      # interrupted -> resumed -> done
+    assert manager.jobs[9].state is JobState.FAILED    # real failure stays failed
+
+
 async def test_jobs_persist_to_store_on_transitions(tmp_path, monkeypatch):
     settings = load_settings()
     monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
