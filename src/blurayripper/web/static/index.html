@@ -180,6 +180,12 @@ function liveUpdate(card, j){
     o.style.fontSize='12px'; o.textContent = j.outputs.join('\n');
     card.querySelector('[data-body]').prepend(o);
   }
+  if (j.state==='failed' && !card.querySelector('[data-retry]')) {
+    const b=document.createElement('button'); b.dataset.retry='1'; b.textContent='Retry';
+    b.style.marginTop='8px';
+    b.onclick=()=>api('POST','/api/jobs/'+j.id+'/retry').catch(e=>alert(e.message));
+    card.querySelector('[data-body]').appendChild(b);
+  }
 }
 
 function buildTitles(card, j){
