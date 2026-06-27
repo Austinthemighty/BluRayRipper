@@ -71,7 +71,7 @@ language = "en-US"
 # Set host = "0.0.0.0" to reach the UI from other devices on your LAN.
 # WARNING: there is no login — only expose on a trusted network, never to the
 # internet. You may also need to allow the port through Windows Firewall.
-host = "127.0.0.1"
+host = "0.0.0.0"
 port = 8723
 
 [database]
