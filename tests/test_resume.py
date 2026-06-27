@@ -92,3 +92,50 @@ async def test_finished_rip_is_reused(tmp_path, monkeypatch):
     assert calls["encode"] is True    # encode still happened (not checkpointed)
     assert res.video_path.exists()
     assert job.checkpoints[0]["placed"] is True
+
+
+async def test_resume_reuses_extracted_subtitles(tmp_path, monkeypatch):
+    p = _pipeline(tmp_path)
+    job, a = _job()
+    ripped_file = tmp_path / "prior_rip.mkv"
+    ripped_file.write_text("ripped data")
+    sup = tmp_path / "prior.eng.sup"
+    sup.write_text("pgs")
+    job.checkpoints = {0: {
+        "ripped_path": str(ripped_file),
+        "subs": [{"sup": str(sup), "track_id": 6, "language": "eng",
+                  "forced": False, "sdh": False, "codec": "HDMV PGS"}],
+    }}
+
+    calls = {"identify": False, "ocr": 0}
+
+    async def no_identify(*a, **k):
+        calls["identify"] = True
+        return []
+
+    async def fake_ocr(sup_path, language, out_dir):
+        calls["ocr"] += 1
+        srt = out_dir / (sup_path.stem + ".srt")
+        srt.parent.mkdir(parents=True, exist_ok=True)
+        srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nhi\n")
+        return srt
+
+    async def no_height(*a, **k):
+        return None
+
+    async def fake_encode(src, dst, *, on_progress=None, tune_grain=None):
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        Path(dst).write_text("enc")
+        return dst
+
+    monkeypatch.setattr(p.makemkv, "rip_title", no_height)  # must not be called anyway
+    monkeypatch.setattr(p.mkvtools, "identify_subtitles", no_identify)
+    monkeypatch.setattr(p.mkvtools, "video_height", no_height)
+    monkeypatch.setattr(p.subtitleedit, "ocr_to_srt", fake_ocr)
+    monkeypatch.setattr(p.handbrake, "encode", fake_encode)
+
+    res = await p._process_one(job, 0, a, tmp_path / "stage" / "job", EncodeScheduler(3), DummyReport())
+
+    assert calls["identify"] is False         # subtitle re-extraction skipped
+    assert calls["ocr"] == 1                  # but OCR still runs on the reused .sup
+    assert res.subtitle_paths and res.subtitle_paths[0].exists()

@@ -245,9 +245,17 @@ class Pipeline:
             except Exception as exc:
                 report.on_event(f"Auto-eject failed ({device or 'no device'}): {exc}")
 
-        # Extract subtitles (before encode drops them).
+        # Extract subtitles (before encode drops them). On resume, reuse the
+        # .sup files from the prior run instead of re-reading the whole (often
+        # NAS-hosted, multi-GB) ripped file.
         job.state = JobState.EXTRACTING_SUBS
-        sub_jobs = await self._extract_subs(ripped_mkv, sub_dir, report)
+        sub_jobs = self._reuse_subs(cp)
+        if sub_jobs is not None:
+            report.on_event(f"Reusing {len(sub_jobs)} previously-extracted subtitle(s).")
+        else:
+            sub_jobs = await self._extract_subs(ripped_mkv, sub_dir, report)
+            cp["subs"] = [_sub_checkpoint(sup, tr) for sup, tr in sub_jobs]
+            _checkpoint(report)
 
         # Resolve grain (may park at a preview gate) before reserving CPU.
         tune_grain = await self._resolve_grain(job, ripped_mkv, title_id, staging_root, report)
@@ -367,6 +375,24 @@ class Pipeline:
             report.on_event(f"Could not probe resolution ({exc}); assuming non-UHD weight.")
             return None
 
+    def _reuse_subs(self, cp: dict) -> list[tuple[Path, SubtitleTrack]] | None:
+        """Rebuild the (sup, track) list from a checkpoint if every .sup still
+        exists on disk; otherwise None (re-extract)."""
+        saved = cp.get("subs")
+        if saved is None:
+            return None
+        out: list[tuple[Path, SubtitleTrack]] = []
+        for s in saved:
+            sup = Path(s["sup"])
+            if not sup.exists():
+                return None
+            out.append((sup, SubtitleTrack(
+                track_id=s["track_id"], codec=s.get("codec", ""), language=s.get("language"),
+                is_pgs=True, forced=s.get("forced", False), sdh=s.get("sdh", False),
+                name=s.get("name"),
+            )))
+        return out
+
     async def _extract_subs(
         self, ripped_mkv: Path, sub_dir: Path, report
     ) -> list[tuple[Path, SubtitleTrack]]:
@@ -376,6 +402,7 @@ class Pipeline:
         get distinct files instead of overwriting each other.
         """
         jobs: list[tuple[Path, SubtitleTrack]] = []
+        report.on_event("Identifying subtitle tracks…")
         try:
             tracks = await self.mkvtools.identify_subtitles(ripped_mkv)
         except Exception as exc:
@@ -389,6 +416,9 @@ class Pipeline:
             lang = track.language or "und"
             sup_path = sub_dir / f"{ripped_mkv.stem}.t{track.track_id}.{lang}.sup"
             try:
+                report.on_event(
+                    f"Extracting {lang} subtitle (track {track.track_id}) — "
+                    "can take a few minutes on large files…")
                 await self.mkvtools.extract_track(ripped_mkv, track.track_id, sup_path)
                 jobs.append((sup_path, track))
                 flags = "".join(f" [{f}]" for f, on in
@@ -440,6 +470,16 @@ def _checkpoint(report) -> None:
     fn = getattr(report, "checkpoint", None)
     if fn is not None:
         fn()
+
+
+def _sub_checkpoint(sup: Path, track: SubtitleTrack) -> dict:
+    """Serialize an extracted subtitle so resume can reuse it without re-reading
+    the ripped file."""
+    return {
+        "sup": str(sup), "track_id": track.track_id, "codec": track.codec,
+        "language": track.language, "forced": track.forced, "sdh": track.sdh,
+        "name": track.name,
+    }
 
 
 # Blu-ray (including UHD BD) 1x read speed = 36 Mbit/s = 4.5 MB/s.
