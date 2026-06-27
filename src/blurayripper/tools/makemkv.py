@@ -216,7 +216,7 @@ class MakeMKV:
     def _bin(self) -> str:
         return self._settings.tools.require("makemkvcon")
 
-    async def list_drives(self, *, timeout: float = 30.0) -> list[Drive]:
+    async def list_drives(self, *, timeout: float = 60.0) -> list[Drive]:
         """Enumerate optical drives (and any loaded disc) without opening a disc.
 
         Bounded by a timeout: while a rip is active makemkvcon can be slow to
