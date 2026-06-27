@@ -57,7 +57,7 @@
   </div>
   <div class="panel">
     <h2>Queue</h2>
-    <div id="jobs"><span class="muted">No jobs yet. Add a disc from the left.</span></div>
+    <div id="jobs"><span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span></div>
   </div>
 </div>
 
@@ -95,8 +95,8 @@ function badgeClass(s){ if(s==='done')return'done'; if(s==='failed')return'faile
 
 function renderJobs(snap) {
   const host = document.getElementById('jobs');
-  if (!snap.jobs.length) { host.innerHTML = '<span class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); return; }
-  if (host.querySelector('.muted')) host.innerHTML='';
+  if (!snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); return; }
+  const ph = document.getElementById('placeholder'); if (ph) ph.remove();
   const seen = new Set();
   for (const j of snap.jobs) {
     seen.add(j.id);
@@ -108,6 +108,7 @@ function renderJobs(snap) {
       card.innerHTML = cardHtml(j);
       if (!card.parentNode) host.appendChild(card);
       renderedState[j.id] = j.state;
+      card.querySelector('[data-remove]').onclick = () => removeJob(j);
       if (j.state==='awaiting_titles') buildTitles(card, j);
       if (j.state==='awaiting_mapping') buildMapping(card, j);
       if (j.state==='awaiting_grain') buildGrain(card, j);
@@ -125,12 +126,21 @@ function renderedStateClear(){ for(const k of Object.keys(renderedState)) delete
 function cardHtml(j){
   return `<div class="top">
       <div><b>${j.disc_name || j.source}</b> <span class="muted">#${j.id}</span></div>
-      <span class="badge ${badgeClass(j.state)}" data-badge>${j.state.replace(/_/g,' ')}</span>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span class="badge ${badgeClass(j.state)}" data-badge>${j.state.replace(/_/g,' ')}</span>
+        <button class="sec" data-remove title="Remove from queue" style="padding:2px 9px;">✕</button>
+      </div>
     </div>
     <div class="bar"><div data-bar></div></div>
     <div class="stage" data-stage></div>
     <div data-body></div>
     <div class="log" data-log></div>`;
+}
+
+function removeJob(j){
+  const active = !['done','failed','awaiting_titles','awaiting_mapping','awaiting_grain'].includes(j.state);
+  if (active && !confirm('Cancel and remove this running job? In-progress rip/encode will be stopped.')) return;
+  api('DELETE','/api/jobs/'+j.id).catch(e=>alert(e.message));
 }
 
 function liveUpdate(card, j){
@@ -139,14 +149,10 @@ function liveUpdate(card, j){
   card.querySelector('[data-bar]').style.width = Math.round(j.progress*100)+'%';
   card.querySelector('[data-stage]').textContent = j.error ? ('⚠ '+j.error) : (j.stage||'');
   card.querySelector('[data-log]').textContent = (j.log||[]).join('\n');
-  if ((j.state==='done'||j.state==='failed') && !card.querySelector('[data-rm]')) {
-    const b=document.createElement('button'); b.className='sec'; b.textContent='Dismiss'; b.dataset.rm='1';
-    b.style.marginTop='8px'; b.onclick=()=>api('DELETE','/api/jobs/'+j.id);
-    card.querySelector('[data-body]').appendChild(b);
-    if (j.outputs && j.outputs.length) {
-      const o=document.createElement('div'); o.className='muted'; o.style.fontSize='12px';
-      o.textContent = j.outputs.join('\n'); card.querySelector('[data-body]').prepend(o);
-    }
+  if (j.state==='done' && j.outputs && j.outputs.length && !card.querySelector('[data-out]')) {
+    const o=document.createElement('div'); o.className='muted'; o.dataset.out='1';
+    o.style.fontSize='12px'; o.textContent = j.outputs.join('\n');
+    card.querySelector('[data-body]').prepend(o);
   }
 }
 

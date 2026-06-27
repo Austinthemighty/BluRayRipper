@@ -86,6 +86,35 @@ async def test_snapshot_shape(manager):
     assert snap["jobs"][0]["titles"][0]["id"] == 0
 
 
+async def test_remove_parked_job(manager):
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    assert wj.state is JobState.AWAITING_TITLES
+    await manager.remove(wj.id)
+    assert wj.id not in manager.jobs
+    assert wj.id not in {r.id for r in manager.store.load_all()}
+
+
+async def test_remove_cancels_running_job(manager, monkeypatch):
+    started = asyncio.Event()
+
+    async def blocking_execute(job, scheduler, report, job_name=None):
+        started.set()
+        await asyncio.sleep(3600)  # hang until cancelled by remove()
+
+    monkeypatch.setattr(manager.pipeline, "execute", blocking_execute)
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    manager.set_titles(wj.id, [0])
+    manager.set_mapping(wj.id, [EpisodeAssignment(0, MediaKind.MOVIE, "WarGames", 1983)])
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    assert wj.id in manager.jobs
+    await manager.remove(wj.id)
+    assert wj.id not in manager.jobs
+    assert wj.id not in {r.id for r in manager.store.load_all()}
+
+
 async def test_grain_preview_gate(manager, monkeypatch, tmp_path):
     async def exec_with_grain(job, scheduler, report, job_name=None):
         chosen = await report.resolve_grain(job, tmp_path / "off.png", tmp_path / "on.png")

@@ -26,6 +26,7 @@ from ..persistence import (
 )
 from ..pipeline import Job, JobState, Pipeline
 from ..scheduler import EncodeScheduler
+from ..services import library
 from ..tools import discinfo
 from ..tools.makemkv import Drive
 
@@ -70,6 +71,7 @@ class WebJob:
     preview_on: object = None   # Path to grain-on still
     _pipeline_job: object = None  # the underlying pipeline.Job once scanned
     _grain_future: object = None  # asyncio.Future resolved when user picks grain
+    _task: object = None          # the asyncio.Task running scan/process (for cancel)
 
 
 class _Reporter:
@@ -181,7 +183,7 @@ class JobManager:
                 wj.state = JobState.READY
                 wj.progress = 0.0
                 wj.log.append("Recovered after restart — resuming.")
-                self._spawn(self._run_job(wj))
+                wj._task = self._spawn(self._run_job(wj))
                 resumed += 1
         if max_id:
             self._ids = itertools.count(max_id + 1)
@@ -202,7 +204,7 @@ class JobManager:
         wj = WebJob(id=next(self._ids), source=source)
         self.jobs[wj.id] = wj
         self._persist(wj)
-        self._spawn(self._scan_job(wj))
+        wj._task = self._spawn(self._scan_job(wj))
         self.bus.publish()
         return wj
 
@@ -231,7 +233,7 @@ class JobManager:
         wj.state = JobState.READY
         self._persist(wj)
         self.bus.publish()
-        self._spawn(self._run_job(wj))
+        wj._task = self._spawn(self._run_job(wj))
 
     def set_grain(self, job_id: int, tune_grain: bool) -> None:
         wj = self.jobs[job_id]
@@ -242,13 +244,26 @@ class JobManager:
         self._persist(wj)
         self.bus.publish()
 
-    def remove(self, job_id: int) -> None:
+    async def remove(self, job_id: int) -> None:
+        """Remove any job from the queue. If it's running (or parked at the grain
+        gate), cancel its task — which kills the active rip/encode subprocess —
+        then clean up its staging dir and drop it from the store."""
         wj = self.jobs.get(job_id)
-        if wj and wj.state in (JobState.DONE, JobState.FAILED,
-                               JobState.AWAITING_TITLES, JobState.AWAITING_MAPPING):
-            del self.jobs[job_id]
-            self.store.delete(job_id)
+        if wj is None:
+            return
+        task = wj._task
+        if task is not None and not task.done():
+            wj.log.append("Removing — cancelling in-flight work…")
             self.bus.publish()
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        library.cleanup(self.settings.storage.staging_dir / f"job_{wj.id}")
+        self.jobs.pop(job_id, None)
+        self.store.delete(job_id)
+        self.bus.publish()
 
     # --- internals ------------------------------------------------------
 
@@ -265,7 +280,7 @@ class JobManager:
                 wj.state = JobState.READY
                 self._persist(wj)
                 self.bus.publish()
-                self._spawn(self._run_job(wj))
+                wj._task = self._spawn(self._run_job(wj))
             else:
                 wj.state = JobState.AWAITING_TITLES
                 self._persist(wj)
@@ -295,11 +310,11 @@ class JobManager:
         self._persist(wj)
         self.bus.publish()
 
-    def _spawn(self, coro) -> None:
+    def _spawn(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
-        # Reflect live pipeline state transitions onto the web job.
+        return task
 
     _PARKED = (
         JobState.DONE, JobState.FAILED, JobState.AWAITING_TITLES,
