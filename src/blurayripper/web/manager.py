@@ -13,9 +13,10 @@ import asyncio
 import itertools
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from ..config import Settings
-from ..models import DiscInfo, EpisodeAssignment, MediaKind
+from ..models import DiscInfo, EpisodeAssignment, MediaKind, Stream, StreamType, Title
 from ..persistence import (
     JobRecord,
     Store,
@@ -245,11 +246,33 @@ class JobManager:
 
     # --- commands -------------------------------------------------------
 
+    def add_source(self, source: str) -> list[int]:
+        """Add a disc selector (disc:/dev:/file:/iso:), a single .mkv file, or a
+        directory of .mkv files. Returns the created job id(s)."""
+        raw = source[4:] if source.startswith("mkv:") else source
+        path = Path(raw)
+        if path.is_dir():
+            mkvs = sorted(path.glob("*.mkv"))
+            if not mkvs:
+                raise ValueError(f"No .mkv files found in {path}")
+            return [self._add_mkv(m).id for m in mkvs]
+        if path.suffix.lower() == ".mkv" and path.is_file():
+            return [self._add_mkv(path).id]
+        return [self.add_disc(source).id]
+
     def add_disc(self, source: str) -> WebJob:
         wj = WebJob(id=next(self._ids), source=source)
         self.jobs[wj.id] = wj
         self._persist(wj)
         wj._task = self._spawn(self._scan_job(wj))
+        self.bus.publish()
+        return wj
+
+    def _add_mkv(self, path: Path) -> WebJob:
+        wj = WebJob(id=next(self._ids), source=str(path))
+        self.jobs[wj.id] = wj
+        self._persist(wj)
+        wj._task = self._spawn(self._scan_mkv(wj, path))
         self.bus.publish()
         return wj
 
@@ -350,6 +373,51 @@ class JobManager:
             wj.state = JobState.FAILED
             wj.error = f"{type(exc).__name__}: {exc}"
             reporter.on_event(f"Scan failed: {wj.error}")
+            self._persist(wj)
+            self.bus.publish()
+
+    async def _scan_mkv(self, wj: WebJob, path: Path) -> None:
+        """Set up a job from an existing .mkv: probe it, build a one-title disc,
+        and pre-set the rip checkpoint so the pipeline skips ripping and goes
+        straight to naming -> encode -> subtitles."""
+        reporter = _Reporter(self, wj)
+        try:
+            reporter.on_event(f"Reading {path.name} …")
+            try:
+                probe = await self.pipeline.mkvtools.probe(path)
+                audio_langs, subs, duration = probe.audio_languages, probe.subtitles, probe.duration_seconds
+            except Exception as exc:
+                reporter.on_event(f"Probe failed ({exc}); continuing with minimal info.")
+                audio_langs, subs, duration = [], [], 0
+
+            streams = [Stream(stream_id=0, stream_type=StreamType.VIDEO)]
+            sid = 1
+            for lang in audio_langs:
+                streams.append(Stream(stream_id=sid, stream_type=StreamType.AUDIO, language=lang))
+                sid += 1
+            for s in subs:
+                streams.append(Stream(stream_id=sid, stream_type=StreamType.SUBTITLE, language=s.language))
+                sid += 1
+
+            size = path.stat().st_size if path.exists() else 0
+            title = Title(title_id=0, duration_seconds=duration, size_bytes=size, streams=streams)
+            disc = DiscInfo(source=str(path), disc_name=path.stem, titles=[title])
+
+            job = Job(source=str(path))
+            job.disc = disc
+            job.selected_title_ids = [0]
+            job.checkpoints = {0: {"ripped_path": str(path)}}  # skip rip: reuse this file
+
+            wj._pipeline_job = job
+            wj.disc = disc
+            wj.selected_title_ids = [0]
+            wj.state = JobState.AWAITING_MAPPING  # one title; go straight to naming
+            self._persist(wj)
+            self.bus.publish()
+        except Exception as exc:
+            wj.state = JobState.FAILED
+            wj.error = f"{type(exc).__name__}: {exc}"
+            reporter.on_event(f"Setup failed: {wj.error}")
             self._persist(wj)
             self.bus.publish()
 

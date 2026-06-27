@@ -14,6 +14,14 @@ from . import process
 
 
 @dataclass
+class ProbedFile:
+    duration_seconds: int
+    video_height: int | None
+    audio_languages: list[str]
+    subtitles: list["SubtitleTrack"]
+
+
+@dataclass
 class SubtitleTrack:
     track_id: int
     codec: str
@@ -38,6 +46,25 @@ def parse_video_height(stdout: str) -> int | None:
             except (ValueError, IndexError):
                 return None
     return None
+
+
+def parse_probe(stdout: str) -> ProbedFile:
+    """Pure parser for ``mkvmerge -J`` -> duration, resolution, audio langs, subs."""
+    data = json.loads(stdout)
+    dur_ns = data.get("container", {}).get("properties", {}).get("duration")
+    duration = int(dur_ns / 1_000_000_000) if dur_ns else 0
+    audio: list[str] = []
+    for track in data.get("tracks", []):
+        if track.get("type") == "audio":
+            lang = track.get("properties", {}).get("language")
+            if lang and lang not in ("und", "zxx"):
+                audio.append(lang.lower())
+    return ProbedFile(
+        duration_seconds=duration,
+        video_height=parse_video_height(stdout),
+        audio_languages=audio,
+        subtitles=parse_identify(stdout),
+    )
 
 
 def parse_identify(stdout: str) -> list[SubtitleTrack]:
@@ -94,6 +121,11 @@ class MkvTools:
         cmd = [self._settings.tools.require("mkvmerge"), "-J", str(mkv_path)]
         result = await asyncio.wait_for(process.run(cmd), timeout=120)
         return parse_video_height("\n".join(result.stdout_lines))
+
+    async def probe(self, mkv_path: Path) -> ProbedFile:
+        cmd = [self._settings.tools.require("mkvmerge"), "-J", str(mkv_path)]
+        result = await asyncio.wait_for(process.run(cmd), timeout=120)
+        return parse_probe("\n".join(result.stdout_lines))
 
     async def extract_track(
         self, mkv_path: Path, track_id: int, out_path: Path,

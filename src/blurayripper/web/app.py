@@ -120,8 +120,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/jobs")
     async def add_job(body: AddDisc):
-        wj = manager.add_disc(body.source)
-        return {"id": wj.id}
+        try:
+            ids = manager.add_source(body.source)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"ids": ids}
 
     def _gate(fn):
         try:

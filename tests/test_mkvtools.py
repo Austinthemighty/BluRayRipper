@@ -49,6 +49,24 @@ FLAGGED = json.dumps(
 )
 
 
+def test_parse_probe():
+    from blurayripper.tools.mkvtools import parse_probe
+    sample = json.dumps({
+        "container": {"properties": {"duration": 6700_000_000_000}},  # ns
+        "tracks": [
+            {"type": "video", "properties": {"pixel_dimensions": "3840x2160"}},
+            {"type": "audio", "properties": {"language": "eng"}},
+            {"type": "audio", "properties": {"language": "pol"}},
+            {"id": 3, "type": "subtitles", "codec": "HDMV PGS", "properties": {"language": "eng"}},
+        ],
+    })
+    p = parse_probe(sample)
+    assert p.duration_seconds == 6700
+    assert p.video_height == 2160
+    assert p.audio_languages == ["eng", "pol"]
+    assert len(p.subtitles) == 1 and p.subtitles[0].is_pgs
+
+
 def test_forced_and_sdh_flags():
     t = {x.track_id: x for x in parse_identify(FLAGGED)}
     assert t[0].default and not t[0].forced and not t[0].sdh
