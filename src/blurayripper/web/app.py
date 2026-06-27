@@ -93,7 +93,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ToolNotFoundError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         except (TimeoutError, asyncio.TimeoutError):
-            raise HTTPException(status_code=503, detail="Drive scan busy (rip in progress) — will retry.")
+            raise HTTPException(
+                status_code=503,
+                detail="Drive scan timed out (system busy) — keeping last list, will retry.",
+            )
         return [
             {
                 "index": d.index, "name": d.name, "device": d.device,

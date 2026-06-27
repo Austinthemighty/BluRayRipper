@@ -8,6 +8,8 @@ progress and forward it to the CLI/SSE), and supports cancellation.
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
@@ -46,22 +48,33 @@ async def _maybe_await(value) -> None:
         await value
 
 
+def _low_priority_kwargs() -> dict:
+    """Spawn kwargs to run a child below normal priority, so CPU-heavy work
+    (encodes) yields to ripping and the UI instead of starving them."""
+    if sys.platform.startswith("win"):
+        return {"creationflags": 0x00004000}  # BELOW_NORMAL_PRIORITY_CLASS
+    return {"preexec_fn": lambda: os.nice(10)}  # POSIX: nicer scheduling
+
+
 async def run(
     cmd: Sequence[str],
     *,
     on_line: LineHandler | None = None,
     cwd: str | None = None,
     check: bool = True,
+    low_priority: bool = False,
 ) -> ProcessResult:
     """Run ``cmd``, streaming stdout lines to ``on_line``.
 
     Raises ``ProcessError`` on a non-zero exit when ``check`` is True.
+    ``low_priority`` runs the child below normal OS priority.
     """
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
+        **(_low_priority_kwargs() if low_priority else {}),
     )
     stdout_lines: list[str] = []
 
