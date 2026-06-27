@@ -24,7 +24,7 @@ class FFmpeg:
             "-ss", f"{at_seconds:.2f}",
             "-i", str(video),
             "-frames:v", "1",
-            "-q:v", "2",
+            "-update", "1",   # required by ffmpeg 7.x for single fixed-name images
             str(out_png),
         ]
         await process.run(cmd)
