@@ -91,13 +91,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/drives")
     async def drives():
-        # Served from the watcher's cache — fast, no per-request enumeration.
+        from ..config import ToolNotFoundError
+
+        # Prefer the watcher's cache; if it hasn't populated yet, do a one-off
+        # live scan so the panel isn't blank (and surface real errors).
+        found = manager.drives()
+        if not found:
+            try:
+                found = await manager.list_drives()
+                manager._drives_cache = found
+            except ToolNotFoundError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            except (TimeoutError, asyncio.TimeoutError):
+                raise HTTPException(
+                    status_code=503, detail="Drive scan timed out (system busy) — will retry.")
         return [
             {
                 "index": d.index, "name": d.name, "device": d.device,
                 "disc_name": d.disc_name, "label": manager.drive_names.get(d.device),
             }
-            for d in manager.drives()
+            for d in found
         ]
 
     @app.post("/api/drives/name")
