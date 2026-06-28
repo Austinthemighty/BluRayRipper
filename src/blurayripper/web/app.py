@@ -79,6 +79,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 print(f"Recovered {n} in-flight job(s) from the last run.")
         except Exception as exc:  # don't block startup on a recovery hiccup
             print(f"Job recovery skipped: {exc}")
+        manager.start_drive_watch()  # background drive polling + auto-open
 
     @app.on_event("shutdown")
     async def _shutdown():
@@ -90,23 +91,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/drives")
     async def drives():
-        from ..config import ToolNotFoundError
-
-        try:
-            found = await manager.list_drives()
-        except ToolNotFoundError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        except (TimeoutError, asyncio.TimeoutError):
-            raise HTTPException(
-                status_code=503,
-                detail="Drive scan timed out (system busy) — keeping last list, will retry.",
-            )
+        # Served from the watcher's cache — fast, no per-request enumeration.
         return [
             {
                 "index": d.index, "name": d.name, "device": d.device,
                 "disc_name": d.disc_name, "label": manager.drive_names.get(d.device),
             }
-            for d in found
+            for d in manager.drives()
         ]
 
     @app.post("/api/drives/name")
