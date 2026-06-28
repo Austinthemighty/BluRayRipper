@@ -484,6 +484,17 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
     host = args.host or settings.web_host
     port = args.port or settings.web_port
+
+    # Quiet a benign Windows/Proactor quirk: when a browser drops an SSE/HTTP
+    # connection, the loop logs ConnectionResetError (WinError 10054) from a
+    # teardown callback. Harmless — swallow just that, keep everything else.
+    def _quiet_disconnects(loop, context):
+        if isinstance(context.get("exception"), ConnectionResetError):
+            return
+        loop.default_exception_handler(context)
+
+    asyncio.get_running_loop().set_exception_handler(_quiet_disconnects)
+
     app = create_app(settings)
     where = "all interfaces" if host == "0.0.0.0" else host
     console.print(f"[bold green]BluRayRipper UI[/bold green] → http://{host}:{port}  ({where})")
