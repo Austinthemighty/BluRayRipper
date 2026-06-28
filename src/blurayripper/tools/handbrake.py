@@ -196,4 +196,8 @@ class HandBrake:
         # Drop audio for a quick, small preview clip.
         cmd += ["-a", "none"]
         await process.run(cmd, low_priority=self._settings.encode.low_priority)
+        if not dst.exists() or dst.stat().st_size == 0:
+            # HandBrake can exit 0 yet write nothing (e.g. seek past content);
+            # surface it clearly instead of letting the frame extractor fail.
+            raise RuntimeError(f"HandBrake produced no preview clip at {dst}")
         return dst

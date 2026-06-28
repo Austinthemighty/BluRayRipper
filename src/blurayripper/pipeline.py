@@ -295,7 +295,7 @@ class Pipeline:
             try:
                 srt = await self.subtitleedit.ocr_to_srt(sup_path, language, sub_dir)
             except Exception as exc:
-                report.on_event(f"Subtitle OCR failed ({language}): {exc}")
+                report.on_event(f"Subtitle OCR failed ({language}): {type(exc).__name__}: {exc}")
                 continue
             is_default = False
             index: int | None = None
@@ -345,7 +345,7 @@ class Pipeline:
             )
             return await resolver(job, off_png, on_png)
         except Exception as exc:
-            report.on_event(f"Grain preview failed ({exc}); using default.")
+            report.on_event(f"Grain preview failed ({type(exc).__name__}: {exc}); using default.")
             return default
 
     async def _generate_grain_preview(
@@ -372,7 +372,8 @@ class Pipeline:
         try:
             return await self.mkvtools.video_height(ripped_mkv)
         except Exception as exc:
-            report.on_event(f"Could not probe resolution ({exc}); assuming non-UHD weight.")
+            report.on_event(
+                f"Could not probe resolution ({type(exc).__name__}: {exc}); assuming non-UHD weight.")
             return None
 
     def _reuse_subs(self, cp: dict) -> list[tuple[Path, SubtitleTrack]] | None:
@@ -401,36 +402,34 @@ class Pipeline:
         The .sup filename includes the track id so multiple same-language tracks
         get distinct files instead of overwriting each other.
         """
-        jobs: list[tuple[Path, SubtitleTrack]] = []
         report.on_event("Identifying subtitle tracks…")
         try:
             tracks = await self.mkvtools.identify_subtitles(ripped_mkv)
         except Exception as exc:
-            report.on_event(f"Subtitle identify failed: {exc}")
-            return jobs
-        for track in tracks:
-            if not track.is_pgs:
-                continue
-            if not self.settings.languages.is_kept(track.language):
-                continue
-            lang = track.language or "und"
-            sup_path = sub_dir / f"{ripped_mkv.stem}.t{track.track_id}.{lang}.sup"
-            try:
-                report.on_event(
-                    f"Extracting {lang} subtitle (track {track.track_id}) — "
-                    "can take a few minutes on large files…")
-                await self.mkvtools.extract_track(
-                    ripped_mkv, track.track_id, sup_path,
-                    on_progress=lambda f, t=track.track_id, lg=lang: report.on_progress(
-                        f"Extracting {lg} subtitle (track {t})", f),
-                )
-                jobs.append((sup_path, track))
-                flags = "".join(f" [{f}]" for f, on in
-                                (("forced", track.forced), ("sdh", track.sdh)) if on)
-                report.on_event(f"Extracted {lang} PGS subtitle (track {track.track_id}){flags}.")
-            except Exception as exc:
-                report.on_event(f"Subtitle extract failed (track {track.track_id}): {exc}")
-        return jobs
+            report.on_event(f"Subtitle identify failed: {type(exc).__name__}: {exc}")
+            return []
+
+        kept = [
+            (track, sub_dir / f"{ripped_mkv.stem}.t{track.track_id}.{track.language or 'und'}.sup")
+            for track in tracks
+            if track.is_pgs and self.settings.languages.is_kept(track.language)
+        ]
+        if not kept:
+            return []
+
+        langs = ", ".join((t.language or "und") for t, _ in kept)
+        report.on_event(
+            f"Extracting {len(kept)} subtitle track(s) [{langs}] in one pass — "
+            "can take a few minutes on large files…")
+        try:
+            await self.mkvtools.extract_tracks(
+                ripped_mkv, [(t.track_id, p) for t, p in kept],
+                on_progress=lambda f: report.on_progress("Extracting subtitles", f),
+            )
+        except Exception as exc:
+            report.on_event(f"Subtitle extraction failed: {type(exc).__name__}: {exc}")
+            return []
+        return [(p, t) for t, p in kept]
 
     def _encode_progress(self, p: EncodeProgress, report) -> None:
         parts = [p.state.lower()]
