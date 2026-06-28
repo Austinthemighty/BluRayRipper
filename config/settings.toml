@@ -49,6 +49,11 @@ min_length_seconds = 120   # ignore titles shorter than this (drops menus/traile
 # Eject the disc automatically once ripping finishes (before the encode runs),
 # so you can swap in the next disc while encoding continues.
 auto_eject = true
+# Automatically scan a disc as soon as one is inserted (no need to click "Add").
+# Known discs auto-rip; new ones park at the naming step.
+auto_open = true
+# How often (seconds) the web UI checks the drives for inserted/ejected discs.
+poll_seconds = 15
 
 [queue]
 # Encode "budget" for the `queue` command. A UHD (2160p) encode costs 2 units,

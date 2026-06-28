@@ -178,6 +178,41 @@ async def test_shutdown_cancels_running_jobs(manager, monkeypatch):
     assert all(t.done() for t in manager._tasks)
 
 
+def test_auto_open_detects_new_discs(manager, monkeypatch):
+    from blurayripper.tools.makemkv import Drive
+
+    opened = []
+    monkeypatch.setattr(manager, "add_disc", lambda src: opened.append(src))
+
+    d0 = Drive(index=0, name="ASUS", device="F:", disc_name="WarGames")
+    d1 = Drive(index=1, name="ASUS", device="E:", disc_name=None)  # empty drive
+
+    manager._auto_open([d0, d1])
+    assert opened == ["disc:0"]               # only the drive with a disc
+
+    manager._auto_open([d0, d1])              # same disc still in -> no re-open
+    assert opened == ["disc:0"]
+
+    # Swap a new disc into drive 0 -> opens again.
+    d0b = Drive(index=0, name="ASUS", device="F:", disc_name="2001 A Space Odyssey")
+    manager._auto_open([d0b, d1])
+    assert opened == ["disc:0", "disc:0"]
+
+
+def test_auto_open_reinsert_same_disc_after_eject(manager, monkeypatch):
+    from blurayripper.tools.makemkv import Drive
+
+    opened = []
+    monkeypatch.setattr(manager, "add_disc", lambda src: opened.append(src))
+    full = Drive(index=0, name="ASUS", device="F:", disc_name="WarGames")
+    empty = Drive(index=0, name="ASUS", device="F:", disc_name=None)
+
+    manager._auto_open([full])
+    manager._auto_open([empty])      # ejected -> forget it
+    manager._auto_open([full])       # reinserted same disc -> opens again
+    assert opened == ["disc:0", "disc:0"]
+
+
 async def test_add_mkv_file_skips_rip(manager, monkeypatch, tmp_path):
     from blurayripper.tools.mkvtools import ProbedFile, SubtitleTrack
 

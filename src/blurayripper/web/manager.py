@@ -145,6 +145,8 @@ class JobManager:
         self.closing = False
         self._ids = itertools.count(1)
         self._tasks: set[asyncio.Task] = set()
+        self._drives_cache: list[Drive] = []
+        self._last_disc: dict[int, str] = {}  # drive index -> last auto-opened disc name
 
     async def shutdown(self) -> None:
         """Stop cleanly: wake SSE streams, then cancel running job tasks (which
@@ -239,7 +241,50 @@ class JobManager:
     # --- queries --------------------------------------------------------
 
     async def list_drives(self) -> list[Drive]:
+        """Live enumeration (used by the background watcher)."""
         return await self.pipeline.makemkv.list_drives()
+
+    def drives(self) -> list[Drive]:
+        """Cached drives (populated by the watcher); fast, no per-request scan."""
+        return self._drives_cache
+
+    def start_drive_watch(self) -> None:
+        self._spawn(self._watch_drives())
+
+    async def _watch_drives(self) -> None:
+        while not self.closing:
+            try:
+                self._drives_cache = await self.list_drives()
+                if self.settings.auto_open:
+                    self._auto_open(self._drives_cache)
+            except Exception:
+                pass  # keep the last cache; try again next tick
+            await asyncio.sleep(self.settings.drive_poll_seconds)
+
+    def _auto_open(self, drives: list[Drive]) -> None:
+        present = set()
+        for d in drives:
+            present.add(d.index)
+            name = (d.disc_name or "").strip()
+            if not name:
+                continue  # no disc / not yet readable
+            source = f"disc:{d.index}"
+            if self._last_disc.get(d.index) == name or self._has_active_job(source):
+                self._last_disc[d.index] = name  # already handled / in progress
+                continue
+            self._last_disc[d.index] = name
+            self.add_disc(source)  # new disc -> scan it
+        # Forget drives that are gone or now empty, so reinserting re-triggers.
+        empty = {d.index for d in drives if not (d.disc_name or "").strip()}
+        for idx in list(self._last_disc):
+            if idx not in present or idx in empty:
+                self._last_disc.pop(idx, None)
+
+    def _has_active_job(self, source: str) -> bool:
+        return any(
+            wj.source == source and self._live_state(wj) not in (JobState.DONE, JobState.FAILED)
+            for wj in self.jobs.values()
+        )
 
     def snapshot(self) -> dict:
         return {"jobs": [self._job_dict(j) for j in self.jobs.values()]}
