@@ -127,21 +127,18 @@ class MkvTools:
         result = await asyncio.wait_for(process.run(cmd), timeout=120)
         return parse_probe("\n".join(result.stdout_lines))
 
-    async def extract_track(
-        self, mkv_path: Path, track_id: int, out_path: Path,
+    async def extract_tracks(
+        self, mkv_path: Path, specs: list[tuple[int, Path]],
         *, on_progress: Callable[[float], None] | None = None,
-    ) -> Path:
-        """Extract one track to ``out_path`` (e.g. a .sup for a PGS subtitle).
-
-        Forwards mkvextract's "Progress: N%" so callers can show movement and
-        tell a slow extraction apart from a hung one."""
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        cmd = [
-            self._settings.tools.require("mkvextract"),
-            "tracks",
-            str(mkv_path),
-            f"{track_id}:{out_path}",
-        ]
+    ) -> None:
+        """Extract several tracks in a SINGLE mkvextract pass (one read of the
+        source file, not one per track). Forwards "Progress: N%"."""
+        if not specs:
+            return
+        for _, out in specs:
+            out.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [self._settings.tools.require("mkvextract"), "tracks", str(mkv_path)]
+        cmd += [f"{tid}:{out}" for tid, out in specs]
 
         def handle(line: str) -> None:
             if on_progress is not None:
@@ -152,4 +149,7 @@ class MkvTools:
         # Bounded so a stuck extraction (e.g. a flaky NAS handle) fails instead
         # of hanging the job forever; generous enough for large UHD files.
         await asyncio.wait_for(process.run(cmd, on_line=handle), timeout=1800)
+
+    async def extract_track(self, mkv_path: Path, track_id: int, out_path: Path) -> Path:
+        await self.extract_tracks(mkv_path, [(track_id, out_path)])
         return out_path
