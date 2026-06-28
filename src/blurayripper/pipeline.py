@@ -12,7 +12,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from .config import Settings
@@ -203,11 +203,13 @@ class Pipeline:
 
         # Rip — but if a prior run's ripped file is still on disk, reuse it
         # (the rip is the disc-dependent step we most want to avoid redoing).
+        staging_dir = self.settings.storage.staging_dir
         prior_rip = cp.get("ripped_path")
+        prior_path = _resolve_path(staging_dir, prior_rip) if prior_rip else None
         did_rip = False
-        if prior_rip and Path(prior_rip).exists():
+        if prior_path and prior_path.exists():
             report.on_event(f"Resuming title {title_id}: reusing ripped file.")
-            ripped_mkv = Path(prior_rip)
+            ripped_mkv = prior_path
         else:
             job.state = JobState.RIPPING
             report.on_event(f"Ripping title {title_id} ...")
@@ -223,7 +225,7 @@ class Pipeline:
             if not ripped:
                 raise RuntimeError(f"MakeMKV produced no output for title {title_id}.")
             ripped_mkv = ripped[0]
-            cp["ripped_path"] = str(ripped_mkv)
+            cp["ripped_path"] = _rel_path(staging_dir, ripped_mkv)
             did_rip = True
             _checkpoint(report)
 
@@ -260,7 +262,10 @@ class Pipeline:
                 sub_jobs = []
             else:
                 sub_jobs = extracted
-                cp["subs"] = [_sub_checkpoint(sup, tr) for sup, tr in sub_jobs]
+                cp["subs"] = [
+                    _sub_checkpoint(self.settings.storage.staging_dir, sup, tr)
+                    for sup, tr in sub_jobs
+                ]
                 _checkpoint(report)
 
         # Resolve grain (may park at a preview gate) before reserving CPU.
@@ -393,7 +398,7 @@ class Pipeline:
             return None
         out: list[tuple[Path, SubtitleTrack]] = []
         for s in saved:
-            sup = Path(s["sup"])
+            sup = _resolve_path(self.settings.storage.staging_dir, s["sup"])
             if not sup.exists():
                 return None
             out.append((sup, SubtitleTrack(
@@ -484,14 +489,35 @@ def _checkpoint(report) -> None:
         fn()
 
 
-def _sub_checkpoint(sup: Path, track: SubtitleTrack) -> dict:
-    """Serialize an extracted subtitle so resume can reuse it without re-reading
-    the ripped file."""
+def _sub_checkpoint(root: Path, sup: Path, track: SubtitleTrack) -> dict:
+    """Serialize an extracted subtitle so resume reuse works on ANY machine:
+    the .sup path is stored relative to the staging root, OS-neutral."""
     return {
-        "sup": str(sup), "track_id": track.track_id, "codec": track.codec,
+        "sup": _rel_path(root, sup), "track_id": track.track_id, "codec": track.codec,
         "language": track.language, "forced": track.forced, "sdh": track.sdh,
         "name": track.name,
     }
+
+
+def _is_abs_stored(rel: str) -> bool:
+    # POSIX absolute ("/x") or Windows drive ("C:\..").
+    return rel.startswith("/") or (len(rel) >= 2 and rel[1] == ":")
+
+
+def _rel_path(root: Path, p: Path) -> str:
+    """Path relative to ``root`` as a POSIX string (portable across machines /
+    OSes). Falls back to the absolute string if it isn't under root."""
+    try:
+        return PurePosixPath(Path(p).relative_to(root)).as_posix()
+    except ValueError:
+        return str(p)
+
+
+def _resolve_path(root: Path, rel: str) -> Path:
+    """Resolve a stored (relative or absolute) path against this machine's root."""
+    if _is_abs_stored(rel):
+        return Path(rel)
+    return Path(root).joinpath(*PurePosixPath(rel).parts)
 
 
 # Blu-ray (including UHD BD) 1x read speed = 36 Mbit/s = 4.5 MB/s.
