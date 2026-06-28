@@ -147,6 +147,7 @@ class JobManager:
         self._tasks: set[asyncio.Task] = set()
         self._drives_cache: list[Drive] = []
         self._last_disc: dict[int, str] = {}  # drive index -> last auto-opened disc name
+        self._last_drive_error: str | None = None
 
     async def shutdown(self) -> None:
         """Stop cleanly: wake SSE streams, then cancel running job tasks (which
@@ -255,10 +256,15 @@ class JobManager:
         while not self.closing:
             try:
                 self._drives_cache = await self.list_drives()
+                self._last_drive_error = None
                 if self.settings.auto_open:
                     self._auto_open(self._drives_cache)
-            except Exception:
-                pass  # keep the last cache; try again next tick
+            except Exception as exc:
+                # Keep the last cache; log the cause once (not every tick).
+                msg = f"{type(exc).__name__}: {exc}"
+                if msg != self._last_drive_error:
+                    print(f"[drives] scan failed: {msg}")
+                    self._last_drive_error = msg
             await asyncio.sleep(self.settings.drive_poll_seconds)
 
     def _auto_open(self, drives: list[Drive]) -> None:
