@@ -293,7 +293,19 @@ class JobManager:
         )
 
     def snapshot(self) -> dict:
-        return {"jobs": [self._job_dict(j) for j in self.jobs.values()]}
+        jobs = []
+        for j in self.jobs.values():
+            try:
+                jobs.append(self._job_dict(j))
+            except Exception as exc:  # one bad job must not break the whole stream
+                print(f"[snapshot] job {j.id} render failed: {type(exc).__name__}: {exc}")
+                jobs.append({
+                    "id": j.id, "source": j.source, "state": "failed", "stage": "",
+                    "progress": 0, "error": f"render error: {exc}", "disc_name": None,
+                    "kind_guess": None, "titles": [], "selected": [], "outputs": [],
+                    "preview": None, "log": [],
+                })
+        return {"jobs": jobs}
 
     # --- commands -------------------------------------------------------
 
