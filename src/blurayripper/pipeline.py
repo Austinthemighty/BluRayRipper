@@ -253,9 +253,15 @@ class Pipeline:
         if sub_jobs is not None:
             report.on_event(f"Reusing {len(sub_jobs)} previously-extracted subtitle(s).")
         else:
-            sub_jobs = await self._extract_subs(ripped_mkv, sub_dir, report)
-            cp["subs"] = [_sub_checkpoint(sup, tr) for sup, tr in sub_jobs]
-            _checkpoint(report)
+            extracted = await self._extract_subs(ripped_mkv, sub_dir, report)
+            if extracted is None:
+                # Extraction failed this run — don't checkpoint, so a retry
+                # re-attempts instead of recording "0 subtitles done".
+                sub_jobs = []
+            else:
+                sub_jobs = extracted
+                cp["subs"] = [_sub_checkpoint(sup, tr) for sup, tr in sub_jobs]
+                _checkpoint(report)
 
         # Resolve grain (may park at a preview gate) before reserving CPU.
         tune_grain = await self._resolve_grain(job, ripped_mkv, title_id, staging_root, report)
@@ -378,9 +384,12 @@ class Pipeline:
 
     def _reuse_subs(self, cp: dict) -> list[tuple[Path, SubtitleTrack]] | None:
         """Rebuild the (sup, track) list from a checkpoint if every .sup still
-        exists on disk; otherwise None (re-extract)."""
+        exists on disk; otherwise None (re-extract).
+
+        An empty/absent checkpoint returns None so we re-run the (cheap) identify
+        rather than trusting a possibly-failed prior extraction that recorded 0."""
         saved = cp.get("subs")
-        if saved is None:
+        if not saved:
             return None
         out: list[tuple[Path, SubtitleTrack]] = []
         for s in saved:
@@ -407,7 +416,7 @@ class Pipeline:
             tracks = await self.mkvtools.identify_subtitles(ripped_mkv)
         except Exception as exc:
             report.on_event(f"Subtitle identify failed: {type(exc).__name__}: {exc}")
-            return []
+            return None  # failed (not "no subs") -> caller won't checkpoint
 
         kept = [
             (track, sub_dir / f"{ripped_mkv.stem}.t{track.track_id}.{track.language or 'und'}.sup")
@@ -415,7 +424,7 @@ class Pipeline:
             if track.is_pgs and self.settings.languages.is_kept(track.language)
         ]
         if not kept:
-            return []
+            return []  # genuinely no kept subtitles
 
         langs = ", ".join((t.language or "und") for t, _ in kept)
         report.on_event(
@@ -428,7 +437,7 @@ class Pipeline:
             )
         except Exception as exc:
             report.on_event(f"Subtitle extraction failed: {type(exc).__name__}: {exc}")
-            return []
+            return None
         return [(p, t) for t, p in kept]
 
     def _encode_progress(self, p: EncodeProgress, report) -> None:

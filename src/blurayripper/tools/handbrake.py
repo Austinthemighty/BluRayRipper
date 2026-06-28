@@ -190,12 +190,28 @@ class HandBrake:
     async def encode_clip(
         self, src: Path, dst: Path, *, start: float, duration: float, tune_grain: bool
     ) -> Path:
-        """Encode a short segment (no audio/subs) for grain previews."""
+        """Encode a short, video-only segment for grain previews.
+
+        Built minimally (no audio/subtitle selection) to avoid the full-encode
+        builder's conflicting audio flags, which made HandBrake exit 0 with no
+        output."""
         dst.parent.mkdir(parents=True, exist_ok=True)
-        cmd = self.build_command(src, dst, tune_grain=tune_grain, start=start, duration=duration)
-        # Drop audio for a quick, small preview clip.
-        cmd += ["-a", "none"]
-        await process.run(cmd, low_priority=self._settings.encode.low_priority)
+        enc = self._settings.encode
+        cmd = [
+            self._settings.tools.require("handbrakecli"),
+            "--preset-import-file", str(enc.preset_file),
+            "-Z", enc.preset_name,
+            "-i", str(src),
+            "-o", str(dst),
+            "--json",
+            "--start-at", f"seconds:{start:.0f}",
+            "--stop-at", f"seconds:{duration:.0f}",
+            "-a", "none",
+            "-s", "none",
+        ]
+        if self._effective_grain(tune_grain):
+            cmd += ["--encoder-tune", "grain"]
+        await process.run(cmd, low_priority=enc.low_priority)
         if not dst.exists() or dst.stat().st_size == 0:
             # HandBrake can exit 0 yet write nothing (e.g. seek past content);
             # surface it clearly instead of letting the frame extractor fail.
