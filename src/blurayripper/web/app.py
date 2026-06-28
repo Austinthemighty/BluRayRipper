@@ -212,7 +212,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         async def stream():
             q = manager.bus.subscribe()
             try:
-                yield _sse(manager.snapshot())
+                first = _safe_sse(manager)
+                if first:
+                    yield first
                 while not manager.closing:
                     try:
                         await asyncio.wait_for(q.get(), timeout=15)
@@ -222,7 +224,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         pass  # heartbeat
                     if manager.closing:
                         break
-                    yield _sse(manager.snapshot())
+                    msg = _safe_sse(manager)
+                    if msg:
+                        yield msg
             finally:
                 manager.bus.unsubscribe(q)
 
@@ -233,3 +237,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
+
+
+def _safe_sse(manager) -> str | None:
+    """Serialize a snapshot to an SSE frame; never raise (which would truncate
+    the stream and cause a client JSON parse error). Returns None on failure."""
+    try:
+        return _sse(manager.snapshot())
+    except Exception as exc:
+        print(f"[sse] snapshot serialize failed: {type(exc).__name__}: {exc}")
+        return None

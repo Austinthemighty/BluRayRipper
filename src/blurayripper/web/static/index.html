@@ -283,7 +283,7 @@ function buildGrain(card, j){
 
 // live updates via SSE
 const ev = new EventSource('/api/events');
-ev.onmessage = (m) => renderJobs(JSON.parse(m.data));
+ev.onmessage = (m) => { try { renderJobs(JSON.parse(m.data)); } catch (e) { /* ignore a partial/empty frame */ } };
 loadDrives();
 setInterval(loadDrives, 10000);   // keep the drive list / loaded discs current
 fetch('/api/jobs').then(r=>r.json()).then(renderJobs).catch(()=>{});
