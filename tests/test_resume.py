@@ -139,3 +139,34 @@ async def test_resume_reuses_extracted_subtitles(tmp_path, monkeypatch):
     assert calls["identify"] is False         # subtitle re-extraction skipped
     assert calls["ocr"] == 1                  # but OCR still runs on the reused .sup
     assert res.subtitle_paths and res.subtitle_paths[0].exists()
+
+
+async def test_empty_subs_checkpoint_triggers_reextract(tmp_path, monkeypatch):
+    """A prior failed extraction recorded subs=[]; that must NOT be treated as
+    'done' — identify should run again."""
+    p = _pipeline(tmp_path)
+    job, a = _job()
+    ripped = tmp_path / "r.mkv"
+    ripped.write_text("x")
+    job.checkpoints = {0: {"ripped_path": str(ripped), "subs": []}}
+
+    calls = {"identify": False}
+
+    async def identify(*args, **kwargs):
+        calls["identify"] = True
+        return []  # genuinely no PGS subs this time
+
+    async def no_height(*args, **kwargs):
+        return None
+
+    async def fake_encode(src, dst, *, on_progress=None, tune_grain=None):
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        Path(dst).write_text("enc")
+        return dst
+
+    monkeypatch.setattr(p.mkvtools, "identify_subtitles", identify)
+    monkeypatch.setattr(p.mkvtools, "video_height", no_height)
+    monkeypatch.setattr(p.handbrake, "encode", fake_encode)
+
+    await p._process_one(job, 0, a, tmp_path / "stage" / "job", EncodeScheduler(3), DummyReport())
+    assert calls["identify"] is True   # empty checkpoint -> re-identified, not skipped
