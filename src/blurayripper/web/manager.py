@@ -554,13 +554,14 @@ class JobManager:
         job.tune_grain = wj.tune_grain
         try:
             if self.settings.cluster.use_workers:
-                # Clustered: rip here, then enqueue for a worker to encode.
+                # Clustered: rip + subtitles + grain here, then enqueue for a
+                # worker to do only the (heavy) encode.
                 staging_root = self.settings.storage.staging_dir / f"job_{wj.id}"
-                await self.pipeline.rip_phase(job, staging_root, reporter)
+                await self.pipeline.prep_phase(job, staging_root, reporter)
                 self.pipeline._persist_mapping(job, reporter)
                 job.state = JobState.READY
                 wj.state = JobState.READY  # claimable by a worker
-                reporter.on_event("Ripped — queued for an encode worker.")
+                reporter.on_event("Ripped + subtitles done — queued for an encode worker.")
                 self._persist(wj)
                 self.bus.publish()
                 return

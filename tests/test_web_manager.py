@@ -96,7 +96,7 @@ async def test_clustered_mode_rips_then_enqueues(manager, monkeypatch):
     async def fake_execute(*a, **k):
         executed.append(1)
 
-    monkeypatch.setattr(manager.pipeline, "rip_phase", fake_rip)
+    monkeypatch.setattr(manager.pipeline, "prep_phase", fake_rip)
     monkeypatch.setattr(manager.pipeline, "_persist_mapping", lambda job, report: None)
     monkeypatch.setattr(manager.pipeline, "execute", fake_execute)
 
@@ -116,7 +116,7 @@ async def test_edit_job_updates_grain_and_edition(manager, monkeypatch):
     async def fake_rip(job, staging_root, report):
         pass
 
-    monkeypatch.setattr(manager.pipeline, "rip_phase", fake_rip)
+    monkeypatch.setattr(manager.pipeline, "prep_phase", fake_rip)
     monkeypatch.setattr(manager.pipeline, "_persist_mapping", lambda job, report: None)
 
     wj = manager.add_disc("disc:0")
