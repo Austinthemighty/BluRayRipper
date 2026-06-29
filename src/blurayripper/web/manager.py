@@ -252,6 +252,45 @@ class JobManager:
     def start_drive_watch(self) -> None:
         self._spawn(self._watch_drives())
 
+    def start_store_refresh(self) -> None:
+        # Only needed when workers process jobs elsewhere; then the store is the
+        # source of truth for their progress.
+        if self.settings.cluster.use_workers and self.store.durable:
+            self._spawn(self._refresh_from_store())
+
+    _WORKER_OWNED = (
+        JobState.READY, JobState.ENCODING, JobState.EXTRACTING_SUBS,
+        JobState.OCR_SUBS, JobState.PLACING, JobState.DONE, JobState.FAILED,
+    )
+
+    async def _refresh_from_store(self) -> None:
+        while not self.closing:
+            try:
+                records = {r.id: r for r in self.store.load_all()}
+                changed = False
+                for wj in list(self.jobs.values()):
+                    rec = records.get(wj.id)
+                    if rec is None or self._live_state(wj) not in self._WORKER_OWNED:
+                        continue  # locally-owned (ripping/awaiting) — don't clobber
+                    try:
+                        new_state = JobState(rec.state)
+                    except ValueError:
+                        continue
+                    wj.state = new_state
+                    if wj._pipeline_job is not None:
+                        wj._pipeline_job.state = new_state
+                    wj.progress, wj.stage, wj.error = rec.progress, rec.stage, rec.error
+                    if rec.log:
+                        wj.log = list(rec.log)
+                    if rec.outputs:
+                        wj.outputs = list(rec.outputs)
+                    changed = True
+                if changed:
+                    self.bus.publish()
+            except Exception:
+                pass
+            await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
+
     async def _watch_drives(self) -> None:
         while not self.closing:
             try:
@@ -492,6 +531,17 @@ class JobManager:
         job.grain_mode = wj.grain_mode
         job.tune_grain = wj.tune_grain
         try:
+            if self.settings.cluster.use_workers:
+                # Clustered: rip here, then enqueue for a worker to encode.
+                staging_root = self.settings.storage.staging_dir / f"job_{wj.id}"
+                await self.pipeline.rip_phase(job, staging_root, reporter)
+                self.pipeline._persist_mapping(job, reporter)
+                job.state = JobState.READY
+                wj.state = JobState.READY  # claimable by a worker
+                reporter.on_event("Ripped — queued for an encode worker.")
+                self._persist(wj)
+                self.bus.publish()
+                return
             await self.pipeline.execute(job, self.scheduler, reporter, job_name=f"job_{wj.id}")
             wj.state = JobState.DONE
             wj.progress = 1.0

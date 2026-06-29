@@ -82,6 +82,15 @@ language = "en-US"
 host = "0.0.0.0"
 port = 8723
 
+[cluster]
+# Distributed encoding across multiple servers. When true, the rip machine rips
+# then queues jobs for `blurayripper worker` processes to encode (needs a shared
+# Postgres + shared NAS). When false (default), this machine encodes inline.
+use_workers = false
+worker_poll_seconds = 5
+heartbeat_seconds = 15
+stale_after_seconds = 180
+
 [database]
 # Postgres URL enables crash recovery — jobs persist and resume after a restart
 # (a finished rip is never redone). Leave blank for in-memory (no persistence).
