@@ -219,6 +219,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _gate(lambda: manager.edit_job(job_id, body.grain_mode, body.tune_grain, body.edition))
         return {"ok": True}
 
+    @app.post("/api/jobs/{job_id}/redo-subs")
+    async def redo_subs(job_id: int):
+        _gate(lambda: manager.redo_subtitles(job_id))
+        return {"ok": True}
+
     @app.post("/api/jobs/{job_id}/preview-grain")
     async def preview_grain(job_id: int):
         try:

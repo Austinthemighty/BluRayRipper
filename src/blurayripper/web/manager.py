@@ -599,6 +599,32 @@ class JobManager:
         reporter.on_event("Subtitle match needs confirmation — review in the UI.")
         return False
 
+    def redo_subtitles(self, job_id: int) -> None:
+        """Re-OCR + place subtitles for a job using its staged or cached subs
+        (no rip, no encode). Runs in the background; progress shows in the log."""
+        wj = self.jobs[job_id]
+        if wj._pipeline_job is None or not wj.assignments:
+            raise ValueError("Job has no naming assignments to attach subtitles to.")
+        wj._task = self._spawn(self._redo_subs_task(wj))
+        self.bus.publish()
+
+    async def _redo_subs_task(self, wj: WebJob) -> None:
+        reporter = _Reporter(self, wj)
+        job = wj._pipeline_job
+        job.selected_title_ids = wj.selected_title_ids
+        job.assignments = wj.assignments
+        staging_root = self.settings.storage.staging_dir / f"job_{wj.id}"
+        try:
+            reporter.on_event("Re-OCR subtitles: looking for staged/cached subs …")
+            placed = await self.pipeline.redo_subtitles(job, staging_root, reporter)
+            reporter.on_event(
+                f"Re-OCR complete — placed {len(placed)} subtitle sidecar(s)." if placed
+                else "Re-OCR found no staged or cached subtitles — a re-rip is needed.")
+        except Exception as exc:
+            reporter.on_event(f"Re-OCR failed: {type(exc).__name__}: {exc}")
+        self._persist(wj)
+        self.bus.publish()
+
     async def generate_preview(self, job_id: int) -> None:
         """Render a grain still-comparison on demand for a queued job (so jobs
         don't have to park at a preview gate). Stores the stills on the job."""
