@@ -184,9 +184,10 @@ class Pipeline:
             )
             job.results.append(result)
 
-    async def rip_phase(self, job: Job, staging_root: Path, report) -> None:
-        """Rip all selected titles (the disc-bound work). Runs on the rip
-        machine; afterwards the job can be encoded by any worker."""
+    async def prep_phase(self, job: Job, staging_root: Path, report) -> None:
+        """Rip + subtitles (extract/OCR/place sidecars) + grain decision. Runs
+        on the rip machine so the grain preview can use the UI; afterwards a
+        worker only has to encode."""
         assert job.disc is not None
         for title_id in job.selected_title_ids:
             if job.assignments.get(title_id) is None:
@@ -195,13 +196,14 @@ class Pipeline:
             cp = job.checkpoints.setdefault(title_id, {})
             if cp.get("placed") and self._video_path_for(assignment).exists():
                 continue
-            await self._ensure_ripped(job, title_id, staging_root, report)
+            ripped = await self._ensure_ripped(job, title_id, staging_root, report)
+            await self._prepare_title(job, title_id, assignment, staging_root, ripped, report)
 
-    async def process_phase(
+    async def encode_phase(
         self, job: Job, staging_root: Path, scheduler: EncodeScheduler, report
     ) -> list[TitleResult]:
-        """Encode + subtitles + place for all selected titles. Runs on any
-        worker; reuses the already-ripped files from the shared NAS."""
+        """Encode + place the video for all selected titles. Runs on any worker;
+        subtitles + grain were already done by prep_phase on the rip machine."""
         results: list[TitleResult] = []
         for title_id in job.selected_title_ids:
             assignment = job.assignments.get(title_id)
@@ -213,7 +215,7 @@ class Pipeline:
             ripped = _resolve_path(self.settings.storage.staging_dir, prior) if prior else None
             if (not cp.get("placed")) and (ripped is None or not ripped.exists()):
                 raise RuntimeError(f"Title {title_id} has no ripped file to encode.")
-            results.append(await self._process_after_rip(
+            results.append(await self._encode_title(
                 job, title_id, assignment, staging_root, ripped, scheduler, report))
         return results
 
@@ -280,8 +282,21 @@ class Pipeline:
         self, job: Job, title_id: int, assignment: EpisodeAssignment, staging_root: Path,
         ripped_mkv: Path, scheduler: EncodeScheduler, report,
     ) -> TitleResult:
+        """Single-machine path: subtitles + grain, then encode + place."""
+        prep = await self._prepare_title(job, title_id, assignment, staging_root, ripped_mkv, report)
+        if prep.video_path:  # already placed (resume)
+            return prep
+        enc = await self._encode_title(
+            job, title_id, assignment, staging_root, ripped_mkv, scheduler, report)
+        enc.subtitle_paths = prep.subtitle_paths
+        return enc
+
+    async def _prepare_title(
+        self, job: Job, title_id: int, assignment: EpisodeAssignment, staging_root: Path,
+        ripped_mkv: Path, report,
+    ) -> TitleResult:
+        """Subtitles (extract + OCR + place sidecars) and grain decision."""
         result = TitleResult(title_id=title_id)
-        encode_dir = staging_root / "encode"
         sub_dir = staging_root / "sub" / f"t{title_id:03d}"
         cp = job.checkpoints.setdefault(title_id, {})
         video_dest = self._video_path_for(assignment)
@@ -310,36 +325,9 @@ class Pipeline:
                 ]
                 _checkpoint(report)
 
-        # Resolve grain (may park at a preview gate) before reserving CPU.
-        tune_grain = await self._resolve_grain(job, ripped_mkv, title_id, staging_root, report)
-
-        # Encode video, gated by the weighted scheduler so heavy UHD encodes
-        # don't run two-at-a-time (they'd just split the CPU).
-        height = await self._probe_height(ripped_mkv, report)
-        weight = encode_weight(height)
-        acquired = await scheduler.acquire(weight)
-        try:
-            job.state = JobState.ENCODING
-            report.on_event(
-                f"Encoding title {title_id} ({height or '?'}p, weight {weight}, "
-                f"grain={'on' if tune_grain else 'off'}) -> {video_dest.name} ..."
-            )
-            encoded = encode_dir / video_dest.name
-            await self.handbrake.encode(
-                ripped_mkv, encoded,
-                on_progress=lambda p: self._encode_progress(p, report),
-                tune_grain=tune_grain,
-            )
-        finally:
-            await scheduler.release(acquired)
-        result.video_path = library.place(encoded, video_dest)
-        cp["placed"] = True
-        _checkpoint(report)
-        report.on_event(f"Placed video: {result.video_path}")
-
-        # OCR each extracted subtitle and place the SRT sidecar. Same-language
-        # tracks are disambiguated by forced/SDH flags and an index so they
-        # never collide on one filename.
+        # OCR each extracted subtitle and place the SRT sidecar next to where the
+        # video will land. Same-language tracks are disambiguated by forced/SDH
+        # flags and an index so they never collide on one filename.
         job.state = JobState.OCR_SUBS
         default_lang = self.settings.languages.default.lower()
         plain_counts: dict[str, int] = {}
@@ -367,6 +355,50 @@ class Pipeline:
             result.subtitle_paths.append(srt_dest)
             report.on_event(f"Placed subtitle: {srt_dest.name}")
 
+        # Resolve grain (may park at an interactive preview gate — UI only).
+        tune_grain = await self._resolve_grain(job, ripped_mkv, title_id, staging_root, report)
+        cp["tune_grain"] = tune_grain
+        _checkpoint(report)
+        return result
+
+    async def _encode_title(
+        self, job: Job, title_id: int, assignment: EpisodeAssignment, staging_root: Path,
+        ripped_mkv: Path, scheduler: EncodeScheduler, report,
+    ) -> TitleResult:
+        """Encode + place the video. Grain was decided in _prepare_title."""
+        result = TitleResult(title_id=title_id)
+        encode_dir = staging_root / "encode"
+        cp = job.checkpoints.setdefault(title_id, {})
+        video_dest = self._video_path_for(assignment)
+        if cp.get("placed") and video_dest.exists():
+            result.video_path = video_dest
+            return result
+
+        tune_grain = cp.get("tune_grain")
+        if tune_grain is None:
+            tune_grain = (self.settings.encode.tune_grain
+                          if job.tune_grain is None else job.tune_grain)
+        height = await self._probe_height(ripped_mkv, report)
+        weight = encode_weight(height)
+        acquired = await scheduler.acquire(weight)
+        try:
+            job.state = JobState.ENCODING
+            report.on_event(
+                f"Encoding title {title_id} ({height or '?'}p, weight {weight}, "
+                f"grain={'on' if tune_grain else 'off'}) -> {video_dest.name} ..."
+            )
+            encoded = encode_dir / video_dest.name
+            await self.handbrake.encode(
+                ripped_mkv, encoded,
+                on_progress=lambda p: self._encode_progress(p, report),
+                tune_grain=tune_grain,
+            )
+        finally:
+            await scheduler.release(acquired)
+        result.video_path = library.place(encoded, video_dest)
+        cp["placed"] = True
+        _checkpoint(report)
+        report.on_event(f"Placed video: {result.video_path}")
         job.state = JobState.PLACING
         return result
 

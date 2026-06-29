@@ -141,7 +141,7 @@ class WorkerRunner:
         reporter.on_event(f"Claimed by {self.worker_id}.")
         hb = asyncio.create_task(self._heartbeat(reporter))
         try:
-            results = await self.pipeline.process_phase(
+            results = await self.pipeline.encode_phase(
                 job, staging_root, self.scheduler, reporter)
             from .services import library
             library.cleanup(staging_root)

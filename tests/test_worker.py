@@ -37,7 +37,7 @@ async def test_worker_processes_claimed_job(tmp_path, monkeypatch):
         report.on_progress("encoding", 1.0)
         return [TitleResult(0, video_path=tmp_path / "WarGames (1983).mkv")]
 
-    monkeypatch.setattr(runner.pipeline, "process_phase", fake_process)
+    monkeypatch.setattr(runner.pipeline, "encode_phase", fake_process)
 
     rec = runner.store.claim_next("w1", CLAIMABLE_STATES)
     assert rec.id == 7
