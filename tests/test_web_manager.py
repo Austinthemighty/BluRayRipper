@@ -110,6 +110,31 @@ async def test_clustered_mode_rips_then_enqueues(manager, monkeypatch):
     assert wj.state is JobState.READY       # left queued for a worker to claim
 
 
+async def test_edit_job_updates_grain_and_edition(manager, monkeypatch):
+    manager.settings.cluster.use_workers = True
+
+    async def fake_rip(job, staging_root, report):
+        pass
+
+    monkeypatch.setattr(manager.pipeline, "rip_phase", fake_rip)
+    monkeypatch.setattr(manager.pipeline, "_persist_mapping", lambda job, report: None)
+
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    manager.set_titles(wj.id, [0])
+    manager.set_mapping(wj.id, [EpisodeAssignment(0, MediaKind.MOVIE, "WarGames", 1983)])
+    await _settle()
+    assert wj.state is JobState.READY
+
+    manager.edit_job(wj.id, grain_mode="on", tune_grain=True, edition="Director's Cut")
+    assert wj.grain_mode == "on" and wj.tune_grain is True
+    assert wj._pipeline_job.grain_mode == "on"
+    assert wj.assignments[0].edition == "Director's Cut"
+    # the persisted record carries it for a worker to pick up
+    rec = {r.id: r for r in manager.store.load_all()}[wj.id]
+    assert rec.grain_mode == "on" and rec.assignments[0]["edition"] == "Director's Cut"
+
+
 async def test_remove_parked_job(manager):
     wj = manager.add_disc("disc:0")
     await _settle()

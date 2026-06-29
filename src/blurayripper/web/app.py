@@ -60,6 +60,12 @@ class SetGrain(BaseModel):
     tune_grain: bool
 
 
+class EditJob(BaseModel):
+    grain_mode: str | None = None
+    tune_grain: bool | None = None
+    edition: str | None = None
+
+
 class NameDrive(BaseModel):
     device: str
     name: str | None = None  # null/empty clears the custom name
@@ -179,6 +185,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/jobs/{job_id}/retry")
     async def retry_job(job_id: int):
         _gate(lambda: manager.retry(job_id))
+        return {"ok": True}
+
+    @app.post("/api/jobs/{job_id}/edit")
+    async def edit_job(job_id: int, body: EditJob):
+        _gate(lambda: manager.edit_job(job_id, body.grain_mode, body.tune_grain, body.edition))
         return {"ok": True}
 
     @app.get("/api/jobs/{job_id}/preview/{which}")
