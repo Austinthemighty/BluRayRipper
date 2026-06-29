@@ -159,6 +159,7 @@ function renderJobs(snap) {
       if (j.state==='awaiting_titles') buildTitles(card, j);
       if (j.state==='awaiting_mapping') buildMapping(card, j);
       if (j.state==='awaiting_grain') buildGrain(card, j);
+      if (j.state==='awaiting_match') buildMatch(card, j);
       if (j.state==='ready') buildEdit(card, j);
     }
     liveUpdate(card, j);
@@ -278,7 +279,8 @@ function buildMapping(card, j){
         <div class="muted" style="font-size:12px;">DVD titles are usually in order; Blu-ray titles are often scrambled or reversed — pick each title's episode below (durations shown to help match), or use a fill button.</div>
         <div data-fill class="row" style="display:none;">
           <button class="sec" data-order>Fill in order (DVD)</button>
-          <button class="sec" data-runtime>Match by runtime (Blu-ray)</button></div>
+          <button class="sec" data-runtime>Match by runtime (Blu-ray)</button>
+          <button class="sec" data-identify title="Rip these titles, then match each to an episode by comparing subtitles (needs an OpenSubtitles key).">Auto-identify by subtitles</button></div>
         <div data-eps></div>`;
       const sel = () => j.titles.filter(t=>j.selected.includes(t.id));
       const pad = n => String(n).padStart(2,'0');
@@ -321,6 +323,18 @@ function buildMapping(card, j){
         if(!state.episodes.some(e=>e.runtime)) alert('TMDB has no episode runtimes for this season — pick episodes manually from the dropdowns.');
         const {a, flags} = byRuntime();
         render(a, flags);
+      };
+      tv.querySelector('[data-identify]').onclick = async () => {
+        const season=+tv.querySelector('[data-season]').value;
+        const first=+tv.querySelector('[data-firstep]').value||1;
+        const ids=sel().map(t=>t.id);
+        const episodes=ids.map((_,i)=>first+i);  // the episodes on this disc
+        const gmode = body.querySelector(`input[name=g${j.id}]:checked`).value;
+        const tune_grain = gmode==='on'?true:(gmode==='off'?false:null);
+        if(!confirm(`Rip ${ids.length} title(s), then auto-identify against episodes ${episodes.join(', ')} of "${state.chosen.title}" S${pad(season)} by subtitles?`)) return;
+        try {
+          await api('POST',`/api/jobs/${j.id}/auto-identify`,{title_ids:ids, show_title:state.chosen.title, show_year:state.chosen.year, show_tmdb_id:state.chosen.id, season, episodes, grain_mode:gmode, tune_grain});
+        } catch(e){ alert(e.message); }
       };
     } else {
       tv.innerHTML = `<div class="muted">Will name ${j.selected.length} selected title(s) as this movie.</div>
@@ -415,6 +429,29 @@ function lightbox(items, start){
   show();
   document.body.appendChild(ov);
 }
+function buildMatch(card, j){
+  const body = card.querySelector('[data-body]');
+  const m = j.match;
+  if(!m){ body.innerHTML='<div class="muted">Identifying…</div>'; return; }
+  const pad = n => String(n).padStart(2,'0');
+  const opts = (numSel) => m.episodes.map(e=>`<option value="${e}" ${e===numSel?'selected':''}>E${pad(e)}</option>`).join('');
+  body.innerHTML = `<div class="muted" style="font-size:12px;">Subtitle match for <b>${m.show}</b> S${pad(m.season)} — confirm each title's episode. ⚠ = runtime/subs couldn't decide confidently.</div>`
+    + m.candidates.map(c=>`<div class="row">Title ${c.title_id} →
+        <select data-mep="${c.title_id}">${opts(c.episode)}</select>
+        <span class="muted">score ${c.score}${c.runner_up!=null?` · next E${pad(c.runner_up)} ${c.runner_up_score}`:''}</span>
+        ${c.confident?'<span style="color:#3fb950;">✓</span>':'<span style="color:#d29922;">⚠</span>'}</div>`).join('')
+    + `<div class="row"><button data-confirmmatch>Confirm episodes</button><span data-msg class="muted"></span></div>`;
+  body.querySelector('[data-confirmmatch]').onclick = async () => {
+    const mapping={};
+    body.querySelectorAll('select[data-mep]').forEach(s=>mapping[+s.dataset.mep]=+s.value);
+    const eps=Object.values(mapping);
+    if(new Set(eps).size!==eps.length && !confirm('Two titles map to the same episode — continue anyway?')) return;
+    body.querySelector('[data-msg]').textContent='Saving…';
+    try { await api('POST',`/api/jobs/${j.id}/confirm-match`,{mapping}); }
+    catch(e){ body.querySelector('[data-msg]').textContent='⚠ '+e.message; }
+  };
+}
+
 function buildGrain(card, j){
   const body = card.querySelector('[data-body]');
   if (!j.preview){ body.innerHTML='<div class="muted">Rendering grain preview…</div>'; return; }
