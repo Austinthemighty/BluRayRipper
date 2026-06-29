@@ -73,7 +73,8 @@ class WorkerReporter:
     def touch(self) -> None:
         """Persist current progress + prove the worker is alive."""
         self.save(self._state())
-        self._store.heartbeat(self._job_id, self._worker)
+        with contextlib.suppress(Exception):
+            self._store.heartbeat(self._job_id, self._worker)
 
     def finish(self, state: JobState, outputs: list[str], error: str | None = None) -> None:
         self._job.state = state
@@ -113,9 +114,21 @@ class WorkerRunner:
             raise RuntimeError("A worker needs a shared database. Set BLURAYRIPPER_DATABASE_URL.")
         self.store.init()
         print(f"Worker {self.worker_id} ready — polling for jobs…", flush=True)
+        last_error = None
         while not self._stop:
-            rec = self.store.claim_next(
-                self.worker_id, CLAIMABLE_STATES, self.settings.cluster.stale_after_seconds)
+            try:
+                rec = self.store.claim_next(
+                    self.worker_id, CLAIMABLE_STATES, self.settings.cluster.stale_after_seconds)
+                last_error = None
+            except Exception as exc:
+                # Transient DB outage (e.g. a storage blip): keep the worker
+                # alive and retry rather than exiting.
+                msg = f"{type(exc).__name__}: {exc}"
+                if msg != last_error:
+                    print(f"Queue unavailable, will retry: {msg}", flush=True)
+                    last_error = msg
+                await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
+                continue
             if rec is None:
                 await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
                 continue
