@@ -9,6 +9,7 @@ fingerprint is already known, the confirm gate is skipped automatically.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -190,17 +191,125 @@ class Pipeline:
     async def prep_phase(self, job: Job, staging_root: Path, report) -> None:
         """Rip + subtitles (extract/OCR/place sidecars) + grain decision. Runs
         on the rip machine so the grain preview can use the UI; afterwards a
-        worker only has to encode."""
+        worker only has to encode.
+
+        OCR (the slow per-track step) is run concurrently across all of the job's
+        titles; encoding only starts after prep_phase returns, so it always waits
+        for OCR to finish."""
         assert job.disc is not None
+        # 1) Rip + extract subtitle images per title (sequential — one drive).
+        todo: list[tuple[int, EpisodeAssignment, Path, Path, list]] = []
         for title_id in job.selected_title_ids:
-            if job.assignments.get(title_id) is None:
+            assignment = job.assignments.get(title_id)
+            if assignment is None:
                 continue
-            assignment = job.assignments[title_id]
             cp = job.checkpoints.setdefault(title_id, {})
             if cp.get("placed") and self._video_path_for(assignment).exists():
                 continue
             ripped = await self._ensure_ripped(job, title_id, staging_root, report)
-            await self._prepare_title(job, title_id, assignment, staging_root, ripped, report)
+            sub_dir = staging_root / "sub" / f"t{title_id:03d}"
+            sub_jobs = await self._extract_title_subs(job, title_id, ripped, sub_dir, report)
+            todo.append((title_id, assignment, ripped, sub_dir, sub_jobs))
+
+        # 2) OCR every (title, track) concurrently, bounded by ocr_concurrency.
+        ocr = await self._ocr_all(job, todo, report)
+
+        # 3) Place sidecars + resolve grain per title.
+        for title_id, assignment, ripped, sub_dir, _sub_jobs in todo:
+            result = TitleResult(title_id=title_id)
+            self._place_title_subs(result, self._video_path_for(assignment),
+                                   ocr.get(title_id, []), report)
+            tune_grain = await self._resolve_grain(job, ripped, title_id, staging_root, report)
+            job.checkpoints[title_id]["tune_grain"] = tune_grain
+            _checkpoint(report)
+
+    async def _extract_title_subs(
+        self, job: Job, title_id: int, ripped_mkv: Path, sub_dir: Path, report
+    ) -> list[tuple[Path, SubtitleTrack]]:
+        """Extract (or reuse) a title's subtitle images. No OCR."""
+        job.state = JobState.EXTRACTING_SUBS
+        cp = job.checkpoints.setdefault(title_id, {})
+        reused = self._reuse_subs(cp)
+        if reused is not None:
+            report.on_event(f"Reusing {len(reused)} previously-extracted subtitle(s).")
+            return reused
+        extracted = await self._extract_subs(ripped_mkv, sub_dir, report)
+        if extracted is None:
+            # Extraction failed this run — don't checkpoint, so a retry re-attempts.
+            return []
+        cp["subs"] = [
+            _sub_checkpoint(self.settings.storage.staging_dir, sup, tr) for sup, tr in extracted
+        ]
+        _checkpoint(report)
+        return extracted
+
+    async def _ocr_all(
+        self, job: Job, todo: list, report
+    ) -> dict[int, list[tuple[Path, SubtitleTrack]]]:
+        """OCR every (title, track) in ``todo`` concurrently. Returns
+        ``{title_id: [(srt_path, track), ...]}`` in original track order, with
+        failed tracks dropped."""
+        if any(sub_jobs for *_rest, sub_jobs in todo):
+            job.state = JobState.OCR_SUBS
+        sem = asyncio.Semaphore(max(1, self.settings.subtitles.ocr_concurrency))
+        out: dict[int, list] = {tid: [None] * len(sj) for tid, _a, _r, _sd, sj in todo}
+
+        async def _one(tid: int, idx: int, sup: Path, track: SubtitleTrack, sub_dir: Path):
+            language = track.language or "und"
+            async with sem:
+                try:
+                    srt = await self.subtitleedit.ocr_to_srt(sup, language, sub_dir)
+                except Exception as exc:
+                    report.on_event(
+                        f"Subtitle OCR failed ({language}): {type(exc).__name__}: {exc}")
+                    return
+            out[tid][idx] = (srt, track)
+
+        tasks = [
+            _one(tid, idx, sup, track, sub_dir)
+            for tid, _a, _r, sub_dir, sub_jobs in todo
+            for idx, (sup, track) in enumerate(sub_jobs)
+        ]
+        if tasks:
+            await asyncio.gather(*tasks)
+        return {tid: [x for x in lst if x is not None] for tid, lst in out.items()}
+
+    def _place_title_subs(
+        self, result: TitleResult, video_dest: Path,
+        ocr_pairs: list[tuple[Path, SubtitleTrack]], report,
+    ) -> None:
+        """Place OCR'd SRT sidecars next to the video, disambiguating same-language
+        tracks by forced/SDH flags and an index so they never collide."""
+        default_lang = self.settings.languages.default.lower()
+        plain_counts: dict[str, int] = {}
+        for srt, track in ocr_pairs:
+            language = track.language or "und"
+            # Blu-ray PGS rarely carries the SDH flag, so fall back to detecting
+            # it from the OCR'd content (sound cues, music notes, speaker labels).
+            is_sdh = track.sdh
+            if not is_sdh and not track.forced:
+                try:
+                    is_sdh = looks_like_sdh(srt.read_text(encoding="utf-8", errors="ignore"))
+                except OSError:
+                    pass
+                if is_sdh:
+                    report.on_event(f"Detected SDH subtitle ({language}) from content.")
+            is_default = False
+            index: int | None = None
+            if not track.forced and not is_sdh:
+                n = plain_counts.get(language, 0)
+                plain_counts[language] = n + 1
+                if n == 0:
+                    is_default = language.lower() == default_lang
+                else:
+                    index = n + 1  # second plain track -> .2, third -> .3, ...
+            srt_dest = naming.subtitle_sidecar_path(
+                video_dest, language,
+                default=is_default, forced=track.forced, sdh=is_sdh, index=index,
+            )
+            library.place(srt, srt_dest)
+            result.subtitle_paths.append(srt_dest)
+            report.on_event(f"Placed subtitle: {srt_dest.name}")
 
     async def encode_phase(
         self, job: Job, staging_root: Path, scheduler: EncodeScheduler, report
@@ -359,66 +468,11 @@ class Pipeline:
             result.video_path = video_dest
             return result
 
-        # Extract subtitles (before encode drops them). On resume, reuse the
-        # .sup files from the prior run instead of re-reading the whole (often
-        # NAS-hosted, multi-GB) ripped file.
-        job.state = JobState.EXTRACTING_SUBS
-        sub_jobs = self._reuse_subs(cp)
-        if sub_jobs is not None:
-            report.on_event(f"Reusing {len(sub_jobs)} previously-extracted subtitle(s).")
-        else:
-            extracted = await self._extract_subs(ripped_mkv, sub_dir, report)
-            if extracted is None:
-                # Extraction failed this run — don't checkpoint, so a retry
-                # re-attempts instead of recording "0 subtitles done".
-                sub_jobs = []
-            else:
-                sub_jobs = extracted
-                cp["subs"] = [
-                    _sub_checkpoint(self.settings.storage.staging_dir, sup, tr)
-                    for sup, tr in sub_jobs
-                ]
-                _checkpoint(report)
-
-        # OCR each extracted subtitle and place the SRT sidecar next to where the
-        # video will land. Same-language tracks are disambiguated by forced/SDH
-        # flags and an index so they never collide on one filename.
-        job.state = JobState.OCR_SUBS
-        default_lang = self.settings.languages.default.lower()
-        plain_counts: dict[str, int] = {}
-        for sup_path, track in sub_jobs:
-            language = track.language or "und"
-            try:
-                srt = await self.subtitleedit.ocr_to_srt(sup_path, language, sub_dir)
-            except Exception as exc:
-                report.on_event(f"Subtitle OCR failed ({language}): {type(exc).__name__}: {exc}")
-                continue
-            # Blu-ray PGS rarely carries the SDH flag, so fall back to detecting
-            # it from the OCR'd content (sound cues, music notes, speaker labels).
-            is_sdh = track.sdh
-            if not is_sdh and not track.forced:
-                try:
-                    is_sdh = looks_like_sdh(srt.read_text(encoding="utf-8", errors="ignore"))
-                except OSError:
-                    pass
-                if is_sdh:
-                    report.on_event(f"Detected SDH subtitle ({language}) from content.")
-            is_default = False
-            index: int | None = None
-            if not track.forced and not is_sdh:
-                n = plain_counts.get(language, 0)
-                plain_counts[language] = n + 1
-                if n == 0:
-                    is_default = language.lower() == default_lang
-                else:
-                    index = n + 1  # second plain track -> .2, third -> .3, ...
-            srt_dest = naming.subtitle_sidecar_path(
-                video_dest, language,
-                default=is_default, forced=track.forced, sdh=is_sdh, index=index,
-            )
-            library.place(srt, srt_dest)
-            result.subtitle_paths.append(srt_dest)
-            report.on_event(f"Placed subtitle: {srt_dest.name}")
+        # Extract subtitle images, OCR them, and place the SRT sidecars. (The
+        # parallel path lives in prep_phase; here OCR runs inline for one title.)
+        sub_jobs = await self._extract_title_subs(job, title_id, ripped_mkv, sub_dir, report)
+        ocr = await self._ocr_all(job, [(title_id, assignment, ripped_mkv, sub_dir, sub_jobs)], report)
+        self._place_title_subs(result, video_dest, ocr.get(title_id, []), report)
 
         # Resolve grain (may park at an interactive preview gate — UI only).
         tune_grain = await self._resolve_grain(job, ripped_mkv, title_id, staging_root, report)
