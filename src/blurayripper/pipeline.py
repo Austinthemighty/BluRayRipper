@@ -38,6 +38,8 @@ class JobState(str, Enum):
     AWAITING_TITLES = "awaiting_titles"
     AWAITING_MAPPING = "awaiting_mapping"
     AWAITING_GRAIN = "awaiting_grain"
+    AWAITING_MATCH = "awaiting_match"  # subtitle ID was ambiguous; needs confirm
+    IDENTIFYING = "identifying"
     READY = "ready"
     RIPPING = "ripping"
     CONFIRMING = "confirming"
@@ -219,6 +221,43 @@ class Pipeline:
             results.append(await self._encode_title(
                 job, title_id, assignment, staging_root, ripped, scheduler, report))
         return results
+
+    async def identify_phase(self, job: Job, staging_root: Path, report) -> dict[int, str]:
+        """Rip each selected title and OCR its main subtitle track to SRT text,
+        for subtitle-based episode identification. Places nothing — returns
+        ``{title_id: srt_text}`` for the caller to match against references."""
+        assert job.disc is not None
+        default_lang = self.settings.languages.default.lower()
+        rips: dict[int, str] = {}
+        job.state = JobState.IDENTIFYING
+        for title_id in job.selected_title_ids:
+            ripped = await self._ensure_ripped(job, title_id, staging_root, report)
+            sub_dir = staging_root / "sub" / f"t{title_id:03d}"
+            cp = job.checkpoints.setdefault(title_id, {})
+            sub_jobs = self._reuse_subs(cp)
+            if sub_jobs is None:
+                extracted = await self._extract_subs(ripped, sub_dir, report)
+                sub_jobs = extracted or []
+                if extracted is not None:
+                    cp["subs"] = [
+                        _sub_checkpoint(self.settings.storage.staging_dir, sup, tr)
+                        for sup, tr in sub_jobs
+                    ]
+                    _checkpoint(report)
+            # Pick the main full track: prefer a non-forced default-language one.
+            choice = next(((s, t) for s, t in sub_jobs if not t.forced and (t.language or "").lower() == default_lang), None)
+            choice = choice or next(((s, t) for s, t in sub_jobs if not t.forced), None)
+            choice = choice or (sub_jobs[0] if sub_jobs else None)
+            if choice is None:
+                report.on_event(f"Title {title_id}: no subtitles to identify with.")
+                continue
+            sup, track = choice
+            try:
+                srt = await self.subtitleedit.ocr_to_srt(sup, track.language or default_lang, sub_dir)
+                rips[title_id] = srt.read_text(encoding="utf-8", errors="ignore")
+            except Exception as exc:
+                report.on_event(f"Title {title_id}: OCR for identification failed: {exc}")
+        return rips
 
     async def _process_one(
         self, job: Job, title_id: int, assignment: EpisodeAssignment, staging_root: Path,

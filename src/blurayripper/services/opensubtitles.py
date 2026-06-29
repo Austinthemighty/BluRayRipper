@@ -20,6 +20,22 @@ class OpenSubtitlesError(RuntimeError):
     pass
 
 
+async def gather_references(
+    client, show_tmdb_id: int, season: int, episodes: list[int], language: str = "en"
+) -> dict[int, str]:
+    """Fetch reference SRT text for each candidate episode. Missing/failed
+    episodes are simply omitted (matching degrades gracefully without them)."""
+    refs: dict[int, str] = {}
+    for ep in episodes:
+        try:
+            text = await client.fetch_episode_srt(show_tmdb_id, season, ep, language)
+        except Exception:
+            text = None
+        if text:
+            refs[ep] = text
+    return refs
+
+
 def best_file_id(search_data: list[dict], *, language: str | None = None) -> int | None:
     """Pick the best subtitle file from a /subtitles response's ``data`` list.
 

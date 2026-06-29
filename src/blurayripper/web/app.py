@@ -60,6 +60,21 @@ class SetGrain(BaseModel):
     tune_grain: bool
 
 
+class AutoIdentify(BaseModel):
+    title_ids: list[int]
+    show_title: str
+    show_year: int | None = None
+    show_tmdb_id: int
+    season: int
+    episodes: list[int]            # candidate episodes on this disc
+    grain_mode: str = "auto"
+    tune_grain: bool | None = None
+
+
+class ConfirmMatch(BaseModel):
+    mapping: dict[int, int]        # title_id -> episode
+
+
 class EditJob(BaseModel):
     grain_mode: str | None = None
     tune_grain: bool | None = None
@@ -180,6 +195,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/jobs/{job_id}/grain")
     async def submit_grain(job_id: int, body: SetGrain):
         _gate(lambda: manager.set_grain(job_id, body.tune_grain))
+        return {"ok": True}
+
+    @app.post("/api/jobs/{job_id}/auto-identify")
+    async def auto_identify(job_id: int, body: AutoIdentify):
+        _gate(lambda: manager.set_auto_identify(
+            job_id, body.show_title, body.show_year, body.show_tmdb_id, body.season,
+            body.episodes, body.title_ids, body.grain_mode, body.tune_grain))
+        return {"ok": True}
+
+    @app.post("/api/jobs/{job_id}/confirm-match")
+    async def confirm_match(job_id: int, body: ConfirmMatch):
+        _gate(lambda: manager.confirm_match(job_id, {int(k): v for k, v in body.mapping.items()}))
         return {"ok": True}
 
     @app.post("/api/jobs/{job_id}/retry")

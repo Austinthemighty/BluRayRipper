@@ -30,6 +30,8 @@ from ..pipeline import Job, JobState, Pipeline, _resolve_path
 from ..scheduler import EncodeScheduler
 from ..services import library
 from ..services.drive_names import DriveNames
+from ..services.opensubtitles import OpenSubtitlesClient, gather_references
+from ..services.sub_match import identify
 from ..tools import discinfo
 from ..tools.makemkv import Drive
 
@@ -91,6 +93,14 @@ class WebJob:
     outputs: list[str] = field(default_factory=list)
     grain_mode: str = "auto"
     tune_grain: bool | None = None
+    # Subtitle-based episode identification (auto-identify scrambled TV discs).
+    auto_identify: bool = False
+    show_tmdb_id: int | None = None
+    season: int | None = None
+    candidate_episodes: list[int] = field(default_factory=list)
+    show_title: str | None = None
+    show_year: int | None = None
+    match_candidates: list = field(default_factory=list)  # proposals for AWAITING_MATCH
     preview_off: object = None  # Path to grain-off still
     preview_on: object = None   # Path to grain-on still
     _pipeline_job: object = None  # the underlying pipeline.Job once scanned
@@ -136,6 +146,11 @@ class JobManager:
     def __init__(self, settings: Settings, store: Store | None = None) -> None:
         self.settings = settings
         self.pipeline = Pipeline(settings)  # no interactive callbacks; web drives gates
+        self.osub = OpenSubtitlesClient(
+            settings.opensubtitles_api_key,
+            settings.opensubtitles_username,
+            settings.opensubtitles_password,
+        )
         self.scheduler = EncodeScheduler(settings.queue.encode_capacity)
         self.bus = EventBus()
         self.jobs: dict[int, WebJob] = {}
@@ -190,6 +205,12 @@ class JobManager:
             stage=wj.stage,
             progress=round(wj.progress, 4),
             log=wj.log[-30:],
+            auto_identify=wj.auto_identify,
+            show_tmdb_id=wj.show_tmdb_id,
+            season=wj.season,
+            candidate_episodes=list(wj.candidate_episodes),
+            show_title=wj.show_title,
+            show_year=wj.show_year,
         )
 
     def _from_record(self, rec: JobRecord) -> WebJob:
@@ -203,6 +224,10 @@ class JobManager:
         wj.assignments = {a.title_id: a for a in (assignment_from_dict(d) for d in rec.assignments)}
         wj.stage, wj.progress = rec.stage, rec.progress
         wj.log = list(rec.log)
+        wj.auto_identify = rec.auto_identify
+        wj.show_tmdb_id, wj.season = rec.show_tmdb_id, rec.season
+        wj.candidate_episodes = list(rec.candidate_episodes)
+        wj.show_title, wj.show_year = rec.show_title, rec.show_year
         job = Job(source=rec.source)
         job.disc = wj.disc
         job.fingerprint = rec.fingerprint
@@ -231,7 +256,8 @@ class JobManager:
         # ONLY re-runs these; READY / worker-owned states are left for workers to
         # claim from the store (so we don't stampede re-prepping everything).
         prep_states = (JobState.SCANNING, JobState.SELECTING, JobState.RIPPING,
-                       JobState.EXTRACTING_SUBS, JobState.OCR_SUBS, JobState.AWAITING_GRAIN)
+                       JobState.EXTRACTING_SUBS, JobState.OCR_SUBS, JobState.AWAITING_GRAIN,
+                       JobState.IDENTIFYING)
         clustered = self.settings.cluster.use_workers
         for rec in records:
             wj = self._from_record(rec)
@@ -242,8 +268,11 @@ class JobManager:
             interrupted_fail = (
                 wj.state is JobState.FAILED and _error_looks_interrupted(wj.error)
             )
+            # An auto-identify job that hasn't been identified yet must re-run on
+            # the rip box (workers can't rip/OCR/match), even at READY.
+            needs_identify = wj.auto_identify and not wj.assignments
             if clustered:
-                if wj.state in prep_states:
+                if wj.state in prep_states or (needs_identify and wj.state is JobState.READY):
                     self._resume(wj)
                     resumed += 1
                 elif interrupted_fail:
@@ -478,6 +507,98 @@ class JobManager:
         self._persist(wj)
         self.bus.publish()
 
+    def set_auto_identify(
+        self, job_id: int, show_title: str, show_year: int | None, show_tmdb_id: int,
+        season: int, episodes: list[int], title_ids: list[int],
+        grain_mode: str = "auto", tune_grain: bool | None = None,
+    ) -> None:
+        """Queue a TV disc for subtitle-based episode identification: rip the
+        selected titles, then match each against the given candidate episodes."""
+        wj = self.jobs[job_id]
+        if wj.state not in (JobState.AWAITING_MAPPING, JobState.AWAITING_TITLES):
+            raise ValueError(f"Job {job_id} is not awaiting a naming mapping.")
+        if not self.osub.configured:
+            raise ValueError(
+                "OpenSubtitles API key not configured — needed for subtitle "
+                "identification. Set OPENSUBTITLES_API_KEY in config/secrets.env.")
+        if not episodes:
+            raise ValueError("No candidate episodes given for this disc.")
+        wj.auto_identify = True
+        wj.show_title, wj.show_year = show_title, show_year
+        wj.show_tmdb_id, wj.season = show_tmdb_id, season
+        wj.candidate_episodes = list(episodes)
+        wj.selected_title_ids = list(title_ids)
+        wj.assignments = {}
+        wj.grain_mode, wj.tune_grain = grain_mode, tune_grain
+        wj.state = JobState.READY
+        self._persist(wj)
+        wj._task = self._spawn(self._run_job(wj))
+        self.bus.publish()
+
+    def confirm_match(self, job_id: int, mapping: dict[int, int]) -> None:
+        """Resolve an AWAITING_MATCH job: ``mapping`` is title_id -> episode for
+        every selected title. Builds assignments and resumes to encode/place."""
+        wj = self.jobs[job_id]
+        if wj.state is not JobState.AWAITING_MATCH:
+            raise ValueError(f"Job {job_id} is not awaiting match confirmation.")
+        wj.assignments = {
+            tid: EpisodeAssignment(
+                title_id=tid, kind=MediaKind.TV, show_or_movie_title=wj.show_title or "",
+                year=wj.show_year, season=wj.season, episode=ep,
+            )
+            for tid, ep in mapping.items()
+        }
+        wj.selected_title_ids = list(mapping.keys())
+        wj.match_candidates = []
+        wj.state = JobState.READY
+        self._persist(wj)
+        wj._task = self._spawn(self._run_job(wj))
+        self.bus.publish()
+
+    async def _auto_identify(self, wj: WebJob, reporter) -> bool:
+        """Rip + OCR the selected titles, fetch references, and match. Sets
+        assignments on success; returns True if all titles are confidently
+        identified (caller proceeds), False if it parked at AWAITING_MATCH."""
+        job = wj._pipeline_job
+        staging_root = self.settings.storage.staging_dir / f"job_{wj.id}"
+        rips = await self.pipeline.identify_phase(job, staging_root, reporter)
+        reporter.on_event(
+            f"Fetching reference subtitles for episodes {wj.candidate_episodes} …")
+        refs = await gather_references(
+            self.osub, wj.show_tmdb_id, wj.season, wj.candidate_episodes,
+            self.settings.languages.default,
+        )
+        if not refs:
+            raise RuntimeError(
+                "Could not fetch any reference subtitles from OpenSubtitles for "
+                "these episodes — check the show/season and your API key.")
+        matches = identify(rips, refs)
+        wj.match_candidates = [
+            {"title_id": m.title_id, "episode": m.episode, "score": round(m.score, 3),
+             "runner_up": m.runner_up, "runner_up_score": round(m.runner_up_score, 3),
+             "confident": m.confident}
+            for m in matches
+        ]
+        for m in matches:
+            reporter.on_event(
+                f"title {m.title_id} -> E{m.episode} (score {m.score:.2f}"
+                + (f", runner-up E{m.runner_up} {m.runner_up_score:.2f}" if m.runner_up else "")
+                + (")" if m.confident else ") — needs confirmation"))
+        if all(m.confident and m.episode is not None for m in matches):
+            wj.assignments = {
+                m.title_id: EpisodeAssignment(
+                    title_id=m.title_id, kind=MediaKind.TV,
+                    show_or_movie_title=wj.show_title or "", year=wj.show_year,
+                    season=wj.season, episode=m.episode,
+                )
+                for m in matches
+            }
+            wj.selected_title_ids = [m.title_id for m in matches]
+            return True
+        wj.state = JobState.AWAITING_MATCH
+        reporter.on_event("Subtitle match needs confirmation — review in the UI.")
+        return False
+
     async def generate_preview(self, job_id: int) -> None:
         """Render a grain still-comparison on demand for a queued job (so jobs
         don't have to park at a preview gate). Stores the stills on the job."""
@@ -610,6 +731,15 @@ class JobManager:
         job.grain_mode = wj.grain_mode
         job.tune_grain = wj.tune_grain
         try:
+            if wj.auto_identify and not wj.assignments:
+                # Rip + OCR + subtitle-match against the disc's candidate episodes.
+                # Parks at AWAITING_MATCH if any title is uncertain.
+                if not await self._auto_identify(wj, reporter):
+                    self._persist(wj)
+                    self.bus.publish()
+                    return
+                job.assignments = wj.assignments
+                job.selected_title_ids = wj.selected_title_ids
             if self.settings.cluster.use_workers:
                 # Clustered: rip + subtitles + grain here, then enqueue for a
                 # worker to do only the (heavy) encode.
@@ -648,7 +778,7 @@ class JobManager:
 
     _PARKED = (
         JobState.DONE, JobState.FAILED, JobState.AWAITING_TITLES,
-        JobState.AWAITING_MAPPING, JobState.AWAITING_GRAIN,
+        JobState.AWAITING_MAPPING, JobState.AWAITING_GRAIN, JobState.AWAITING_MATCH,
     )
 
     def _live_state(self, wj: WebJob) -> JobState:
@@ -675,6 +805,11 @@ class JobManager:
             "preview": (
                 {"off": f"/api/jobs/{wj.id}/preview/off", "on": f"/api/jobs/{wj.id}/preview/on"}
                 if live_state == JobState.AWAITING_GRAIN and wj.preview_off else None
+            ),
+            "match": (
+                {"show": wj.show_title, "season": wj.season,
+                 "episodes": wj.candidate_episodes, "candidates": wj.match_candidates}
+                if live_state == JobState.AWAITING_MATCH else None
             ),
             "log": wj.log[-20:],
         }
