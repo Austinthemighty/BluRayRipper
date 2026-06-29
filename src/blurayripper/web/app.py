@@ -199,6 +199,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return [{"id": c.tmdb_id, "title": c.name, "year": c.year} for c in res]
         except MetadataError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:  # network/DNS/HTTP errors reaching TMDB
+            raise HTTPException(status_code=502, detail=f"TMDB request failed: {type(exc).__name__}: {exc}")
 
     @app.get("/api/tmdb/season")
     async def tmdb_season(tv_id: int, season: int):
@@ -207,6 +209,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return [{"episode": e.episode_number, "name": e.name} for e in eps]
         except MetadataError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"TMDB request failed: {type(exc).__name__}: {exc}")
 
     @app.get("/api/events")
     async def events():
