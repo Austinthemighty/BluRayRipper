@@ -80,6 +80,22 @@ def test_make_store_selects_backend():
     assert make_store(None).durable is False
 
 
+def test_claim_next_picks_ready_and_skips_claimed():
+    store = MemoryStore()
+    store.save(JobRecord(id=1, source="disc:0", state="done"))      # not claimable
+    store.save(JobRecord(id=2, source="disc:1", state="ready"))
+    store.save(JobRecord(id=3, source="disc:2", state="ready"))
+
+    a = store.claim_next("w1", ["ready"])
+    b = store.claim_next("w2", ["ready"])
+    c = store.claim_next("w3", ["ready"])
+    assert a.id == 2 and b.id == 3      # each claims a distinct ready job
+    assert c is None                    # nothing left to claim
+
+    store.release(2)                    # freed -> claimable again
+    assert store.claim_next("w4", ["ready"]).id == 2
+
+
 @pytest.mark.skipif(
     not os.environ.get("BLURAYRIPPER_TEST_DATABASE_URL"),
     reason="set BLURAYRIPPER_TEST_DATABASE_URL to run Postgres integration test",
