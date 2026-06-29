@@ -187,6 +187,9 @@ class JobManager:
             checkpoints=checkpoints,
             outputs=wj.outputs,
             error=wj.error,
+            stage=wj.stage,
+            progress=round(wj.progress, 4),
+            log=wj.log[-30:],
         )
 
     def _from_record(self, rec: JobRecord) -> WebJob:
@@ -198,6 +201,8 @@ class JobManager:
         )
         wj.disc = disc_from_dict(rec.disc)
         wj.assignments = {a.title_id: a for a in (assignment_from_dict(d) for d in rec.assignments)}
+        wj.stage, wj.progress = rec.stage, rec.progress
+        wj.log = list(rec.log)
         job = Job(source=rec.source)
         job.disc = wj.disc
         job.fingerprint = rec.fingerprint
