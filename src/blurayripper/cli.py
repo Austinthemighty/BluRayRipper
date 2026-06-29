@@ -489,6 +489,25 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_eject(args: argparse.Namespace) -> int:
+    from .tools.eject import eject
+
+    drive = args.drive
+    console.print(f"[bold]Ejecting[/bold] {drive or 'default drive'} …")
+    try:
+        eject(drive)
+        console.print(f"[green]Eject succeeded[/green] for {drive or 'default drive'}.")
+        return 0
+    except Exception as exc:
+        # eject() collects each method's failure into the message.
+        console.print(f"[red]Eject failed:[/red] {exc}")
+        console.print(
+            "[yellow]Tip:[/yellow] pass the exact drive letter (e.g. [bold]blurayripper "
+            "eject F:[/bold]). The error above lists what each method (ioctl/shell/mci) "
+            "returned.")
+        return 1
+
+
 async def _cmd_resub(args: argparse.Namespace) -> int:
     from pathlib import Path
 
@@ -639,6 +658,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "source", nargs="?", default=None,
         help="Optional source .mkv with PGS subs; omit to use the cached subs from the rip")
     resub.set_defaults(func=_cmd_resub)
+
+    eject_p = sub.add_parser(
+        "eject", help="Test optical-disc eject on a drive (diagnose auto-eject)")
+    eject_p.add_argument("drive", nargs="?", default=None,
+                         help="Drive to eject, e.g. F: (Windows), /dev/sr0 (Linux); blank = default")
+    eject_p.set_defaults(func=_cmd_eject)
     return parser
 
 
