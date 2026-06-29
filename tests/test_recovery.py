@@ -61,6 +61,37 @@ async def test_recover_resumes_running_and_restores_others(tmp_path, monkeypatch
     assert next(manager._ids) == 8
 
 
+async def test_clustered_recovery_leaves_ready_jobs_for_workers(tmp_path, monkeypatch):
+    settings = load_settings()
+    monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    settings.cluster.use_workers = True
+    store = MemoryStore()
+    # Many READY (prepped, queued) jobs must NOT be re-run by the rip box.
+    for i in range(1, 6):
+        store.save(JobRecord(id=i, source=f"disc:{i}", state="ready", disc=_disc_dict(),
+                             selected_title_ids=[0]))
+    # A job still mid-prep should be resumed by the rip box.
+    store.save(JobRecord(id=9, source="disc:9", state="ripping", disc=_disc_dict(),
+                         selected_title_ids=[0]))
+
+    manager = JobManager(settings, store=store)
+    resumed = []
+    monkeypatch.setattr(manager.pipeline, "execute", lambda *a, **k: resumed.append(1))
+
+    async def fake_prep(job, staging_root, report):
+        resumed.append(job)
+
+    monkeypatch.setattr(manager.pipeline, "prep_phase", fake_prep)
+    monkeypatch.setattr(manager.pipeline, "_persist_mapping", lambda job, report: None)
+
+    n = manager.recover()
+    await _settle()
+
+    assert n == 1                                  # only the mid-prep job resumed
+    assert set(manager.jobs) == {1, 2, 3, 4, 5, 9}  # all loaded for display
+    assert manager.jobs[1].state is JobState.READY  # left claimable for a worker
+
+
 async def test_recover_resumes_interrupted_failed_job(tmp_path, monkeypatch):
     settings = load_settings()
     monkeypatch.setattr(settings.storage, "output_dir", tmp_path)

@@ -218,6 +218,12 @@ class JobManager:
         resumed = 0
         parked = (JobState.DONE, JobState.FAILED,
                   JobState.AWAITING_TITLES, JobState.AWAITING_MAPPING)
+        # Rip-box work (rip + subtitles + grain). In clustered mode the rip box
+        # ONLY re-runs these; READY / worker-owned states are left for workers to
+        # claim from the store (so we don't stampede re-prepping everything).
+        prep_states = (JobState.SCANNING, JobState.SELECTING, JobState.RIPPING,
+                       JobState.EXTRACTING_SUBS, JobState.OCR_SUBS, JobState.AWAITING_GRAIN)
+        clustered = self.settings.cluster.use_workers
         for rec in records:
             wj = self._from_record(rec)
             self.jobs[wj.id] = wj
@@ -227,17 +233,32 @@ class JobManager:
             interrupted_fail = (
                 wj.state is JobState.FAILED and _error_looks_interrupted(wj.error)
             )
-            if wj.state not in parked or interrupted_fail:
-                wj.state = JobState.READY
-                wj.progress = 0.0
-                wj.error = None
-                wj.log.append("Recovered after restart — resuming.")
-                wj._task = self._spawn(self._run_job(wj))
+            if clustered:
+                if wj.state in prep_states:
+                    self._resume(wj)
+                    resumed += 1
+                elif interrupted_fail:
+                    # Make it claimable again; a worker reclaims it.
+                    wj.state = JobState.READY
+                    wj.error = None
+                    if wj._pipeline_job is not None:
+                        wj._pipeline_job.state = JobState.READY
+                    self._persist(wj)
+                # else READY / ENCODING / PLACING -> leave for workers
+            elif wj.state not in parked or interrupted_fail:
+                self._resume(wj)
                 resumed += 1
         if max_id:
             self._ids = itertools.count(max_id + 1)
         self.bus.publish()
         return resumed
+
+    def _resume(self, wj: WebJob) -> None:
+        wj.state = JobState.READY
+        wj.progress = 0.0
+        wj.error = None
+        wj.log.append("Recovered after restart — resuming.")
+        wj._task = self._spawn(self._run_job(wj))
 
     # --- queries --------------------------------------------------------
 
