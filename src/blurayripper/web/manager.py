@@ -26,7 +26,7 @@ from ..persistence import (
     disc_to_dict,
     make_store,
 )
-from ..pipeline import Job, JobState, Pipeline
+from ..pipeline import Job, JobState, Pipeline, _resolve_path
 from ..scheduler import EncodeScheduler
 from ..services import library
 from ..services.drive_names import DriveNames
@@ -472,6 +472,28 @@ class JobManager:
                 if a.kind is MediaKind.MOVIE:
                     a.edition = edition or None
         self._persist(wj)
+        self.bus.publish()
+
+    async def generate_preview(self, job_id: int) -> None:
+        """Render a grain still-comparison on demand for a queued job (so jobs
+        don't have to park at a preview gate). Stores the stills on the job."""
+        wj = self.jobs[job_id]
+        job = wj._pipeline_job
+        if job is None or not wj.selected_title_ids:
+            raise ValueError("Job is not ready for a preview yet.")
+        if not self.pipeline.ffmpeg.available:
+            raise ValueError("ffmpeg not installed — grain preview unavailable.")
+        title_id = wj.selected_title_ids[0]
+        cp = job.checkpoints.get(title_id, {})
+        prior = cp.get("ripped_path")
+        ripped = _resolve_path(self.settings.storage.staging_dir, prior) if prior else None
+        if ripped is None or not ripped.exists():
+            raise ValueError("Ripped file not available for preview.")
+        reporter = _Reporter(self, wj)
+        preview_dir = self.settings.storage.staging_dir / f"job_{wj.id}" / "preview"
+        off_png, on_png = await self.pipeline._generate_grain_preview(
+            job, ripped, title_id, preview_dir, reporter)
+        wj.preview_off, wj.preview_on = off_png, on_png
         self.bus.publish()
 
     def set_grain(self, job_id: int, tune_grain: bool) -> None:

@@ -192,6 +192,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _gate(lambda: manager.edit_job(job_id, body.grain_mode, body.tune_grain, body.edition))
         return {"ok": True}
 
+    @app.post("/api/jobs/{job_id}/preview-grain")
+    async def preview_grain(job_id: int):
+        try:
+            await manager.generate_preview(job_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Job not found.")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"ok": True}
+
     @app.get("/api/jobs/{job_id}/preview/{which}")
     async def preview_image(job_id: int, which: str):
         wj = manager.jobs.get(job_id)
