@@ -237,7 +237,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def tmdb_season(tv_id: int, season: int):
         try:
             eps = await tmdb.get_season(tv_id, season)
-            return [{"episode": e.episode_number, "name": e.name} for e in eps]
+            return [{"episode": e.episode_number, "name": e.name, "runtime": e.runtime} for e in eps]
         except MetadataError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         except Exception as exc:

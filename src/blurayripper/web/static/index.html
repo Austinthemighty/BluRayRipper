@@ -273,28 +273,48 @@ function buildMapping(card, j){
     const tv = body.querySelector('[data-tv]');
     if (state.kind==='tv') {
       tv.innerHTML = `<div class="row">Season <input data-season type="number" value="1" min="0" style="width:64px;">
-          First episode on this disc <input data-firstep type="number" value="1" min="0" style="width:64px;">
+          First episode <input data-firstep type="number" value="1" min="0" style="width:64px;">
           <button class="sec" data-load>Load episodes</button></div>
-        <div class="muted" style="font-size:12px;">Titles map to consecutive episodes from here — for a multi-disc set, point each disc at its first episode (disc 2 → 5, etc.). Adjust any title below.</div>
+        <div class="muted" style="font-size:12px;">DVD titles are usually in order; Blu-ray titles are often scrambled or reversed — pick each title's episode below (durations shown to help match), or use a fill button.</div>
+        <div data-fill class="row" style="display:none;">
+          <button class="sec" data-order>Fill in order (DVD)</button>
+          <button class="sec" data-runtime>Match by runtime (Blu-ray)</button></div>
         <div data-eps></div>`;
-      const fill = () => {
+      const sel = () => j.titles.filter(t=>j.selected.includes(t.id));
+      const pad = n => String(n).padStart(2,'0');
+      const epOptions = (num) => state.episodes.map(e=>
+        `<option value="${e.episode}" ${e.episode===num?'selected':''}>E${pad(e.episode)} — ${e.name||'?'}${e.runtime?' · '+e.runtime+'m':''}</option>`).join('');
+      const render = (assign) => {
         const s=+tv.querySelector('[data-season]').value;
-        const start=+tv.querySelector('[data-firstep]').value||1;
-        tv.querySelector('[data-eps]').innerHTML = j.titles.filter(t=>j.selected.includes(t.id)).map((t,i)=>{
-          const num=start+i, name=(state.byNum&&state.byNum[num])||'';
-          return `<div class="row">Title ${t.id} (${t.duration}) → S${String(s).padStart(2,'0')}E
-            <input data-ep="${t.id}" type="number" value="${num}" min="0" style="width:64px;">
-            <span class="muted">${name}</span></div>`;
-        }).join('');
+        tv.querySelector('[data-eps]').innerHTML = sel().map(t=>
+          `<div class="row">Title ${t.id} <span class="muted">${t.duration}</span> → S${pad(s)}
+            <select data-ep="${t.id}" style="max-width:360px;">${epOptions(assign[t.id])}</select></div>`).join('');
         body.querySelector('[data-confirm]').disabled=false;
+      };
+      const inOrder = () => { const start=+tv.querySelector('[data-firstep]').value||1; const a={}; sel().forEach((t,i)=>a[t.id]=start+i); return a; };
+      const byRuntime = () => {
+        const used=new Set(), a={};
+        sel().forEach(t=>{
+          let best=null, bd=Infinity;
+          state.episodes.forEach(e=>{ if(used.has(e.episode)) return; const er=(e.runtime||0)*60; const d=er?Math.abs(er-(t.seconds||0)):Infinity; if(d<bd){bd=d;best=e.episode;} });
+          if(best==null) best=state.episodes.map(e=>e.episode).find(n=>!used.has(n));
+          if(best!=null){ used.add(best); a[t.id]=best; }
+        });
+        return a;
       };
       tv.querySelector('[data-load]').onclick = async () => {
         const s=+tv.querySelector('[data-season]').value;
         try { state.episodes = await api('GET',`/api/tmdb/season?tv_id=${state.chosen.id}&season=${s}`);} catch(e){ state.episodes=[]; }
         state.byNum={}; state.episodes.forEach(e=>state.byNum[e.episode]=e.name);
-        fill();
+        if(!state.episodes.length){ tv.querySelector('[data-eps]').innerHTML='<span class="muted">No episodes found for that season.</span>'; return; }
+        tv.querySelector('[data-fill]').style.display='';
+        render(inOrder());
       };
-      tv.querySelector('[data-firstep]').oninput = () => { if (state.episodes && state.episodes.length) fill(); };
+      tv.querySelector('[data-order]').onclick = () => render(inOrder());
+      tv.querySelector('[data-runtime]').onclick = () => {
+        if(!state.episodes.some(e=>e.runtime)) alert('TMDB has no episode runtimes for this season — pick episodes manually from the dropdowns.');
+        render(byRuntime());
+      };
     } else {
       tv.innerHTML = `<div class="muted">Will name ${j.selected.length} selected title(s) as this movie.</div>
         <div class="row">Edition ${editionSelectHtml()}</div>`;
@@ -310,10 +330,12 @@ function buildMapping(card, j){
       assignments = j.selected.map(tid=>({title_id:tid, kind:'movie', show_or_movie_title:state.chosen.title, year:state.chosen.year, edition:ed}));
     } else {
       const s=+body.querySelector('[data-season]').value;
-      const byNum={}; state.episodes.forEach(e=>byNum[e.episode]=e.name);
-      assignments = [...body.querySelectorAll('input[data-ep]')].map(inp=>({
-        title_id:+inp.dataset.ep, kind:'tv', show_or_movie_title:state.chosen.title, year:state.chosen.year,
-        season:s, episode:+inp.value, episode_title: byNum[+inp.value]||null }));
+      const byNum=state.byNum||{};
+      assignments = [...body.querySelectorAll('select[data-ep]')].map(sel=>({
+        title_id:+sel.dataset.ep, kind:'tv', show_or_movie_title:state.chosen.title, year:state.chosen.year,
+        season:s, episode:+sel.value, episode_title: byNum[+sel.value]||null }));
+      const eps = assignments.map(a=>a.episode);
+      if (new Set(eps).size !== eps.length && !confirm('Two titles map to the same episode — continue anyway?')) return;
     }
     const gmode = body.querySelector(`input[name=g${j.id}]:checked`).value;
     const tune_grain = gmode==='on' ? true : (gmode==='off' ? false : null);
