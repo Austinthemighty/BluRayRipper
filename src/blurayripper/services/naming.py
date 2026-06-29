@@ -54,9 +54,15 @@ def _title_with_year(title: str, year: int | None) -> str:
     return f"{base} ({year})" if year else base
 
 
-def movie_video_path(movies_root: Path, title: str, year: int | None, container: str) -> Path:
+def movie_video_path(
+    movies_root: Path, title: str, year: int | None, container: str, edition: str | None = None
+) -> Path:
     folder = _title_with_year(title, year)
-    return movies_root / folder / f"{folder}.{container}"
+    name = folder
+    if edition and edition.strip():
+        # Plex edition tag: "Title (Year) {edition-Extended Cut}.ext"
+        name = f"{folder} {{edition-{sanitize(edition)}}}"
+    return movies_root / folder / f"{name}.{container}"
 
 
 def episode_video_path(

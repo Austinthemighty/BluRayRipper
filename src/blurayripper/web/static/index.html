@@ -225,9 +225,10 @@ function buildMapping(card, j){
     <div class="row"><button data-confirm disabled>Confirm naming</button></div>`;
   const state = { chosen:null, kind: movie?'movie':'tv', episodes:[] };
   body.querySelectorAll(`input[name=k${j.id}]`).forEach(r=>r.onchange=()=>{state.kind=r.value; body.querySelector('[data-tv]').innerHTML=''; });
-  body.querySelector('[data-search]').onclick = async () => {
+  async function doSearch(){
     const q = body.querySelector('[data-q]').value.trim(); if(!q) return;
     const rdiv = body.querySelector('[data-results]');
+    rdiv.innerHTML = '<span class="muted">Searching TMDB…</span>';
     try {
       const res = await api('GET',`/api/tmdb/search?kind=${state.kind}&query=${encodeURIComponent(q)}`);
       if (!res || res.length === 0) {
@@ -245,8 +246,9 @@ function buildMapping(card, j){
       res.slice(0,15).forEach(c=>{ const o=document.createElement('option'); o.value=JSON.stringify(c); o.textContent=`${c.title} (${c.year||'?'})`; sel.appendChild(o); });
       rdiv.innerHTML=''; rdiv.appendChild(sel);
       const pick=()=>{ state.chosen=JSON.parse(sel.value); afterChoose(); }; sel.onchange=pick; pick();
-    } catch(e){ alert(e.message); }
-  };
+    } catch(e){ rdiv.innerHTML = '<span class="muted">'+e.message+'</span>'; }
+  }
+  body.querySelector('[data-search]').onclick = doSearch;
   async function afterChoose(){
     const tv = body.querySelector('[data-tv]');
     if (state.kind==='tv') {
@@ -261,7 +263,13 @@ function buildMapping(card, j){
         body.querySelector('[data-confirm]').disabled=false;
       };
     } else {
-      tv.innerHTML = `<div class="muted">Will name ${j.selected.length} selected title(s) as this movie.</div>`;
+      tv.innerHTML = `<div class="muted">Will name ${j.selected.length} selected title(s) as this movie.</div>
+        <div class="row">Edition
+          <input data-edition list="editions${j.id}" placeholder="(none)" style="width:170px;">
+          <datalist id="editions${j.id}">
+            <option value="Theatrical Cut"><option value="Extended Cut">
+            <option value="Director's Cut"><option value="Unrated"><option value="Special Edition">
+          </datalist></div>`;
       body.querySelector('[data-confirm]').disabled=false;
     }
   }
@@ -269,7 +277,8 @@ function buildMapping(card, j){
     if(!state.chosen){ alert('Pick a title first'); return; }
     let assignments=[];
     if (state.kind==='movie') {
-      assignments = j.selected.map(tid=>({title_id:tid, kind:'movie', show_or_movie_title:state.chosen.title, year:state.chosen.year}));
+      const ed = (body.querySelector('[data-edition]') && body.querySelector('[data-edition]').value.trim()) || null;
+      assignments = j.selected.map(tid=>({title_id:tid, kind:'movie', show_or_movie_title:state.chosen.title, year:state.chosen.year, edition:ed}));
     } else {
       const s=+body.querySelector('[data-season]').value;
       const byNum={}; state.episodes.forEach(e=>byNum[e.episode]=e.name);
@@ -282,6 +291,7 @@ function buildMapping(card, j){
     try { await api('POST',`/api/jobs/${j.id}/mapping`,{assignments, grain_mode:gmode, tune_grain}); } catch(e){ alert(e.message); }
   }
   body.querySelector('[data-confirm]').onclick = doConfirm;
+  doSearch();  // auto-search on the pre-filled disc name (one match auto-confirms)
 }
 
 function buildGrain(card, j){

@@ -19,6 +19,16 @@ def test_movie_path():
     assert p == Path("/out/Movies/Blade Runner (1982)/Blade Runner (1982).mp4")
 
 
+def test_movie_path_with_edition():
+    p = naming.movie_video_path(Path("/out/Movies"), "Blade Runner", 1982, "mkv", "Final Cut")
+    assert p == Path("/out/Movies/Blade Runner (1982)/Blade Runner (1982) {edition-Final Cut}.mkv")
+
+
+def test_movie_path_blank_edition_ignored():
+    p = naming.movie_video_path(Path("/out/Movies"), "Blade Runner", 1982, "mkv", "  ")
+    assert p == Path("/out/Movies/Blade Runner (1982)/Blade Runner (1982).mkv")
+
+
 def test_movie_path_no_year():
     p = naming.movie_video_path(Path("/out/Movies"), "Mystery", None, "mkv")
     assert p == Path("/out/Movies/Mystery/Mystery.mkv")
