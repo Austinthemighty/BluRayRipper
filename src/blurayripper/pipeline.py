@@ -108,6 +108,9 @@ class Pipeline:
         self.subtitleedit = SubtitleEdit(settings)
         self.ffmpeg = FFmpeg(settings)
         self.mapping_store = MappingStore(settings.storage.output_dir / ".blurayripper" / "mappings.db")
+        # Throttle concurrent subtitle extraction so a big batch (or a recovery
+        # resume of many jobs) doesn't fire dozens of multi-GB NAS reads at once.
+        self._extract_sem = asyncio.Semaphore(max(1, settings.subtitles.extract_concurrency))
 
     async def run(self, source: str, job_name: str | None = None) -> Job:
         """Single-job convenience: interactive prepare, then execute."""
@@ -727,6 +730,12 @@ class Pipeline:
         get distinct files instead of overwriting each other.
         """
         report.on_event("Identifying subtitle tracks…")
+        async with self._extract_sem:
+            return await self._extract_subs_inner(ripped_mkv, sub_dir, report)
+
+    async def _extract_subs_inner(
+        self, ripped_mkv: Path, sub_dir: Path, report
+    ) -> list[tuple[Path, SubtitleTrack]]:
         try:
             tracks = await self.mkvtools.identify_subtitles(ripped_mkv)
         except Exception as exc:
