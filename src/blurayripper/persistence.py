@@ -46,6 +46,13 @@ class JobRecord:
     progress: float = 0.0
     log: list[str] = field(default_factory=list)
     worker: str | None = None
+    # Subtitle-based episode identification (survives restart mid-identify):
+    auto_identify: bool = False
+    show_tmdb_id: int | None = None
+    season: int | None = None
+    candidate_episodes: list[int] = field(default_factory=list)
+    show_title: str | None = None
+    show_year: int | None = None
 
     def to_json(self) -> dict:
         return asdict(self)
