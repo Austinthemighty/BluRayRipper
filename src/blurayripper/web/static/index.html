@@ -272,16 +272,29 @@ function buildMapping(card, j){
   async function afterChoose(){
     const tv = body.querySelector('[data-tv]');
     if (state.kind==='tv') {
-      tv.innerHTML = `<div class="row">Season <input data-season type="number" value="1" min="0" style="width:70px;"> <button class="sec" data-load>Load episodes</button></div><div data-eps></div>`;
+      tv.innerHTML = `<div class="row">Season <input data-season type="number" value="1" min="0" style="width:64px;">
+          First episode on this disc <input data-firstep type="number" value="1" min="0" style="width:64px;">
+          <button class="sec" data-load>Load episodes</button></div>
+        <div class="muted" style="font-size:12px;">Titles map to consecutive episodes from here — for a multi-disc set, point each disc at its first episode (disc 2 → 5, etc.). Adjust any title below.</div>
+        <div data-eps></div>`;
+      const fill = () => {
+        const s=+tv.querySelector('[data-season]').value;
+        const start=+tv.querySelector('[data-firstep]').value||1;
+        tv.querySelector('[data-eps]').innerHTML = j.titles.filter(t=>j.selected.includes(t.id)).map((t,i)=>{
+          const num=start+i, name=(state.byNum&&state.byNum[num])||'';
+          return `<div class="row">Title ${t.id} (${t.duration}) → S${String(s).padStart(2,'0')}E
+            <input data-ep="${t.id}" type="number" value="${num}" min="0" style="width:64px;">
+            <span class="muted">${name}</span></div>`;
+        }).join('');
+        body.querySelector('[data-confirm]').disabled=false;
+      };
       tv.querySelector('[data-load]').onclick = async () => {
         const s=+tv.querySelector('[data-season]').value;
         try { state.episodes = await api('GET',`/api/tmdb/season?tv_id=${state.chosen.id}&season=${s}`);} catch(e){ state.episodes=[]; }
-        const eps = tv.querySelector('[data-eps]');
-        eps.innerHTML = j.titles.filter(t=>j.selected.includes(t.id)).map((t,i)=>`
-          <div class="row">Title ${t.id} (${t.duration}) → S${String(s).padStart(2,'0')}E
-            <input data-ep="${t.id}" type="number" value="${i+1}" min="0" style="width:70px;"></div>`).join('');
-        body.querySelector('[data-confirm]').disabled=false;
+        state.byNum={}; state.episodes.forEach(e=>state.byNum[e.episode]=e.name);
+        fill();
       };
+      tv.querySelector('[data-firstep]').oninput = () => { if (state.episodes && state.episodes.length) fill(); };
     } else {
       tv.innerHTML = `<div class="muted">Will name ${j.selected.length} selected title(s) as this movie.</div>
         <div class="row">Edition ${editionSelectHtml()}</div>`;
