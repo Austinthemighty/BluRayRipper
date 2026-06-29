@@ -331,6 +331,27 @@ class Pipeline:
                 job, title_id, assignment, staging_root, ripped, scheduler, report))
         return results
 
+    async def resubtitle(self, source_mkv: Path, video_dest: Path, report) -> list[Path]:
+        """Re-OCR subtitles for an already-placed library item, without encoding.
+
+        Reads PGS tracks from ``source_mkv`` (a MakeMKV rip — the placed video has
+        no subtitle tracks), OCRs them, and writes the .srt sidecars next to
+        ``video_dest``. Returns the placed sidecar paths."""
+        if not source_mkv.exists():
+            raise FileNotFoundError(f"Source MKV not found: {source_mkv}")
+        sub_dir = self.settings.storage.staging_dir / "resub" / _slug(str(video_dest))
+        report.on_event(f"Extracting subtitles from {source_mkv.name} …")
+        extracted = await self._extract_subs(source_mkv, sub_dir, report)
+        if not extracted:
+            report.on_event("No subtitle tracks found in the source MKV.")
+            return []
+        job = Job(source=str(source_mkv))  # lightweight holder for _ocr_all
+        ocr = await self._ocr_all(job, [(0, None, source_mkv, sub_dir, extracted)], report)
+        result = TitleResult(title_id=0)
+        self._place_title_subs(result, video_dest, ocr.get(0, []), report)
+        report.on_event(f"Placed {len(result.subtitle_paths)} subtitle sidecar(s).")
+        return result.subtitle_paths
+
     async def title_heights(self, job: Job, staging_root: Path, report) -> list[int]:
         """Probe each selected title's ripped video height (0 if unknown). Used to
         decide whether the rip box should encode a job locally or hand it to a

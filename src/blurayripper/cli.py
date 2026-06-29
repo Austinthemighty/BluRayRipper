@@ -489,6 +489,39 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_resub(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from .pipeline import Pipeline
+
+    settings = load_settings(args.config)
+    source, video = Path(args.source), Path(args.video)
+    if not source.exists():
+        console.print(f"[red]Source MKV not found: {source}[/red]")
+        return 2
+    if not video.exists():
+        console.print(f"[yellow]Warning: destination video {video} not found — sidecars "
+                      "will still be written next to that path.[/yellow]")
+
+    class _Console:
+        def on_event(self, msg): console.print(f"  {msg}")
+        def on_progress(self, *a): pass
+        def checkpoint(self): pass
+
+    console.print(f"[bold]Re-subtitling[/bold] {video.name} from {source.name} …")
+    try:
+        placed = await Pipeline(settings).resubtitle(source, video, _Console())
+    except ToolNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 2
+    if not placed:
+        console.print("[yellow]No subtitle sidecars were produced.[/yellow]")
+        return 1
+    for p in placed:
+        console.print(f"[green]Placed[/green] {p}")
+    return 0
+
+
 async def _cmd_db_init(args: argparse.Namespace) -> int:
     from .persistence import MemoryStore, make_store
 
@@ -592,6 +625,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "worker", help="Run an encode worker that pulls jobs from the shared queue")
     worker.add_argument("--name", default=None, help="Worker id (default: host:pid)")
     worker.set_defaults(func=_cmd_worker)
+
+    resub = sub.add_parser(
+        "resub",
+        help="Re-OCR subtitles from a source MKV onto an existing library video (no encode)")
+    resub.add_argument("source", help="Source .mkv (a MakeMKV rip that still has the PGS subs)")
+    resub.add_argument("video", help="The placed library video to sit the .srt sidecars next to")
+    resub.set_defaults(func=_cmd_resub)
     return parser
 
 
