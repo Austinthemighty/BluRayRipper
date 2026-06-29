@@ -201,6 +201,10 @@ class ClusterSettings:
     worker_poll_seconds: int = 5      # how often a worker checks for a job
     heartbeat_seconds: int = 15       # how often a busy worker proves it's alive
     stale_after_seconds: int = 180    # reclaim a job if its worker goes quiet
+    # When clustered, the rip box encodes a job itself (instead of enqueuing it)
+    # if every title is <= this height; taller (e.g. UHD 2160p) jobs go to the
+    # workers. 0 = never encode locally (rip box only rips). 1080 = do <=1080p.
+    local_encode_max_height: int = 0
 
 
 @dataclass
@@ -344,6 +348,9 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         worker_poll_seconds=int(cluster_cfg.get("worker_poll_seconds", 5)),
         heartbeat_seconds=int(cluster_cfg.get("heartbeat_seconds", 15)),
         stale_after_seconds=int(cluster_cfg.get("stale_after_seconds", 180)),
+        local_encode_max_height=int(
+            _override("BLURAYRIPPER_LOCAL_ENCODE_MAX_HEIGHT",
+                      cluster_cfg.get("local_encode_max_height")) or 0),
     )
 
     scan_cfg = data.get("scan", {})

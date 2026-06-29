@@ -222,6 +222,21 @@ class Pipeline:
                 job, title_id, assignment, staging_root, ripped, scheduler, report))
         return results
 
+    async def title_heights(self, job: Job, staging_root: Path, report) -> list[int]:
+        """Probe each selected title's ripped video height (0 if unknown). Used to
+        decide whether the rip box should encode a job locally or hand it to a
+        worker (UHD vs <=1080p)."""
+        heights: list[int] = []
+        for title_id in job.selected_title_ids:
+            cp = job.checkpoints.get(title_id, {})
+            prior = cp.get("ripped_path")
+            ripped = _resolve_path(self.settings.storage.staging_dir, prior) if prior else None
+            h = 0
+            if ripped is not None and ripped.exists():
+                h = await self._probe_height(ripped, report) or 0
+            heights.append(h)
+        return heights
+
     async def identify_phase(self, job: Job, staging_root: Path, report) -> dict[int, str]:
         """Rip each selected title and OCR its main subtitle track to SRT text,
         for subtitle-based episode identification. Places nothing — returns
