@@ -412,9 +412,9 @@ class Pipeline:
     async def redo_subtitles(self, job: Job, staging_root: Path, report) -> list[Path]:
         """Re-OCR + place subtitles for a job's titles, no ripping or encoding.
 
-        Source priority per title: the job's staged .sup files (in-flight job —
-        nothing to re-rip), then the per-item cache (already-encoded). Titles with
-        neither are skipped (those need a source MKV via ``resubtitle``)."""
+        Source priority per title: already-extracted .sup, then the staged ripped
+        MKV (re-extract — no re-rip), then the per-item cache (already-encoded).
+        Titles with none are skipped (those need a source MKV via ``resubtitle``)."""
         placed: list[Path] = []
         job.state = JobState.OCR_SUBS
         for title_id in job.selected_title_ids:
@@ -423,12 +423,23 @@ class Pipeline:
                 continue
             video_dest = self._video_path_for(assignment)
             cp = job.checkpoints.get(title_id, {})
-            sub_jobs = self._reuse_subs(cp) or self._cached_subs(video_dest)
+            sub_dir = staging_root / "sub" / f"t{title_id:03d}"
+            # Source priority: already-extracted .sup -> the staged ripped MKV
+            # (re-extract, no re-rip) -> the per-item cache.
+            sub_jobs = self._reuse_subs(cp)
+            if sub_jobs is None:
+                prior = cp.get("ripped_path")
+                ripped = _resolve_path(self.settings.storage.staging_dir, prior) if prior else None
+                if ripped is not None and ripped.exists():
+                    report.on_event(
+                        f"Title {title_id}: re-extracting subtitles from the staged rip …")
+                    sub_jobs = await self._extract_subs(ripped, sub_dir, report)
+            if not sub_jobs:
+                sub_jobs = self._cached_subs(video_dest)
             if not sub_jobs:
                 report.on_event(
-                    f"Title {title_id}: no staged or cached subtitles — re-rip needed.")
+                    f"Title {title_id}: no staged rip or cached subtitles — re-rip needed.")
                 continue
-            sub_dir = staging_root / "sub" / f"t{title_id:03d}"
             ocr = await self._ocr_all(job, [(title_id, assignment, None, sub_dir, sub_jobs)], report)
             result = TitleResult(title_id=title_id)
             self._place_title_subs(result, video_dest, ocr.get(title_id, []), report)
