@@ -32,24 +32,40 @@ def _eject_windows(device: str | None) -> None:
     reliable method for data Blu-ray/DVD discs), then the Shell 'Eject' verb,
     then MCI. Raises with the collected errors if all fail.
     """
-    drive = (device or "").rstrip("\\/")  # e.g. "F:"
+    raw = (device or "").strip().rstrip("\\/")  # "F:", "F:\", or "\\.\CdRom0"
     errors: list[str] = []
-    if drive and ":" in drive:
-        for name, fn in (("ioctl", _eject_ioctl), ("shell", _eject_shell)):
-            try:
-                fn(drive)
-                return
-            except Exception as exc:
-                errors.append(f"{name}: {exc}")
+    # MakeMKV may report a drive letter ("F:") or a device path ("\\.\CdRom0").
+    # The IOCTL handles both; the Shell/MCI fallbacks need a drive letter.
+    if raw.startswith("\\\\"):
+        dev_path: str | None = raw
+        letter: str | None = None
+    elif ":" in raw:
+        dev_path = rf"\\.\{raw}"
+        letter = raw
+    else:
+        dev_path = letter = None
+
+    if dev_path:
+        try:
+            _eject_ioctl(dev_path)
+            return
+        except Exception as exc:
+            errors.append(f"ioctl: {exc}")
+    if letter:
+        try:
+            _eject_shell(letter)
+            return
+        except Exception as exc:
+            errors.append(f"shell: {exc}")
     try:
-        _eject_mci(drive)
+        _eject_mci(letter or raw)
         return
     except Exception as exc:
         errors.append(f"mci: {exc}")
     raise OSError("; ".join(errors) or "no eject method available")
 
 
-def _eject_ioctl(drive: str) -> None:
+def _eject_ioctl(dev_path: str) -> None:
     import ctypes
     from ctypes import wintypes
 
@@ -71,11 +87,11 @@ def _eject_ioctl(drive: str) -> None:
     INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
     handle = k32.CreateFileW(
-        rf"\\.\{drive}", GENERIC_READ | GENERIC_WRITE,
+        dev_path, GENERIC_READ | GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, 0, None,
     )
     if not handle or handle == INVALID_HANDLE_VALUE:
-        raise OSError(f"open {drive} failed (err {ctypes.get_last_error()})")
+        raise OSError(f"open {dev_path} failed (err {ctypes.get_last_error()})")
 
     def ioctl(code: int, in_buf=None, in_len: int = 0) -> bool:
         returned = wintypes.DWORD(0)
@@ -89,7 +105,7 @@ def _eject_ioctl(drive: str) -> None:
         # Allow media removal (PREVENT_MEDIA_REMOVAL{ BOOLEAN PreventMediaRemoval=0 }).
         ioctl(IOCTL_STORAGE_MEDIA_REMOVAL, (ctypes.c_byte * 1)(0), 1)
         if not ioctl(IOCTL_STORAGE_EJECT_MEDIA):
-            raise OSError(f"eject ioctl failed on {drive} (err {ctypes.get_last_error()})")
+            raise OSError(f"eject ioctl failed on {dev_path} (err {ctypes.get_last_error()})")
     finally:
         k32.CloseHandle(handle)
 
