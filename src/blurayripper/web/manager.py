@@ -741,14 +741,33 @@ class JobManager:
                 job.assignments = wj.assignments
                 job.selected_title_ids = wj.selected_title_ids
             if self.settings.cluster.use_workers:
-                # Clustered: rip + subtitles + grain here, then enqueue for a
-                # worker to do only the (heavy) encode.
+                # Clustered: rip + subtitles + grain here. Then either encode
+                # locally (if every title is <= the configured height, e.g. 1080p)
+                # or enqueue for a worker to do the heavy (UHD) encode.
                 staging_root = self.settings.storage.staging_dir / f"job_{wj.id}"
                 await self.pipeline.prep_phase(job, staging_root, reporter)
                 self.pipeline._persist_mapping(job, reporter)
-                job.state = JobState.READY
-                wj.state = JobState.READY  # claimable by a worker
-                reporter.on_event("Ripped + subtitles done — queued for an encode worker.")
+                limit = self.settings.cluster.local_encode_max_height
+                heights = (
+                    await self.pipeline.title_heights(job, staging_root, reporter)
+                    if limit else []
+                )
+                encode_here = bool(limit) and bool(heights) and all(0 < h <= limit for h in heights)
+                if not encode_here:
+                    job.state = JobState.READY
+                    wj.state = JobState.READY  # claimable by a worker
+                    reporter.on_event("Ripped + subtitles done — queued for an encode worker.")
+                    self._persist(wj)
+                    self.bus.publish()
+                    return
+                reporter.on_event(
+                    f"Ripped + subtitles done — encoding locally ({max(heights)}p <= {limit}p).")
+                results = await self.pipeline.encode_phase(
+                    job, staging_root, self.scheduler, reporter)
+                library.cleanup(staging_root)
+                wj.state = JobState.DONE
+                wj.progress = 1.0
+                wj.outputs = [str(r.video_path) for r in results if r.video_path]
                 self._persist(wj)
                 self.bus.publish()
                 return

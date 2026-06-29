@@ -110,6 +110,58 @@ async def test_clustered_mode_rips_then_enqueues(manager, monkeypatch):
     assert wj.state is JobState.READY       # left queued for a worker to claim
 
 
+def _patch_cluster_encode(manager, monkeypatch, heights):
+    from blurayripper.pipeline import TitleResult
+    encoded = []
+
+    async def fake_prep(job, staging_root, report):
+        pass
+
+    async def fake_heights(job, staging_root, report):
+        return heights
+
+    async def fake_encode(job, staging_root, scheduler, report):
+        encoded.append(1)
+        return [TitleResult(0, video_path=manager.settings.storage.staging_dir / "x.mkv")]
+
+    monkeypatch.setattr(manager.pipeline, "prep_phase", fake_prep)
+    monkeypatch.setattr(manager.pipeline, "title_heights", fake_heights)
+    monkeypatch.setattr(manager.pipeline, "encode_phase", fake_encode)
+    monkeypatch.setattr(manager.pipeline, "_persist_mapping", lambda job, report: None)
+    monkeypatch.setattr("blurayripper.web.manager.library.cleanup", lambda p: None)
+    return encoded
+
+
+async def test_clustered_local_encode_for_sub_1080_titles(manager, monkeypatch):
+    manager.settings.cluster.use_workers = True
+    manager.settings.cluster.local_encode_max_height = 1080
+    encoded = _patch_cluster_encode(manager, monkeypatch, [1080])
+
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    manager.set_titles(wj.id, [0])
+    manager.set_mapping(wj.id, [EpisodeAssignment(0, MediaKind.MOVIE, "WarGames", 1983)])
+    await _settle()
+
+    assert encoded                          # encoded on the rip box
+    assert wj.state is JobState.DONE
+
+
+async def test_clustered_uhd_still_enqueues_for_worker(manager, monkeypatch):
+    manager.settings.cluster.use_workers = True
+    manager.settings.cluster.local_encode_max_height = 1080
+    encoded = _patch_cluster_encode(manager, monkeypatch, [2160])
+
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    manager.set_titles(wj.id, [0])
+    manager.set_mapping(wj.id, [EpisodeAssignment(0, MediaKind.MOVIE, "WarGames", 1983)])
+    await _settle()
+
+    assert not encoded                      # too tall — left for a worker
+    assert wj.state is JobState.READY
+
+
 async def test_edit_job_updates_grain_and_edition(manager, monkeypatch):
     manager.settings.cluster.use_workers = True
 
