@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import sys
 
 from rich.console import Console
@@ -459,9 +460,29 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
             "(the same Postgres the rip machine uses) in config/secrets.env.[/red]")
         return 2
     runner = WorkerRunner(settings, worker_id=args.name)
-    console.print(f"[bold green]Encode worker[/bold green] {runner.worker_id} — Ctrl+C to stop.")
+    console.print(
+        f"[bold green]Encode worker[/bold green] {runner.worker_id} — "
+        "Ctrl+C to drain (finish current encode, then exit); Ctrl+C again to abort.")
+
+    import signal
+
+    def _drain(signum, frame):
+        if runner._stop:  # second Ctrl+C — abort the current encode now
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            raise KeyboardInterrupt
+        runner.request_stop()
+        console.print(
+            "[yellow]Draining — will finish the current encode and place it, then "
+            "exit. Ctrl+C again to abort now.[/yellow]")
+
+    with contextlib.suppress(ValueError):  # signal only settable on the main thread
+        signal.signal(signal.SIGINT, _drain)
     try:
         await runner.run()
+    except KeyboardInterrupt:
+        console.print("[red]Aborted — the in-progress encode was discarded; its job "
+                      "will be reclaimed and re-encoded from the rip.[/red]")
+        return 130
     except ToolNotFoundError as exc:
         console.print(f"[red]{exc}[/red]")
         return 2

@@ -24,6 +24,27 @@ def test_job_from_record_roundtrip():
     assert job.assignments[0].show_or_movie_title == "WarGames"
 
 
+async def test_drain_stops_claiming_after_current_job(tmp_path, monkeypatch):
+    settings = load_settings()
+    monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    monkeypatch.setattr(settings, "database_url", "memory://test")
+    runner = WorkerRunner(settings, worker_id="w1")
+    runner.store = MemoryStore()
+    runner.store.save(_ready_record())
+
+    processed = []
+
+    async def fake_process(rec):
+        processed.append(rec.id)
+        runner.request_stop()  # a drain signal arrives while this job runs
+
+    monkeypatch.setattr(runner, "_process", fake_process)
+    await runner.run()
+
+    # The claimed job ran to completion, then the loop exited without polling more.
+    assert processed == [7]
+
+
 async def test_worker_processes_claimed_job(tmp_path, monkeypatch):
     settings = load_settings()
     monkeypatch.setattr(settings.storage, "output_dir", tmp_path)

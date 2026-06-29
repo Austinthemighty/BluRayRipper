@@ -50,9 +50,14 @@ async def _maybe_await(value) -> None:
 
 def _low_priority_kwargs() -> dict:
     """Spawn kwargs to run a child below normal priority, so CPU-heavy work
-    (encodes) yields to ripping and the UI instead of starving them."""
+    (encodes) yields to ripping and the UI instead of starving them.
+
+    On Windows we also put the child in its own process group so a console
+    Ctrl+C (used to *drain* a worker) doesn't abort the running encode — the
+    parent still ends it explicitly via proc.kill() on real cancellation."""
     if sys.platform.startswith("win"):
-        return {"creationflags": 0x00004000}  # BELOW_NORMAL_PRIORITY_CLASS
+        # BELOW_NORMAL_PRIORITY_CLASS | CREATE_NEW_PROCESS_GROUP
+        return {"creationflags": 0x00004000 | 0x00000200}
     return {"preexec_fn": lambda: os.nice(10)}  # POSIX: nicer scheduling
 
 
