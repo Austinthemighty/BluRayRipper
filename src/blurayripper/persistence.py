@@ -136,6 +136,22 @@ class Store(ABC):
     @abstractmethod
     def delete(self, job_id: int) -> None: ...
 
+    @abstractmethod
+    def claim_next(
+        self, worker_id: str, states: list[str], stale_after_seconds: int = 180
+    ) -> JobRecord | None:
+        """Atomically claim one job whose state is claimable and that is either
+        unclaimed or whose worker has gone stale (no heartbeat). Returns the
+        claimed record, or None if nothing is available."""
+
+    @abstractmethod
+    def heartbeat(self, job_id: int, worker_id: str) -> None:
+        """Mark a claimed job alive so it isn't reclaimed by another worker."""
+
+    @abstractmethod
+    def release(self, job_id: int) -> None:
+        """Drop a job's claim so another worker can pick it up."""
+
     def max_id(self) -> int:
         return max((r.id for r in self.load_all()), default=0)
 
@@ -147,6 +163,7 @@ class Store(ABC):
 class MemoryStore(Store):
     def __init__(self) -> None:
         self._rows: dict[int, dict] = {}
+        self._claimed: set[int] = set()
 
     def init(self) -> None:
         pass
@@ -159,6 +176,23 @@ class MemoryStore(Store):
 
     def delete(self, job_id: int) -> None:
         self._rows.pop(job_id, None)
+        self._claimed.discard(job_id)
+
+    def claim_next(
+        self, worker_id: str, states: list[str], stale_after_seconds: int = 180
+    ) -> JobRecord | None:
+        # Single-process: no real concurrency/heartbeat staleness to worry about.
+        for jid, data in sorted(self._rows.items()):
+            if data.get("state") in states and jid not in self._claimed:
+                self._claimed.add(jid)
+                return JobRecord.from_json(data)
+        return None
+
+    def heartbeat(self, job_id: int, worker_id: str) -> None:
+        pass
+
+    def release(self, job_id: int) -> None:
+        self._claimed.discard(job_id)
 
     @property
     def durable(self) -> bool:
@@ -169,8 +203,14 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
     id         BIGINT PRIMARY KEY,
     data       JSONB NOT NULL,
+    state      TEXT,
+    claimed_by TEXT,
+    heartbeat  TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS state TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_by TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS heartbeat TIMESTAMPTZ;
 """
 
 
@@ -194,9 +234,10 @@ class PostgresStore(Store):
 
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO jobs (id, data) VALUES (%s, %s) "
-                "ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()",
-                (record.id, Jsonb(record.to_json())),
+                "INSERT INTO jobs (id, data, state) VALUES (%s, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET "
+                "data = EXCLUDED.data, state = EXCLUDED.state, updated_at = now()",
+                (record.id, Jsonb(record.to_json()), record.state),
             )
 
     def load_all(self) -> list[JobRecord]:
@@ -211,6 +252,37 @@ class PostgresStore(Store):
     def delete(self, job_id: int) -> None:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM jobs WHERE id = %s", (job_id,))
+
+    def claim_next(
+        self, worker_id: str, states: list[str], stale_after_seconds: int = 180
+    ) -> JobRecord | None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE jobs SET claimed_by = %s, heartbeat = now() "
+                "WHERE id = ("
+                "  SELECT id FROM jobs"
+                "  WHERE state = ANY(%s)"
+                "    AND (claimed_by IS NULL OR heartbeat < now() - make_interval(secs => %s))"
+                "  ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1"
+                ") RETURNING data",
+                (worker_id, list(states), stale_after_seconds),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        return JobRecord.from_json(data)
+
+    def heartbeat(self, job_id: int, worker_id: str) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE jobs SET heartbeat = now() WHERE id = %s AND claimed_by = %s",
+                (job_id, worker_id),
+            )
+
+    def release(self, job_id: int) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE jobs SET claimed_by = NULL WHERE id = %s", (job_id,))
 
 
 def make_store(database_url: str | None) -> Store:
