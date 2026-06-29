@@ -126,6 +126,48 @@ async def test_redo_subtitles_uses_staged_subs_no_rerip(tmp_path, monkeypatch):
     assert len(placed) == 1
 
 
+async def test_redo_subtitles_reextracts_from_staged_rip(tmp_path, monkeypatch):
+    from blurayripper.models import DiscInfo, EpisodeAssignment, MediaKind, Title
+    from blurayripper.pipeline import Job
+    from blurayripper.tools.mkvtools import SubtitleTrack
+
+    settings = load_settings()
+    monkeypatch.setattr(settings.storage, "staging_dir", tmp_path / "stage")
+    monkeypatch.setattr(settings.storage, "output_dir", tmp_path / "out")
+    pipe = Pipeline(settings)
+
+    # In-flight job: the ripped MKV is staged, but no .sup were checkpointed.
+    staging_root = settings.storage.staging_dir / "job_1"
+    ripped = staging_root / "rip" / "t000" / "Chef_t00.mkv"
+    ripped.parent.mkdir(parents=True)
+    ripped.write_bytes(b"rip")
+
+    job = Job(source="disc:0")
+    job.disc = DiscInfo(source="disc:0", disc_name="Chef",
+                        titles=[Title(title_id=0, duration_seconds=6000)])
+    job.selected_title_ids = [0]
+    job.assignments = {0: EpisodeAssignment(0, MediaKind.MOVIE, "Chef", 2014)}
+    rel = str(ripped.relative_to(settings.storage.staging_dir)).replace("\\", "/")
+    job.checkpoints = {0: {"ripped_path": rel}}  # no "subs" — only the rip
+
+    extracted_from = []
+
+    async def fake_extract(src, sub_dir, report):
+        extracted_from.append(src)
+        sub_dir.mkdir(parents=True, exist_ok=True)
+        sup = sub_dir / "0.sup"
+        sup.write_bytes(b"pgs")
+        return [(sup, SubtitleTrack(0, "PGS", "eng", is_pgs=True))]
+
+    monkeypatch.setattr(pipe, "_extract_subs", fake_extract)
+    monkeypatch.setattr(pipe.subtitleedit, "ocr_to_srt", _fake_ocr)
+
+    placed = await pipe.redo_subtitles(job, staging_root, _Report())
+
+    assert extracted_from == [ripped]  # re-extracted from the staged rip
+    assert len(placed) == 1
+
+
 async def test_resubtitle_missing_source_raises(tmp_path):
     pipe = Pipeline(load_settings())
     with pytest.raises(FileNotFoundError):
