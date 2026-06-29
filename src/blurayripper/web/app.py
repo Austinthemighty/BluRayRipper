@@ -219,6 +219,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _gate(lambda: manager.edit_job(job_id, body.grain_mode, body.tune_grain, body.edition))
         return {"ok": True}
 
+    @app.post("/api/jobs/redo-subs-all")
+    async def redo_subs_all():
+        return {"jobs": manager.redo_subtitles_all()}
+
     @app.post("/api/jobs/{job_id}/redo-subs")
     async def redo_subs(job_id: int):
         _gate(lambda: manager.redo_subtitles(job_id))
