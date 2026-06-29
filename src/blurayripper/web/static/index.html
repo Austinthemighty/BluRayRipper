@@ -341,8 +341,9 @@ function buildEdit(card, j){
           <div><div class="muted">Grain ON</div><img data-pn src="${on}" style="width:260px;cursor:zoom-in;border:1px solid #30363d;"></div>
         </div>
         <div class="row"><button class="sec" data-uoff>Use grain OFF</button><button data-uon>Use grain ON</button></div>`;
-      pv.querySelector('[data-po]').onclick=()=>lightbox(off);
-      pv.querySelector('[data-pn]').onclick=()=>lightbox(on);
+      const pvItems=[{label:'OFF',src:off},{label:'ON',src:on}];
+      pv.querySelector('[data-po]').onclick=()=>lightbox(pvItems,0);
+      pv.querySelector('[data-pn]').onclick=()=>lightbox(pvItems,1);
       const useGrain = async (on)=>{ try{ await api('POST','/api/jobs/'+j.id+'/edit',{grain_mode:on?'on':'off', tune_grain:on}); body.querySelector('[data-gm]').value=on?'on':'off'; pv.innerHTML='<span class="muted">Grain set to '+(on?'ON':'OFF')+' ✓</span>'; }catch(e){ alert(e.message);} };
       pv.querySelector('[data-uoff]').onclick=()=>useGrain(false);
       pv.querySelector('[data-uon]').onclick=()=>useGrain(true);
@@ -350,24 +351,40 @@ function buildEdit(card, j){
   };
 }
 
-function lightbox(src){
+function lightbox(items, start){
+  // items: [{label, src}] overlaid in the same spot; ← / → flips between them
+  // instantly (both already loaded) so grain differences pop in place.
+  let i = start || 0;
   const ov = document.createElement('div');
-  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;z-index:1000;cursor:zoom-out;';
-  ov.innerHTML = `<img src="${src}" style="max-width:96vw;max-height:96vh;image-rendering:auto;">`;
-  ov.onclick = () => ov.remove();
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.92);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:1000;cursor:zoom-out;';
+  const imgs = items.map(it=>`<img src="${it.src}" style="max-width:96vw;max-height:86vh;grid-area:1/1;">`).join('');
+  ov.innerHTML = `<div data-lbl style="color:#e6edf3;font:14px monospace;margin-bottom:8px;"></div>
+    <div style="display:grid;">${imgs}</div>
+    <div style="color:#8b949e;font:12px monospace;margin-top:8px;">← / → flip · Esc or click to close</div>`;
+  const els = [...ov.querySelectorAll('img')], lbl = ov.querySelector('[data-lbl]');
+  const show = ()=>{ els.forEach((e,k)=>e.style.display = k===i?'':'none'); lbl.textContent = 'Grain '+items[i].label; };
+  const onkey = (e)=>{
+    if (e.key==='ArrowRight'||e.key==='ArrowLeft'){ i=(i+(e.key==='ArrowRight'?1:items.length-1))%items.length; show(); e.preventDefault(); }
+    else if (e.key==='Escape'){ close(); }
+  };
+  const close = ()=>{ document.removeEventListener('keydown', onkey); ov.remove(); };
+  ov.onclick = close;
+  document.addEventListener('keydown', onkey);
+  show();
   document.body.appendChild(ov);
 }
 function buildGrain(card, j){
   const body = card.querySelector('[data-body]');
   if (!j.preview){ body.innerHTML='<div class="muted">Rendering grain preview…</div>'; return; }
-  body.innerHTML = `<div class="muted" style="font-size:12px;">Same frame encoded both ways — click an image to zoom in-place (look at flat areas: skies, walls). Grain shows best in motion, so this still is an approximation.</div>
+  body.innerHTML = `<div class="muted" style="font-size:12px;">Same frame encoded both ways — click an image to zoom, then use ← / → to flip between OFF and ON in the same spot (look at flat areas: skies, walls). Grain shows best in motion, so this still is an approximation.</div>
     <div class="row" style="align-items:flex-start;">
       <div><div class="muted">Grain OFF</div><img data-imgoff src="${j.preview.off}" style="width:320px;max-width:46vw;border:1px solid #30363d;cursor:zoom-in;"></div>
       <div><div class="muted">Grain ON</div><img data-imgon src="${j.preview.on}" style="width:320px;max-width:46vw;border:1px solid #30363d;cursor:zoom-in;"></div>
     </div>
     <div class="row"><button class="sec" data-off>Use grain OFF</button><button data-on>Use grain ON</button></div>`;
-  body.querySelector('[data-imgoff]').onclick=()=>lightbox(j.preview.off);
-  body.querySelector('[data-imgon]').onclick=()=>lightbox(j.preview.on);
+  const gItems=[{label:'OFF',src:j.preview.off},{label:'ON',src:j.preview.on}];
+  body.querySelector('[data-imgoff]').onclick=()=>lightbox(gItems,0);
+  body.querySelector('[data-imgon]').onclick=()=>lightbox(gItems,1);
   body.querySelector('[data-off]').onclick=()=>api('POST',`/api/jobs/${j.id}/grain`,{tune_grain:false}).catch(e=>alert(e.message));
   body.querySelector('[data-on]').onclick=()=>api('POST',`/api/jobs/${j.id}/grain`,{tune_grain:true}).catch(e=>alert(e.message));
 }
