@@ -109,6 +109,10 @@ class WorkerRunner:
         self.scheduler = EncodeScheduler(settings.queue.encode_capacity)
         self._stop = False
 
+    def request_stop(self) -> None:
+        """Drain: finish the job currently encoding (if any), claim no more, exit."""
+        self._stop = True
+
     async def run(self) -> None:
         if not self.settings.database_url:
             raise RuntimeError("A worker needs a shared database. Set BLURAYRIPPER_DATABASE_URL.")
