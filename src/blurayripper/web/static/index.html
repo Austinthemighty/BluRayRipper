@@ -284,23 +284,29 @@ function buildMapping(card, j){
       const pad = n => String(n).padStart(2,'0');
       const epOptions = (num) => state.episodes.map(e=>
         `<option value="${e.episode}" ${e.episode===num?'selected':''}>E${pad(e.episode)} — ${e.name||'?'}${e.runtime?' · '+e.runtime+'m':''}</option>`).join('');
-      const render = (assign) => {
+      const render = (assign, flags) => {
         const s=+tv.querySelector('[data-season]').value;
         tv.querySelector('[data-eps]').innerHTML = sel().map(t=>
           `<div class="row">Title ${t.id} <span class="muted">${t.duration}</span> → S${pad(s)}
-            <select data-ep="${t.id}" style="max-width:360px;">${epOptions(assign[t.id])}</select></div>`).join('');
+            <select data-ep="${t.id}" style="max-width:360px;">${epOptions(assign[t.id])}</select>
+            ${flags&&flags.has(t.id)?'<span title="Several episodes share this runtime, so runtime cannot tell them apart — verify this one." style="color:#d29922;">⚠ ambiguous</span>':''}</div>`).join('');
         body.querySelector('[data-confirm]').disabled=false;
       };
       const inOrder = () => { const start=+tv.querySelector('[data-firstep]').value||1; const a={}; sel().forEach((t,i)=>a[t.id]=start+i); return a; };
       const byRuntime = () => {
-        const used=new Set(), a={};
+        // Greedy nearest-runtime, with a tie flag: a title is "ambiguous" when
+        // more than one episode sits within ~90s of its duration, since runtime
+        // can't separate same-length episodes.
+        const used=new Set(), a={}, flags=new Set();
         sel().forEach(t=>{
           let best=null, bd=Infinity;
           state.episodes.forEach(e=>{ if(used.has(e.episode)) return; const er=(e.runtime||0)*60; const d=er?Math.abs(er-(t.seconds||0)):Infinity; if(d<bd){bd=d;best=e.episode;} });
           if(best==null) best=state.episodes.map(e=>e.episode).find(n=>!used.has(n));
           if(best!=null){ used.add(best); a[t.id]=best; }
+          const near=state.episodes.filter(e=>e.runtime && Math.abs(e.runtime*60-(t.seconds||0))<=90);
+          if(near.length>1 || !state.episodes.some(e=>e.runtime)) flags.add(t.id);
         });
-        return a;
+        return {a, flags};
       };
       tv.querySelector('[data-load]').onclick = async () => {
         const s=+tv.querySelector('[data-season]').value;
@@ -313,7 +319,8 @@ function buildMapping(card, j){
       tv.querySelector('[data-order]').onclick = () => render(inOrder());
       tv.querySelector('[data-runtime]').onclick = () => {
         if(!state.episodes.some(e=>e.runtime)) alert('TMDB has no episode runtimes for this season — pick episodes manually from the dropdowns.');
-        render(byRuntime());
+        const {a, flags} = byRuntime();
+        render(a, flags);
       };
     } else {
       tv.innerHTML = `<div class="muted">Will name ${j.selected.length} selected title(s) as this movie.</div>
