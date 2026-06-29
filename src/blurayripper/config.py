@@ -184,6 +184,7 @@ class EncodeSettings:
 class SubtitleSettings:
     fix_common_errors: bool = True
     remove_text_for_hi: bool = False
+    ocr_concurrency: int = 4  # how many subtitle tracks to OCR at once
 
 
 @dataclass
@@ -334,6 +335,7 @@ def load_settings(config_dir: Path | None = None) -> Settings:
     subtitles = SubtitleSettings(
         fix_common_errors=bool(sub_cfg.get("fix_common_errors", True)),
         remove_text_for_hi=bool(sub_cfg.get("remove_text_for_hi", False)),
+        ocr_concurrency=int(sub_cfg.get("ocr_concurrency", 4)),
     )
 
     audio_cfg = data.get("audio", {})
