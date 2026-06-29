@@ -194,6 +194,16 @@ class QueueSettings:
 
 
 @dataclass
+class ClusterSettings:
+    # When True, the rip machine rips then ENQUEUES jobs (state "ready") for
+    # `blurayripper worker` processes to encode, instead of encoding inline.
+    use_workers: bool = False
+    worker_poll_seconds: int = 5      # how often a worker checks for a job
+    heartbeat_seconds: int = 15       # how often a busy worker proves it's alive
+    stale_after_seconds: int = 180    # reclaim a job if its worker goes quiet
+
+
+@dataclass
 class AudioSettings:
     # "all" keeps every track in the kept languages (incl. commentaries);
     # "main" keeps only the first (primary) track per language.
@@ -213,6 +223,7 @@ class Settings:
     subtitles: SubtitleSettings
     audio: AudioSettings = field(default_factory=AudioSettings)
     queue: QueueSettings = field(default_factory=QueueSettings)
+    cluster: ClusterSettings = field(default_factory=ClusterSettings)
     auto_eject: bool = True
     auto_open: bool = True          # auto-scan a disc when one is inserted
     drive_poll_seconds: int = 15    # how often the drive watcher checks
@@ -324,6 +335,14 @@ def load_settings(config_dir: Path | None = None) -> Settings:
     queue_cfg = data.get("queue", {})
     queue = QueueSettings(encode_capacity=int(queue_cfg.get("encode_capacity", 3)))
 
+    cluster_cfg = data.get("cluster", {})
+    cluster = ClusterSettings(
+        use_workers=bool(cluster_cfg.get("use_workers", False)),
+        worker_poll_seconds=int(cluster_cfg.get("worker_poll_seconds", 5)),
+        heartbeat_seconds=int(cluster_cfg.get("heartbeat_seconds", 15)),
+        stale_after_seconds=int(cluster_cfg.get("stale_after_seconds", 180)),
+    )
+
     scan_cfg = data.get("scan", {})
     disc_cfg = data.get("disc", {})
     meta_cfg = data.get("metadata", {})
@@ -339,6 +358,7 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         subtitles=subtitles,
         audio=audio,
         queue=queue,
+        cluster=cluster,
         auto_eject=bool(disc_cfg.get("auto_eject", True)),
         auto_open=bool(disc_cfg.get("auto_open", True)),
         drive_poll_seconds=int(disc_cfg.get("poll_seconds", 15)),

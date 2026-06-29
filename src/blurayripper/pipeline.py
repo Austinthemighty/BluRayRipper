@@ -184,25 +184,56 @@ class Pipeline:
             )
             job.results.append(result)
 
+    async def rip_phase(self, job: Job, staging_root: Path, report) -> None:
+        """Rip all selected titles (the disc-bound work). Runs on the rip
+        machine; afterwards the job can be encoded by any worker."""
+        assert job.disc is not None
+        for title_id in job.selected_title_ids:
+            if job.assignments.get(title_id) is None:
+                continue
+            assignment = job.assignments[title_id]
+            cp = job.checkpoints.setdefault(title_id, {})
+            if cp.get("placed") and self._video_path_for(assignment).exists():
+                continue
+            await self._ensure_ripped(job, title_id, staging_root, report)
+
+    async def process_phase(
+        self, job: Job, staging_root: Path, scheduler: EncodeScheduler, report
+    ) -> list[TitleResult]:
+        """Encode + subtitles + place for all selected titles. Runs on any
+        worker; reuses the already-ripped files from the shared NAS."""
+        results: list[TitleResult] = []
+        for title_id in job.selected_title_ids:
+            assignment = job.assignments.get(title_id)
+            if assignment is None:
+                report.on_event(f"Skipping title {title_id}: no naming assignment.")
+                continue
+            cp = job.checkpoints.setdefault(title_id, {})
+            prior = cp.get("ripped_path")
+            ripped = _resolve_path(self.settings.storage.staging_dir, prior) if prior else None
+            if (not cp.get("placed")) and (ripped is None or not ripped.exists()):
+                raise RuntimeError(f"Title {title_id} has no ripped file to encode.")
+            results.append(await self._process_after_rip(
+                job, title_id, assignment, staging_root, ripped, scheduler, report))
+        return results
+
     async def _process_one(
         self, job: Job, title_id: int, assignment: EpisodeAssignment, staging_root: Path,
         scheduler: EncodeScheduler, report,
     ) -> TitleResult:
-        result = TitleResult(title_id=title_id)
-        rip_dir = staging_root / "rip" / f"t{title_id:03d}"
-        encode_dir = staging_root / "encode"
-        sub_dir = staging_root / "sub" / f"t{title_id:03d}"
         cp = job.checkpoints.setdefault(title_id, {})
-
-        # Resume: if this title already finished in a prior run, skip it entirely.
-        video_dest = self._video_path_for(assignment)
-        if cp.get("placed") and video_dest.exists():
+        if cp.get("placed") and self._video_path_for(assignment).exists():
             report.on_event(f"Title {title_id} already done (resume) — skipping.")
-            result.video_path = video_dest
-            return result
+            return TitleResult(title_id=title_id, video_path=self._video_path_for(assignment))
+        ripped_mkv = await self._ensure_ripped(job, title_id, staging_root, report)
+        return await self._process_after_rip(
+            job, title_id, assignment, staging_root, ripped_mkv, scheduler, report)
 
-        # Rip — but if a prior run's ripped file is still on disk, reuse it
-        # (the rip is the disc-dependent step we most want to avoid redoing).
+    async def _ensure_ripped(self, job: Job, title_id: int, staging_root: Path, report) -> Path:
+        """Rip the title, or reuse a prior run's ripped file. Ejects after the
+        last rip. Returns the ripped .mkv path."""
+        rip_dir = staging_root / "rip" / f"t{title_id:03d}"
+        cp = job.checkpoints.setdefault(title_id, {})
         staging_dir = self.settings.storage.staging_dir
         prior_rip = cp.get("ripped_path")
         prior_path = _resolve_path(staging_dir, prior_rip) if prior_rip else None
@@ -229,9 +260,6 @@ class Pipeline:
             did_rip = True
             _checkpoint(report)
 
-        # Eject after the last title's rip so the disc is free while the long
-        # encode runs. Only when we actually ripped this run (on resume the disc
-        # may already be gone).
         if (
             did_rip
             and self.settings.auto_eject
@@ -246,6 +274,20 @@ class Pipeline:
                 )
             except Exception as exc:
                 report.on_event(f"Auto-eject failed ({device or 'no device'}): {exc}")
+        return ripped_mkv
+
+    async def _process_after_rip(
+        self, job: Job, title_id: int, assignment: EpisodeAssignment, staging_root: Path,
+        ripped_mkv: Path, scheduler: EncodeScheduler, report,
+    ) -> TitleResult:
+        result = TitleResult(title_id=title_id)
+        encode_dir = staging_root / "encode"
+        sub_dir = staging_root / "sub" / f"t{title_id:03d}"
+        cp = job.checkpoints.setdefault(title_id, {})
+        video_dest = self._video_path_for(assignment)
+        if cp.get("placed") and video_dest.exists():
+            result.video_path = video_dest
+            return result
 
         # Extract subtitles (before encode drops them). On resume, reuse the
         # .sup files from the prior run instead of re-reading the whole (often
