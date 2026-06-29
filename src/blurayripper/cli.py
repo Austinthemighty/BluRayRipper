@@ -495,8 +495,9 @@ async def _cmd_resub(args: argparse.Namespace) -> int:
     from .pipeline import Pipeline
 
     settings = load_settings(args.config)
-    source, video = Path(args.source), Path(args.video)
-    if not source.exists():
+    video = Path(args.video)
+    source = Path(args.source) if args.source else None
+    if source is not None and not source.exists():
         console.print(f"[red]Source MKV not found: {source}[/red]")
         return 2
     if not video.exists():
@@ -508,9 +509,13 @@ async def _cmd_resub(args: argparse.Namespace) -> int:
         def on_progress(self, *a): pass
         def checkpoint(self): pass
 
-    console.print(f"[bold]Re-subtitling[/bold] {video.name} from {source.name} …")
+    src_note = f" from {source.name}" if source else " from cached subs"
+    console.print(f"[bold]Re-subtitling[/bold] {video.name}{src_note} …")
     try:
-        placed = await Pipeline(settings).resubtitle(source, video, _Console())
+        placed = await Pipeline(settings).resubtitle(video, _Console(), source_mkv=source)
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 2
     except ToolNotFoundError as exc:
         console.print(f"[red]{exc}[/red]")
         return 2
@@ -628,9 +633,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     resub = sub.add_parser(
         "resub",
-        help="Re-OCR subtitles from a source MKV onto an existing library video (no encode)")
-    resub.add_argument("source", help="Source .mkv (a MakeMKV rip that still has the PGS subs)")
+        help="Re-OCR subtitles onto an existing library video (no encode); uses cached subs")
     resub.add_argument("video", help="The placed library video to sit the .srt sidecars next to")
+    resub.add_argument(
+        "source", nargs="?", default=None,
+        help="Optional source .mkv with PGS subs; omit to use the cached subs from the rip")
     resub.set_defaults(func=_cmd_resub)
     return parser
 

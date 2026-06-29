@@ -185,6 +185,7 @@ class SubtitleSettings:
     fix_common_errors: bool = True
     remove_text_for_hi: bool = False
     ocr_concurrency: int = 4  # how many subtitle tracks to OCR at once
+    keep_extracted: bool = True  # cache extracted .sup subs so re-OCR needs no re-rip
 
 
 @dataclass
@@ -336,6 +337,7 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         fix_common_errors=bool(sub_cfg.get("fix_common_errors", True)),
         remove_text_for_hi=bool(sub_cfg.get("remove_text_for_hi", False)),
         ocr_concurrency=int(sub_cfg.get("ocr_concurrency", 4)),
+        keep_extracted=bool(sub_cfg.get("keep_extracted", True)),
     )
 
     audio_cfg = data.get("audio", {})

@@ -10,6 +10,8 @@ fingerprint is already known, the confirm gate is skipped automatically.
 from __future__ import annotations
 
 import asyncio
+import json
+import shutil
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -217,8 +219,9 @@ class Pipeline:
         # 3) Place sidecars + resolve grain per title.
         for title_id, assignment, ripped, sub_dir, _sub_jobs in todo:
             result = TitleResult(title_id=title_id)
-            self._place_title_subs(result, self._video_path_for(assignment),
-                                   ocr.get(title_id, []), report)
+            video_dest = self._video_path_for(assignment)
+            self._place_title_subs(result, video_dest, ocr.get(title_id, []), report)
+            self._cache_subs(video_dest, _sub_jobs)
             tune_grain = await self._resolve_grain(job, ripped, title_id, staging_root, report)
             job.checkpoints[title_id]["tune_grain"] = tune_grain
             _checkpoint(report)
@@ -331,24 +334,78 @@ class Pipeline:
                 job, title_id, assignment, staging_root, ripped, scheduler, report))
         return results
 
-    async def resubtitle(self, source_mkv: Path, video_dest: Path, report) -> list[Path]:
+    def _sub_cache_dir(self, video_dest: Path) -> Path:
+        return (self.settings.storage.output_dir / ".blurayripper" / "subcache"
+                / _slug(str(video_dest)))
+
+    def _cache_subs(self, video_dest: Path, sub_jobs: list[tuple[Path, SubtitleTrack]]) -> None:
+        """Persist extracted .sup subs next to a tiny manifest so a later re-OCR
+        (``resubtitle``) needs no re-rip. Best-effort: never raises into a job."""
+        if not self.settings.subtitles.keep_extracted or not sub_jobs:
+            return
+        try:
+            cache_dir = self._sub_cache_dir(video_dest)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            manifest = []
+            for sup, track in sub_jobs:
+                dest = cache_dir / Path(sup).name
+                if Path(sup).resolve() != dest.resolve():
+                    shutil.copy2(sup, dest)
+                manifest.append(_sub_checkpoint(cache_dir, dest, track))
+            (cache_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _cached_subs(self, video_dest: Path) -> list[tuple[Path, SubtitleTrack]] | None:
+        cache_dir = self._sub_cache_dir(video_dest)
+        manifest = cache_dir / "manifest.json"
+        if not manifest.exists():
+            return None
+        try:
+            saved = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        out: list[tuple[Path, SubtitleTrack]] = []
+        for s in saved:
+            sup = _resolve_path(cache_dir, s["sup"])
+            if not sup.exists():
+                return None
+            out.append((sup, SubtitleTrack(
+                track_id=s["track_id"], codec=s.get("codec", ""), language=s.get("language"),
+                is_pgs=True, forced=s.get("forced", False), sdh=s.get("sdh", False),
+                name=s.get("name"),
+            )))
+        return out or None
+
+    async def resubtitle(self, video_dest: Path, report, source_mkv: Path | None = None) -> list[Path]:
         """Re-OCR subtitles for an already-placed library item, without encoding.
 
-        Reads PGS tracks from ``source_mkv`` (a MakeMKV rip — the placed video has
-        no subtitle tracks), OCRs them, and writes the .srt sidecars next to
-        ``video_dest``. Returns the placed sidecar paths."""
-        if not source_mkv.exists():
-            raise FileNotFoundError(f"Source MKV not found: {source_mkv}")
+        Uses the cached .sup subs from the original rip when available (no re-rip);
+        otherwise extracts from ``source_mkv`` (a MakeMKV rip — the placed video
+        has no subtitle tracks). Writes .srt sidecars next to ``video_dest``."""
         sub_dir = self.settings.storage.staging_dir / "resub" / _slug(str(video_dest))
-        report.on_event(f"Extracting subtitles from {source_mkv.name} …")
-        extracted = await self._extract_subs(source_mkv, sub_dir, report)
+        if source_mkv is not None:
+            if not source_mkv.exists():
+                raise FileNotFoundError(f"Source MKV not found: {source_mkv}")
+            report.on_event(f"Extracting subtitles from {source_mkv.name} …")
+            extracted = await self._extract_subs(source_mkv, sub_dir, report)
+        else:
+            extracted = self._cached_subs(video_dest)
+            if extracted is None:
+                raise FileNotFoundError(
+                    f"No cached subtitles for {video_dest.name}. Pass a source MKV "
+                    "(this item predates subtitle caching, or caching is off).")
+            report.on_event(
+                f"Reusing {len(extracted)} cached subtitle track(s) — no re-rip needed.")
         if not extracted:
-            report.on_event("No subtitle tracks found in the source MKV.")
+            report.on_event("No subtitle tracks found.")
             return []
-        job = Job(source=str(source_mkv))  # lightweight holder for _ocr_all
-        ocr = await self._ocr_all(job, [(0, None, source_mkv, sub_dir, extracted)], report)
+        job = Job(source=str(video_dest))  # lightweight holder for _ocr_all
+        ocr = await self._ocr_all(job, [(0, None, video_dest, sub_dir, extracted)], report)
         result = TitleResult(title_id=0)
         self._place_title_subs(result, video_dest, ocr.get(0, []), report)
+        if source_mkv is not None:
+            self._cache_subs(video_dest, extracted)  # cache so next time needs no rip
         report.on_event(f"Placed {len(result.subtitle_paths)} subtitle sidecar(s).")
         return result.subtitle_paths
 
@@ -494,6 +551,7 @@ class Pipeline:
         sub_jobs = await self._extract_title_subs(job, title_id, ripped_mkv, sub_dir, report)
         ocr = await self._ocr_all(job, [(title_id, assignment, ripped_mkv, sub_dir, sub_jobs)], report)
         self._place_title_subs(result, video_dest, ocr.get(title_id, []), report)
+        self._cache_subs(video_dest, sub_jobs)
 
         # Resolve grain (may park at an interactive preview gate — UI only).
         tune_grain = await self._resolve_grain(job, ripped_mkv, title_id, staging_root, report)
