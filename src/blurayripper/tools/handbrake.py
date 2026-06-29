@@ -208,6 +208,10 @@ class HandBrake:
             "--stop-at", f"seconds:{duration:.0f}",
             "-a", "none",
             "-s", "none",
+            # A preview only needs to show the grain-tune difference, not the
+            # final quality — use a fast preset so it renders in seconds, not the
+            # minutes the real (e.g. "slower") preset would take.
+            "--encoder-preset", "veryfast",
         ]
         if self._effective_grain(tune_grain):
             cmd += ["--encoder-tune", "grain"]

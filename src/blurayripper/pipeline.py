@@ -439,7 +439,7 @@ class Pipeline:
         title = job.disc.title(title_id) if job.disc else None
         duration_s = title.duration_seconds if title else 1800
         start = max(1, int(duration_s * 0.33))  # sample ~1/3 in
-        clip_secs = 4.0
+        clip_secs = 2.0
         off_clip = preview_dir / "off.mkv"
         on_clip = preview_dir / "on.mkv"
         await self.handbrake.encode_clip(
