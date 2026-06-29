@@ -233,6 +233,9 @@ class Settings:
     database_url: str | None = None  # Postgres URL for crash recovery; None = in-memory
     tmdb_api_key: str | None = None
     metadata_language: str = "en-US"
+    opensubtitles_api_key: str | None = None
+    opensubtitles_username: str | None = None
+    opensubtitles_password: str | None = None
     config_dir: Path = DEFAULT_CONFIG_DIR
 
 
@@ -252,9 +255,9 @@ def _load_secrets(config_dir: Path) -> dict[str, str]:
                 continue
             key, _, value = line.partition("=")
             secrets[key.strip()] = value.strip().strip('"').strip("'")
-    # Process environment overrides the file (any BLURAYRIPPER_* var + TMDB key).
+    # Process environment overrides the file (any BLURAYRIPPER_* var + API keys).
     for key, value in os.environ.items():
-        if key == "TMDB_API_KEY" or key.startswith("BLURAYRIPPER_"):
+        if key == "TMDB_API_KEY" or key.startswith(("BLURAYRIPPER_", "OPENSUBTITLES_")):
             secrets[key] = value
     return secrets
 
@@ -368,5 +371,8 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         database_url=database_url,
         tmdb_api_key=secrets.get("TMDB_API_KEY") or None,
         metadata_language=meta_cfg.get("language", "en-US"),
+        opensubtitles_api_key=secrets.get("OPENSUBTITLES_API_KEY") or None,
+        opensubtitles_username=secrets.get("OPENSUBTITLES_USERNAME") or None,
+        opensubtitles_password=secrets.get("OPENSUBTITLES_PASSWORD") or None,
         config_dir=cfg_dir,
     )
