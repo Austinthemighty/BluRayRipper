@@ -608,6 +608,19 @@ class JobManager:
         wj._task = self._spawn(self._redo_subs_task(wj))
         self.bus.publish()
 
+    def redo_subtitles_all(self) -> int:
+        """Re-OCR subtitles for every job that has naming assignments, one at a
+        time in the background. Returns how many jobs were queued."""
+        eligible = [wj for wj in self.jobs.values()
+                    if wj._pipeline_job is not None and wj.assignments]
+        if eligible:
+            self._spawn(self._redo_subs_all_task(eligible))
+        return len(eligible)
+
+    async def _redo_subs_all_task(self, jobs: list[WebJob]) -> None:
+        for wj in jobs:  # sequential to bound CPU/IO across the batch
+            await self._redo_subs_task(wj)
+
     async def _redo_subs_task(self, wj: WebJob) -> None:
         reporter = _Reporter(self, wj)
         job = wj._pipeline_job

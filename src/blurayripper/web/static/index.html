@@ -38,7 +38,8 @@
 <header>
   <h1>BluRayRipper</h1>
   <span class="cap" id="cap"></span>
-  <label class="cap" style="margin-left:auto;"><input type="checkbox" id="autoconfirm"> Auto-confirm single matches</label>
+  <button class="sec" id="redoall" style="margin-left:auto;" title="Re-OCR subtitles for every job that has names assigned (uses staged/cached subs; no re-encode).">Re-OCR all subtitles</button>
+  <label class="cap"><input type="checkbox" id="autoconfirm"> Auto-confirm single matches</label>
 </header>
 <div class="wrap">
   <div>
@@ -161,6 +162,7 @@ function renderJobs(snap) {
       if (j.state==='awaiting_grain') buildGrain(card, j);
       if (j.state==='awaiting_match') buildMatch(card, j);
       if (j.state==='ready') buildEdit(card, j);
+      if (j.state==='done' || j.state==='failed') buildResting(card, j);
     }
     liveUpdate(card, j);
   }
@@ -436,6 +438,18 @@ function lightbox(items, start){
   show();
   document.body.appendChild(ov);
 }
+function buildResting(card, j){
+  // done/failed jobs: offer a subtitle re-OCR (staged rip or cached subs).
+  const body = card.querySelector('[data-body]');
+  body.innerHTML = `<div class="row"><button class="sec" data-redosubs title="Re-OCR subtitles from this job's staged rip or cached subs (no re-encode).">Redo subtitles</button><span data-msg class="muted"></span></div>`;
+  body.querySelector('[data-redosubs]').onclick = async () => {
+    const msg = body.querySelector('[data-msg]');
+    msg.textContent = 'Re-OCR subtitles… (watch the log)';
+    try { await api('POST','/api/jobs/'+j.id+'/redo-subs'); }
+    catch(e){ msg.textContent = '⚠ '+e.message; }
+  };
+}
+
 function buildMatch(card, j){
   const body = card.querySelector('[data-body]');
   const m = j.match;
@@ -476,6 +490,14 @@ function buildGrain(card, j){
 }
 
 // live updates via SSE
+document.getElementById('redoall').onclick = async (e) => {
+  const btn = e.target;
+  if(!confirm('Re-OCR subtitles for every job that has names assigned? Uses staged/cached subs — no re-encode.')) return;
+  btn.disabled = true; const label = btn.textContent;
+  try { const r = await api('POST','/api/jobs/redo-subs-all'); btn.textContent = `Re-OCR queued (${r.jobs||0})…`; }
+  catch(err){ alert(err.message); }
+  finally { setTimeout(()=>{ btn.disabled=false; btn.textContent=label; }, 4000); }
+};
 const ev = new EventSource('/api/events');
 ev.onmessage = (m) => { try { renderJobs(JSON.parse(m.data)); } catch (e) { /* ignore a partial/empty frame */ } };
 loadDrives();
