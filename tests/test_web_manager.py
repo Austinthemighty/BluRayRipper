@@ -86,6 +86,30 @@ async def test_snapshot_shape(manager):
     assert snap["jobs"][0]["titles"][0]["id"] == 0
 
 
+async def test_clustered_mode_rips_then_enqueues(manager, monkeypatch):
+    manager.settings.cluster.use_workers = True
+    ripped, executed = [], []
+
+    async def fake_rip(job, staging_root, report):
+        ripped.append(job)
+
+    async def fake_execute(*a, **k):
+        executed.append(1)
+
+    monkeypatch.setattr(manager.pipeline, "rip_phase", fake_rip)
+    monkeypatch.setattr(manager.pipeline, "_persist_mapping", lambda job, report: None)
+    monkeypatch.setattr(manager.pipeline, "execute", fake_execute)
+
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    manager.set_titles(wj.id, [0])
+    manager.set_mapping(wj.id, [EpisodeAssignment(0, MediaKind.MOVIE, "WarGames", 1983)])
+    await _settle()
+
+    assert ripped and not executed         # ripped locally, did NOT encode inline
+    assert wj.state is JobState.READY       # left queued for a worker to claim
+
+
 async def test_remove_parked_job(manager):
     wj = manager.add_disc("disc:0")
     await _settle()

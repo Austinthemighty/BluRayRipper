@@ -80,6 +80,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception as exc:  # don't block startup on a recovery hiccup
             print(f"Job recovery skipped: {exc}")
         manager.start_drive_watch()  # background drive polling + auto-open
+        manager.start_store_refresh()  # reflect remote worker progress (clustered)
 
     @app.on_event("shutdown")
     async def _shutdown():
