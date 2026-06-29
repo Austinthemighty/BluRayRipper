@@ -409,6 +409,33 @@ class Pipeline:
         report.on_event(f"Placed {len(result.subtitle_paths)} subtitle sidecar(s).")
         return result.subtitle_paths
 
+    async def redo_subtitles(self, job: Job, staging_root: Path, report) -> list[Path]:
+        """Re-OCR + place subtitles for a job's titles, no ripping or encoding.
+
+        Source priority per title: the job's staged .sup files (in-flight job —
+        nothing to re-rip), then the per-item cache (already-encoded). Titles with
+        neither are skipped (those need a source MKV via ``resubtitle``)."""
+        placed: list[Path] = []
+        job.state = JobState.OCR_SUBS
+        for title_id in job.selected_title_ids:
+            assignment = job.assignments.get(title_id)
+            if assignment is None:
+                continue
+            video_dest = self._video_path_for(assignment)
+            cp = job.checkpoints.get(title_id, {})
+            sub_jobs = self._reuse_subs(cp) or self._cached_subs(video_dest)
+            if not sub_jobs:
+                report.on_event(
+                    f"Title {title_id}: no staged or cached subtitles — re-rip needed.")
+                continue
+            sub_dir = staging_root / "sub" / f"t{title_id:03d}"
+            ocr = await self._ocr_all(job, [(title_id, assignment, None, sub_dir, sub_jobs)], report)
+            result = TitleResult(title_id=title_id)
+            self._place_title_subs(result, video_dest, ocr.get(title_id, []), report)
+            self._cache_subs(video_dest, sub_jobs)
+            placed.extend(result.subtitle_paths)
+        return placed
+
     async def title_heights(self, job: Job, staging_root: Path, report) -> list[int]:
         """Probe each selected title's ripped video height (0 if unknown). Used to
         decide whether the rip box should encode a job locally or hand it to a

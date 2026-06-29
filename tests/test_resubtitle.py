@@ -85,6 +85,47 @@ async def test_resubtitle_uses_cache_without_source(tmp_path, monkeypatch):
     assert len(placed) == 1
 
 
+async def test_redo_subtitles_uses_staged_subs_no_rerip(tmp_path, monkeypatch):
+    from blurayripper.models import EpisodeAssignment, MediaKind, Title, DiscInfo
+    from blurayripper.pipeline import Job
+
+    settings = load_settings()
+    monkeypatch.setattr(settings.storage, "staging_dir", tmp_path / "stage")
+    monkeypatch.setattr(settings.storage, "output_dir", tmp_path / "out")
+    pipe = Pipeline(settings)
+
+    # A job whose rip + .sup are still staged (encode hasn't happened).
+    staging_root = settings.storage.staging_dir / "job_1"
+    sup = staging_root / "sub" / "t000" / "0.sup"
+    sup.parent.mkdir(parents=True)
+    sup.write_bytes(b"pgs")
+
+    job = Job(source="disc:0")
+    job.disc = DiscInfo(source="disc:0", disc_name="Chef",
+                        titles=[Title(title_id=0, duration_seconds=6000)])
+    job.selected_title_ids = [0]
+    job.assignments = {0: EpisodeAssignment(0, MediaKind.MOVIE, "Chef", 2014)}
+    # Checkpoint points at the staged .sup (as a normal run records).
+    rel = str(sup.relative_to(settings.storage.staging_dir)).replace("\\", "/")
+    job.checkpoints = {0: {"subs": [{"sup": rel, "track_id": 0, "codec": "PGS",
+                                     "language": "eng", "forced": False, "sdh": False,
+                                     "name": None}]}}
+
+    extract_calls = []
+
+    async def fake_extract(ripped, sub_dir, report):
+        extract_calls.append(1)
+        return []
+
+    monkeypatch.setattr(pipe, "_extract_subs", fake_extract)
+    monkeypatch.setattr(pipe.subtitleedit, "ocr_to_srt", _fake_ocr)
+
+    placed = await pipe.redo_subtitles(job, staging_root, _Report())
+
+    assert not extract_calls   # reused the staged .sup, no re-rip/extract
+    assert len(placed) == 1
+
+
 async def test_resubtitle_missing_source_raises(tmp_path):
     pipe = Pipeline(load_settings())
     with pytest.raises(FileNotFoundError):

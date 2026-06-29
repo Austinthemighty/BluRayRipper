@@ -373,7 +373,8 @@ function buildEdit(card, j){
       <select data-gm><option value="off">Off</option><option value="on">On</option></select>
       Edition ${editionSelectHtml()}
       <button class="sec" data-apply>Apply</button>
-      <button class="sec" data-preview>Preview grain</button><span data-msg class="muted"></span></div>
+      <button class="sec" data-preview>Preview grain</button>
+      <button class="sec" data-redosubs title="Re-OCR subtitles from this job's staged/cached subs (no re-rip, no re-encode).">Redo subtitles</button><span data-msg class="muted"></span></div>
     <div data-pv></div>`;
   wireEdition(body);
   body.querySelector('[data-apply]').onclick = async () => {
@@ -385,6 +386,12 @@ function buildEdit(card, j){
       await api('POST','/api/jobs/'+j.id+'/edit',{grain_mode:gm, tune_grain: gm==='on', edition:ed});
       msg.textContent = `Saved ✓ grain ${gm}${ed?', edition '+ed:''}`;
     } catch(e){ msg.textContent = '⚠ '+e.message; }
+  };
+  body.querySelector('[data-redosubs]').onclick = async () => {
+    const msg = body.querySelector('[data-msg]');
+    msg.textContent = 'Re-OCR subtitles… (watch the log)';
+    try { await api('POST','/api/jobs/'+j.id+'/redo-subs'); }
+    catch(e){ msg.textContent = '⚠ '+e.message; }
   };
   body.querySelector('[data-preview]').onclick = async () => {
     const pv = body.querySelector('[data-pv]');
