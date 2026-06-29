@@ -316,7 +316,9 @@ function buildEdit(card, j){
     <div class="row">Grain
       <select data-gm><option value="off">Off</option><option value="on">On</option></select>
       Edition ${editionSelectHtml()}
-      <button class="sec" data-apply>Apply</button><span data-msg class="muted"></span></div>`;
+      <button class="sec" data-apply>Apply</button>
+      <button class="sec" data-preview>Preview grain</button><span data-msg class="muted"></span></div>
+    <div data-pv></div>`;
   wireEdition(body);
   body.querySelector('[data-apply]').onclick = async () => {
     const gm = body.querySelector('[data-gm]').value;
@@ -327,6 +329,24 @@ function buildEdit(card, j){
       await api('POST','/api/jobs/'+j.id+'/edit',{grain_mode:gm, tune_grain: gm==='on', edition:ed});
       msg.textContent = `Saved ✓ grain ${gm}${ed?', edition '+ed:''}`;
     } catch(e){ msg.textContent = '⚠ '+e.message; }
+  };
+  body.querySelector('[data-preview]').onclick = async () => {
+    const pv = body.querySelector('[data-pv]');
+    pv.innerHTML = '<span class="muted">Rendering preview (a few seconds)…</span>';
+    try {
+      await api('POST','/api/jobs/'+j.id+'/preview-grain');
+      const off='/api/jobs/'+j.id+'/preview/off?t='+Date.now(), on='/api/jobs/'+j.id+'/preview/on?t='+Date.now();
+      pv.innerHTML = `<div class="row" style="align-items:flex-start;">
+          <div><div class="muted">Grain OFF</div><img data-po src="${off}" style="width:260px;cursor:zoom-in;border:1px solid #30363d;"></div>
+          <div><div class="muted">Grain ON</div><img data-pn src="${on}" style="width:260px;cursor:zoom-in;border:1px solid #30363d;"></div>
+        </div>
+        <div class="row"><button class="sec" data-uoff>Use grain OFF</button><button data-uon>Use grain ON</button></div>`;
+      pv.querySelector('[data-po]').onclick=()=>lightbox(off);
+      pv.querySelector('[data-pn]').onclick=()=>lightbox(on);
+      const useGrain = async (on)=>{ try{ await api('POST','/api/jobs/'+j.id+'/edit',{grain_mode:on?'on':'off', tune_grain:on}); body.querySelector('[data-gm]').value=on?'on':'off'; pv.innerHTML='<span class="muted">Grain set to '+(on?'ON':'OFF')+' ✓</span>'; }catch(e){ alert(e.message);} };
+      pv.querySelector('[data-uoff]').onclick=()=>useGrain(false);
+      pv.querySelector('[data-uon]').onclick=()=>useGrain(true);
+    } catch(e){ pv.innerHTML = '<span class="muted">⚠ '+e.message+'</span>'; }
   };
 }
 
