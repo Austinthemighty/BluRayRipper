@@ -20,6 +20,7 @@ from .models import DiscInfo, EpisodeAssignment, MediaKind
 from .scheduler import EncodeScheduler, encode_weight
 from .services import library, naming
 from .services.mapping_store import MappingStore
+from .services.subtitles import looks_like_sdh
 from .tools import discinfo
 from .tools.eject import eject
 from .tools.ffmpeg import FFmpeg
@@ -338,9 +339,19 @@ class Pipeline:
             except Exception as exc:
                 report.on_event(f"Subtitle OCR failed ({language}): {type(exc).__name__}: {exc}")
                 continue
+            # Blu-ray PGS rarely carries the SDH flag, so fall back to detecting
+            # it from the OCR'd content (sound cues, music notes, speaker labels).
+            is_sdh = track.sdh
+            if not is_sdh and not track.forced:
+                try:
+                    is_sdh = looks_like_sdh(srt.read_text(encoding="utf-8", errors="ignore"))
+                except OSError:
+                    pass
+                if is_sdh:
+                    report.on_event(f"Detected SDH subtitle ({language}) from content.")
             is_default = False
             index: int | None = None
-            if not track.forced and not track.sdh:
+            if not track.forced and not is_sdh:
                 n = plain_counts.get(language, 0)
                 plain_counts[language] = n + 1
                 if n == 0:
@@ -349,7 +360,7 @@ class Pipeline:
                     index = n + 1  # second plain track -> .2, third -> .3, ...
             srt_dest = naming.subtitle_sidecar_path(
                 video_dest, language,
-                default=is_default, forced=track.forced, sdh=track.sdh, index=index,
+                default=is_default, forced=track.forced, sdh=is_sdh, index=index,
             )
             library.place(srt, srt_dest)
             result.subtitle_paths.append(srt_dest)
