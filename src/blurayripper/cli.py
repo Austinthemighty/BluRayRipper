@@ -449,6 +449,25 @@ async def _cmd_queue(args: argparse.Namespace) -> int:
     return 0 if len(done) == len(prepared) else 1
 
 
+async def _cmd_worker(args: argparse.Namespace) -> int:
+    from .worker import WorkerRunner
+
+    settings = load_settings(args.config)
+    if not settings.database_url:
+        console.print(
+            "[red]A worker needs a shared database. Set BLURAYRIPPER_DATABASE_URL "
+            "(the same Postgres the rip machine uses) in config/secrets.env.[/red]")
+        return 2
+    runner = WorkerRunner(settings, worker_id=args.name)
+    console.print(f"[bold green]Encode worker[/bold green] {runner.worker_id} — Ctrl+C to stop.")
+    try:
+        await runner.run()
+    except ToolNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 2
+    return 0
+
+
 async def _cmd_db_init(args: argparse.Namespace) -> int:
     from .persistence import MemoryStore, make_store
 
@@ -547,6 +566,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     db_init = sub.add_parser("db-init", help="Create/verify the Postgres schema for crash recovery")
     db_init.set_defaults(func=_cmd_db_init)
+
+    worker = sub.add_parser(
+        "worker", help="Run an encode worker that pulls jobs from the shared queue")
+    worker.add_argument("--name", default=None, help="Worker id (default: host:pid)")
+    worker.set_defaults(func=_cmd_worker)
     return parser
 
 

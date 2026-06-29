@@ -41,6 +41,11 @@ class JobRecord:
     checkpoints: dict = field(default_factory=dict)  # {str(title_id): {ripped_path, placed}}
     outputs: list[str] = field(default_factory=list)
     error: str | None = None
+    # Display fields (so a worker's live progress shows in the rip box's UI):
+    stage: str = ""
+    progress: float = 0.0
+    log: list[str] = field(default_factory=list)
+    worker: str | None = None
 
     def to_json(self) -> dict:
         return asdict(self)
