@@ -38,6 +38,7 @@
 <header>
   <h1>BluRayRipper</h1>
   <span class="cap" id="cap"></span>
+  <label class="cap" style="margin-left:auto;"><input type="checkbox" id="autoconfirm"> Auto-confirm single matches</label>
 </header>
 <div class="wrap">
   <div>
@@ -121,6 +122,23 @@ async function renameDrive(d){
 function addManual(){ const v=document.getElementById('manualSrc').value.trim(); if(v) addDisc(v); }
 
 function badgeClass(s){ if(s==='done')return'done'; if(s==='failed')return'failed'; if(s.startsWith('awaiting'))return'await'; return''; }
+
+const EDITIONS = ['Theatrical Cut','Extended Cut',"Director's Cut",'Unrated','Special Edition'];
+function editionSelectHtml(){
+  const opts = EDITIONS.map(e=>`<option>${e}</option>`).join('');
+  return `<select data-edsel><option value="">(none)</option>${opts}<option value="__other">Other…</option></select>`
+       + `<input data-edother placeholder="Custom edition" style="width:150px;display:none;">`;
+}
+function wireEdition(scope){
+  const sel = scope.querySelector('[data-edsel]'); if(!sel) return;
+  const oth = scope.querySelector('[data-edother]');
+  sel.onchange = ()=>{ oth.style.display = sel.value==='__other' ? '' : 'none'; if(sel.value==='__other') oth.focus(); };
+}
+function editionValue(scope){
+  const sel = scope.querySelector('[data-edsel]'); if(!sel) return null;
+  const v = sel.value==='__other' ? scope.querySelector('[data-edother]').value.trim() : sel.value;
+  return v || null;
+}
 
 function renderJobs(snap) {
   const host = document.getElementById('jobs');
@@ -238,9 +256,10 @@ function buildMapping(card, j){
       }
       if (res.length === 1) {
         state.chosen = res[0];
-        rdiv.innerHTML = `<span class="muted">Matched <b>${res[0].title} (${res[0].year||'?'})</b></span>`;
+        rdiv.innerHTML = `<span class="muted">Matched <b>${res[0].title} (${res[0].year||'?'})</b> — set grain/edition, then Confirm</span>`;
         await afterChoose();
-        if (state.kind === 'movie') { await doConfirm(); }  // one movie match -> auto-confirm
+        const auto = document.getElementById('autoconfirm');
+        if (state.kind === 'movie' && auto && auto.checked) { await doConfirm(); }
         return;
       }
       const sel = document.createElement('select');
@@ -265,12 +284,8 @@ function buildMapping(card, j){
       };
     } else {
       tv.innerHTML = `<div class="muted">Will name ${j.selected.length} selected title(s) as this movie.</div>
-        <div class="row">Edition
-          <input data-edition list="editions${j.id}" placeholder="(none)" style="width:170px;">
-          <datalist id="editions${j.id}">
-            <option value="Theatrical Cut"><option value="Extended Cut">
-            <option value="Director's Cut"><option value="Unrated"><option value="Special Edition">
-          </datalist></div>`;
+        <div class="row">Edition ${editionSelectHtml()}</div>`;
+      wireEdition(tv);
       body.querySelector('[data-confirm]').disabled=false;
     }
   }
@@ -278,7 +293,7 @@ function buildMapping(card, j){
     if(!state.chosen){ alert('Pick a title first'); return; }
     let assignments=[];
     if (state.kind==='movie') {
-      const ed = (body.querySelector('[data-edition]') && body.querySelector('[data-edition]').value.trim()) || null;
+      const ed = editionValue(body);
       assignments = j.selected.map(tid=>({title_id:tid, kind:'movie', show_or_movie_title:state.chosen.title, year:state.chosen.year, edition:ed}));
     } else {
       const s=+body.querySelector('[data-season]').value;
@@ -300,13 +315,18 @@ function buildEdit(card, j){
   body.innerHTML = `<div class="muted" style="font-size:12px;">Queued — adjust before a worker starts encoding:</div>
     <div class="row">Grain
       <select data-gm><option value="off">Off</option><option value="on">On</option></select>
-      Edition <input data-ed placeholder="(none)" style="width:150px;">
-      <button class="sec" data-apply>Apply</button></div>`;
+      Edition ${editionSelectHtml()}
+      <button class="sec" data-apply>Apply</button><span data-msg class="muted"></span></div>`;
+  wireEdition(body);
   body.querySelector('[data-apply]').onclick = async () => {
     const gm = body.querySelector('[data-gm]').value;
-    const ed = body.querySelector('[data-ed]').value.trim() || null;
-    try { await api('POST','/api/jobs/'+j.id+'/edit',{grain_mode:gm, tune_grain: gm==='on', edition:ed}); }
-    catch(e){ alert(e.message); }
+    const ed = editionValue(body);
+    const msg = body.querySelector('[data-msg]');
+    msg.textContent = 'Saving…';
+    try {
+      await api('POST','/api/jobs/'+j.id+'/edit',{grain_mode:gm, tune_grain: gm==='on', edition:ed});
+      msg.textContent = `Saved ✓ grain ${gm}${ed?', edition '+ed:''}`;
+    } catch(e){ msg.textContent = '⚠ '+e.message; }
   };
 }
 

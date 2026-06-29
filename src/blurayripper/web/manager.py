@@ -436,6 +436,11 @@ class JobManager:
             if job is not None:
                 job.grain_mode = grain_mode
                 job.tune_grain = tune_grain
+                # Override the per-title checkpoint grain so the encode honors it
+                # even though prep already resolved a value.
+                if tune_grain is not None:
+                    for cp in job.checkpoints.values():
+                        cp["tune_grain"] = tune_grain
         if edition is not None:
             for a in wj.assignments.values():
                 if a.kind is MediaKind.MOVIE:
