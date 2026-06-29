@@ -227,11 +227,23 @@ function buildMapping(card, j){
   body.querySelectorAll(`input[name=k${j.id}]`).forEach(r=>r.onchange=()=>{state.kind=r.value; body.querySelector('[data-tv]').innerHTML=''; });
   body.querySelector('[data-search]').onclick = async () => {
     const q = body.querySelector('[data-q]').value.trim(); if(!q) return;
+    const rdiv = body.querySelector('[data-results]');
     try {
       const res = await api('GET',`/api/tmdb/search?kind=${state.kind}&query=${encodeURIComponent(q)}`);
+      if (!res || res.length === 0) {
+        rdiv.innerHTML = '<span class="muted">No TMDB matches — edit the title and search again.</span>';
+        return;
+      }
+      if (res.length === 1) {
+        state.chosen = res[0];
+        rdiv.innerHTML = `<span class="muted">Matched <b>${res[0].title} (${res[0].year||'?'})</b></span>`;
+        await afterChoose();
+        if (state.kind === 'movie') { await doConfirm(); }  // one movie match -> auto-confirm
+        return;
+      }
       const sel = document.createElement('select');
       res.slice(0,15).forEach(c=>{ const o=document.createElement('option'); o.value=JSON.stringify(c); o.textContent=`${c.title} (${c.year||'?'})`; sel.appendChild(o); });
-      const rdiv = body.querySelector('[data-results]'); rdiv.innerHTML=''; rdiv.appendChild(sel);
+      rdiv.innerHTML=''; rdiv.appendChild(sel);
       const pick=()=>{ state.chosen=JSON.parse(sel.value); afterChoose(); }; sel.onchange=pick; pick();
     } catch(e){ alert(e.message); }
   };
@@ -253,7 +265,7 @@ function buildMapping(card, j){
       body.querySelector('[data-confirm]').disabled=false;
     }
   }
-  body.querySelector('[data-confirm]').onclick = async () => {
+  async function doConfirm(){
     if(!state.chosen){ alert('Pick a title first'); return; }
     let assignments=[];
     if (state.kind==='movie') {
@@ -268,7 +280,8 @@ function buildMapping(card, j){
     const gmode = body.querySelector(`input[name=g${j.id}]:checked`).value;
     const tune_grain = gmode==='on' ? true : (gmode==='off' ? false : null);
     try { await api('POST',`/api/jobs/${j.id}/mapping`,{assignments, grain_mode:gmode, tune_grain}); } catch(e){ alert(e.message); }
-  };
+  }
+  body.querySelector('[data-confirm]').onclick = doConfirm;
 }
 
 function buildGrain(card, j){
