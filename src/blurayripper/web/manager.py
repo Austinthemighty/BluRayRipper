@@ -421,6 +421,28 @@ class JobManager:
         self.bus.publish()
         wj._task = self._spawn(self._run_job(wj))
 
+    def edit_job(self, job_id: int, grain_mode: str | None = None,
+                 tune_grain: bool | None = None, edition: str | None = None) -> None:
+        """Adjust a queued/running job before it encodes: grain and (movie)
+        edition. Takes effect when a worker claims it (clustered) or before the
+        encode reads it; ignored once the title has been placed."""
+        wj = self.jobs[job_id]
+        if self._live_state(wj) is JobState.DONE:
+            raise ValueError("Job already finished.")
+        job = wj._pipeline_job
+        if grain_mode is not None:
+            wj.grain_mode = grain_mode
+            wj.tune_grain = tune_grain
+            if job is not None:
+                job.grain_mode = grain_mode
+                job.tune_grain = tune_grain
+        if edition is not None:
+            for a in wj.assignments.values():
+                if a.kind is MediaKind.MOVIE:
+                    a.edition = edition or None
+        self._persist(wj)
+        self.bus.publish()
+
     def set_grain(self, job_id: int, tune_grain: bool) -> None:
         wj = self.jobs[job_id]
         fut = wj._grain_future

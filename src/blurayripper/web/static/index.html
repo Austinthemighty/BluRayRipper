@@ -141,6 +141,7 @@ function renderJobs(snap) {
       if (j.state==='awaiting_titles') buildTitles(card, j);
       if (j.state==='awaiting_mapping') buildMapping(card, j);
       if (j.state==='awaiting_grain') buildGrain(card, j);
+      if (j.state==='ready') buildEdit(card, j);
     }
     liveUpdate(card, j);
   }
@@ -292,6 +293,21 @@ function buildMapping(card, j){
   }
   body.querySelector('[data-confirm]').onclick = doConfirm;
   doSearch();  // auto-search on the pre-filled disc name (one match auto-confirms)
+}
+
+function buildEdit(card, j){
+  const body = card.querySelector('[data-body]');
+  body.innerHTML = `<div class="muted" style="font-size:12px;">Queued — adjust before a worker starts encoding:</div>
+    <div class="row">Grain
+      <select data-gm><option value="off">Off</option><option value="on">On</option></select>
+      Edition <input data-ed placeholder="(none)" style="width:150px;">
+      <button class="sec" data-apply>Apply</button></div>`;
+  body.querySelector('[data-apply]').onclick = async () => {
+    const gm = body.querySelector('[data-gm]').value;
+    const ed = body.querySelector('[data-ed]').value.trim() || null;
+    try { await api('POST','/api/jobs/'+j.id+'/edit',{grain_mode:gm, tune_grain: gm==='on', edition:ed}); }
+    catch(e){ alert(e.message); }
+  };
 }
 
 function buildGrain(card, j){
