@@ -88,7 +88,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/")
     async def index():
-        return FileResponse(_STATIC / "index.html")
+        # No-cache so a pulled+restarted server always serves the latest UI
+        # (otherwise the browser keeps running the old cached page).
+        return FileResponse(
+            _STATIC / "index.html",
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
 
     @app.get("/api/drives")
     async def drives():
@@ -191,11 +196,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def tmdb_search(kind: str, query: str):
         if not tmdb.configured:
             raise HTTPException(status_code=400, detail="TMDB API key not configured.")
+        # Disc names often carry a trailing "(YYYY)" — TMDB matches the bare
+        # title better, so pull the year out and use it as the year filter.
+        cleaned, year = _clean_query(query)
         try:
             if kind == "movie":
-                res = await tmdb.search_movie(query)
+                res = await tmdb.search_movie(cleaned, year=year)
                 return [{"id": c.tmdb_id, "title": c.title, "year": c.year} for c in res]
-            res = await tmdb.search_tv(query)
+            res = await tmdb.search_tv(cleaned)
             return [{"id": c.tmdb_id, "title": c.name, "year": c.year} for c in res]
         except MetadataError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
@@ -238,6 +246,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return StreamingResponse(stream(), media_type="text/event-stream")
 
     return app
+
+
+def _clean_query(query: str) -> tuple[str, int | None]:
+    """Strip a trailing '(YYYY)' from a search query and return (title, year)."""
+    import re
+
+    m = re.search(r"\((\d{4})\)\s*$", query)
+    year = int(m.group(1)) if m else None
+    cleaned = re.sub(r"\s*\(\d{4}\)\s*$", "", query).strip()
+    return (cleaned or query.strip()), year
 
 
 def _sse(payload: dict) -> str:
