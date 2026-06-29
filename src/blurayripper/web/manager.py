@@ -211,6 +211,10 @@ class JobManager:
         job.grain_mode = rec.grain_mode
         job.tune_grain = rec.tune_grain
         job.checkpoints = {int(k): v for k, v in rec.checkpoints.items()}
+        try:
+            job.state = JobState(rec.state)  # so live-state matches (not default QUEUED)
+        except ValueError:
+            pass
         wj._pipeline_job = job
         return wj
 
