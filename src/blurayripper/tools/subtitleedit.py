@@ -52,13 +52,19 @@ class SubtitleEdit:
         return ([runner, exe] if runner else [exe])
 
     def build_command(self, sup_path: Path, language: str, out_dir: Path) -> list[str]:
+        # NOTE: SubtitleEdit's batch/command-line OCR does NOT accept a language
+        # flag — Tesseract is hard-coded and the language is whatever was last
+        # selected in the SubtitleEdit GUI (saved in Settings.xml). Passing
+        # /tesseractlanguage: makes it abort ("Unknown option"). So we only pass
+        # the engine; set the OCR language once in the GUI (OCR any .sup and pick
+        # the Tesseract language) and the batch tool reuses it. ``language`` is
+        # still used for the sidecar filename and the error hint below.
         cmd = list(self._launcher())
         cmd += [
             "/convert",
             str(sup_path),
             "srt",
             "/ocrengine:tesseract",
-            f"/tesseractlanguage:{tesseract_language(language)}",
             "/encoding:utf-8",
             f"/outputfolder:{out_dir}",
             "/overwrite",
@@ -78,6 +84,8 @@ class SubtitleEdit:
             # SubtitleEdit names the output after the input stem; surface a clear error.
             raise FileNotFoundError(
                 f"SubtitleEdit did not produce expected SRT at {srt_path}. "
-                f"Check the Tesseract '{tesseract_language(language)}' language data is installed."
+                f"Ensure the Tesseract '{tesseract_language(language)}' language data is "
+                "installed and that you've OCR'd one file in the SubtitleEdit GUI to set "
+                "the OCR language (the batch tool can't take a language flag)."
             )
         return srt_path
