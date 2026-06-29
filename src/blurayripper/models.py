@@ -90,6 +90,7 @@ class EpisodeAssignment:
     season: int | None = None
     episode: int | None = None
     episode_title: str | None = None
+    edition: str | None = None  # movies: Plex {edition-...} tag, e.g. "Extended Cut"
 
 
 @dataclass

@@ -512,7 +512,8 @@ class Pipeline:
         container = self.settings.encode.container
         storage = self.settings.storage
         if a.kind is MediaKind.MOVIE:
-            return naming.movie_video_path(storage.movies_root, a.show_or_movie_title, a.year, container)
+            return naming.movie_video_path(
+                storage.movies_root, a.show_or_movie_title, a.year, container, a.edition)
         if a.season is None or a.episode is None:
             raise ValueError(f"TV assignment for title {a.title_id} missing season/episode.")
         return naming.episode_video_path(

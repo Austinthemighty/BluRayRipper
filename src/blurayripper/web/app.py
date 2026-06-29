@@ -47,6 +47,7 @@ class AssignmentIn(BaseModel):
     season: int | None = None
     episode: int | None = None
     episode_title: str | None = None
+    edition: str | None = None
 
 
 class SetMapping(BaseModel):
@@ -161,6 +162,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     season=a.season,
                     episode=a.episode,
                     episode_title=a.episode_title,
+                    edition=a.edition,
                 )
                 for a in body.assignments
             ]
