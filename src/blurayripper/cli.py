@@ -493,10 +493,12 @@ async def _cmd_eject(args: argparse.Namespace) -> int:
     from .tools.eject import eject
 
     drive = args.drive
-    console.print(f"[bold]Ejecting[/bold] {drive or 'default drive'} …")
+    console.print(f"[bold]Ejecting[/bold] {drive or 'default drive'} (method: {args.method}) …")
     try:
-        eject(drive)
-        console.print(f"[green]Eject succeeded[/green] for {drive or 'default drive'}.")
+        eject(drive, args.method)
+        console.print(f"[green]Eject command succeeded[/green] for {drive or 'default drive'}.")
+        console.print("[dim]If the tray still didn't move, try --method scsi / shell / mci, or "
+                      "the \\\\.\\CdRom0 device path.[/dim]")
         return 0
     except Exception as exc:
         # eject() collects each method's failure into the message.
@@ -662,7 +664,10 @@ def _build_parser() -> argparse.ArgumentParser:
     eject_p = sub.add_parser(
         "eject", help="Test optical-disc eject on a drive (diagnose auto-eject)")
     eject_p.add_argument("drive", nargs="?", default=None,
-                         help="Drive to eject, e.g. F: (Windows), /dev/sr0 (Linux); blank = default")
+                         help="Drive to eject, e.g. F: or \\\\.\\CdRom0 (Windows), /dev/sr0 (Linux)")
+    eject_p.add_argument("--method", default="auto",
+                         choices=["auto", "scsi", "ioctl", "shell", "mci"],
+                         help="Force a specific Windows eject method (to find which opens your drive)")
     eject_p.set_defaults(func=_cmd_eject)
     return parser
 

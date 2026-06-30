@@ -10,11 +10,15 @@ import subprocess
 import sys
 
 
-def eject(device: str | None) -> None:
+def eject(device: str | None, method: str = "auto") -> None:
     """Eject the optical disc. ``device`` is an OS device hint:
-    'F:' on Windows, '/dev/sr0' on Linux, a disk id on macOS (may be None)."""
+    'F:' on Windows, '/dev/sr0' on Linux, a disk id on macOS (may be None).
+
+    ``method`` (Windows only): "auto" tries scsi -> ioctl -> shell -> mci; or
+    force one of "scsi"/"ioctl"/"shell"/"mci" (for diagnosing a stubborn drive).
+    """
     if sys.platform.startswith("win"):
-        _eject_windows(device)
+        _eject_windows(device, method)
     elif sys.platform == "darwin":
         # drutil ejects the default optical tray; ignore failure if none.
         subprocess.run(["drutil", "tray", "eject"], check=False)
@@ -25,17 +29,17 @@ def eject(device: str | None) -> None:
         subprocess.run(cmd, check=False)
 
 
-def _eject_windows(device: str | None) -> None:
+def _eject_windows(device: str | None, method: str = "auto") -> None:
     """Eject a data optical disc on Windows.
 
-    Tries, in order: the DeviceIoControl lock/dismount/eject sequence (the
-    reliable method for data Blu-ray/DVD discs), then the Shell 'Eject' verb,
-    then MCI. Raises with the collected errors if all fail.
+    "auto" tries, in order: SCSI START STOP UNIT (physically pops the tray on
+    most drives), the DeviceIoControl eject, the Shell 'Eject' verb, then MCI.
+    IOCTL_STORAGE_EJECT_MEDIA can return success without moving the tray on some
+    drives, which is why SCSI is tried first.
     """
     raw = (device or "").strip().rstrip("\\/")  # "F:", "F:\", or "\\.\CdRom0"
-    errors: list[str] = []
     # MakeMKV may report a drive letter ("F:") or a device path ("\\.\CdRom0").
-    # The IOCTL handles both; the Shell/MCI fallbacks need a drive letter.
+    # SCSI/IOCTL take a device path; Shell/MCI need a drive letter.
     if raw.startswith("\\\\"):
         dev_path: str | None = raw
         letter: str | None = None
@@ -45,24 +49,98 @@ def _eject_windows(device: str | None) -> None:
     else:
         dev_path = letter = None
 
-    if dev_path:
-        try:
-            _eject_ioctl(dev_path)
-            return
-        except Exception as exc:
-            errors.append(f"ioctl: {exc}")
-    if letter:
-        try:
-            _eject_shell(letter)
-            return
-        except Exception as exc:
-            errors.append(f"shell: {exc}")
-    try:
-        _eject_mci(letter or raw)
+    methods: dict[str, tuple[str | None, object]] = {
+        "scsi": (dev_path, _eject_scsi),
+        "ioctl": (dev_path, _eject_ioctl),
+        "shell": (letter, _eject_shell),
+        "mci": (letter or raw, _eject_mci),
+    }
+    if method != "auto":
+        arg, fn = methods.get(method, (None, None))
+        if fn is None:
+            raise OSError(f"unknown eject method '{method}'")
+        if not arg:
+            raise OSError(f"method '{method}' needs a "
+                          f"{'drive letter (e.g. F:)' if method in ('shell', 'mci') else 'device'}")
+        fn(arg)  # type: ignore[operator]
         return
-    except Exception as exc:
-        errors.append(f"mci: {exc}")
+
+    errors: list[str] = []
+    for name in ("scsi", "ioctl", "shell", "mci"):
+        arg, fn = methods[name]
+        if not arg:
+            continue
+        try:
+            fn(arg)  # type: ignore[operator]
+            return
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
     raise OSError("; ".join(errors) or "no eject method available")
+
+
+def _eject_scsi(dev_path: str) -> None:
+    """Physically eject via the SCSI START STOP UNIT command (LoadEject=1,
+    Start=0). The most reliable way to actually move the tray."""
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    GENERIC_READ = 0x80000000
+    GENERIC_WRITE = 0x40000000
+    FILE_SHARE_READ = 0x1
+    FILE_SHARE_WRITE = 0x2
+    OPEN_EXISTING = 3
+    IOCTL_SCSI_PASS_THROUGH_DIRECT = 0x4D014
+    SCSI_IOCTL_DATA_UNSPECIFIED = 2
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    class SPTD(ctypes.Structure):
+        _fields_ = [
+            ("Length", ctypes.c_ushort),
+            ("ScsiStatus", ctypes.c_ubyte),
+            ("PathId", ctypes.c_ubyte),
+            ("TargetId", ctypes.c_ubyte),
+            ("Lun", ctypes.c_ubyte),
+            ("CdbLength", ctypes.c_ubyte),
+            ("SenseInfoLength", ctypes.c_ubyte),
+            ("DataIn", ctypes.c_ubyte),
+            ("DataTransferLength", ctypes.c_ulong),
+            ("TimeOutValue", ctypes.c_ulong),
+            ("DataBuffer", ctypes.c_void_p),
+            ("SenseInfoOffset", ctypes.c_ulong),
+            ("Cdb", ctypes.c_ubyte * 16),
+        ]
+
+    handle = k32.CreateFileW(
+        dev_path, GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, 0, None,
+    )
+    if not handle or handle == INVALID_HANDLE_VALUE:
+        raise OSError(f"open {dev_path} failed (err {ctypes.get_last_error()})")
+    try:
+        sptd = SPTD()
+        sptd.Length = ctypes.sizeof(SPTD)
+        sptd.CdbLength = 6
+        sptd.DataIn = SCSI_IOCTL_DATA_UNSPECIFIED
+        sptd.TimeOutValue = 15
+        sptd.Cdb[0] = 0x1B  # START STOP UNIT
+        sptd.Cdb[4] = 0x02  # LoadEject=1, Start=0 -> eject
+        returned = wintypes.DWORD(0)
+        ok = k32.DeviceIoControl(
+            handle, IOCTL_SCSI_PASS_THROUGH_DIRECT,
+            ctypes.byref(sptd), ctypes.sizeof(sptd),
+            ctypes.byref(sptd), ctypes.sizeof(sptd),
+            ctypes.byref(returned), None,
+        )
+        if not ok:
+            raise OSError(f"scsi eject failed on {dev_path} (err {ctypes.get_last_error()})")
+    finally:
+        k32.CloseHandle(handle)
 
 
 def _eject_ioctl(dev_path: str) -> None:
