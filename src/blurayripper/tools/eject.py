@@ -202,7 +202,7 @@ def _eject_shell(drive: str) -> None:
         f"$i=(New-Object -comObject Shell.Application).Namespace(17).ParseName('{drive}');"
         "if($i -eq $null){throw 'drive not found'};"
         "$v=$i.Verbs()|?{($_.Name -replace '&','') -match 'Eject'};"
-        "if($v){$v.DoIt()}else{throw 'no eject verb'}"
+        "if($v){$v.DoIt();Start-Sleep -Milliseconds 1800}else{throw 'no eject verb'}"
     )
     r = subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
