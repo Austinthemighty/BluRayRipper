@@ -165,12 +165,12 @@ def _eject_ioctl(dev_path: str) -> None:
     IOCTL_STORAGE_EJECT_MEDIA = 0x002D4808
     INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
-    # Open with ZERO desired access: IOCTL_STORAGE_EJECT_MEDIA is FILE_ANY_ACCESS,
-    # so it works on a 0-access handle — and that opens without admin (any
-    # GENERIC_READ/WRITE forces elevation -> "access denied", err 5). Lock/dismount
-    # below need write and simply no-op without it.
+    # Open with GENERIC_READ only: IOCTL_STORAGE_EJECT_MEDIA needs FILE_READ_ACCESS
+    # (a 0-access handle gets ACCESS_DENIED on the IOCTL), but GENERIC_WRITE is
+    # what forces an elevation requirement (err 5 on open). Read-only is the
+    # no-admin sweet spot. Lock/dismount below need write and just no-op.
     handle = k32.CreateFileW(
-        dev_path, 0,
+        dev_path, GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, 0, None,
     )
     if not handle or handle == INVALID_HANDLE_VALUE:
