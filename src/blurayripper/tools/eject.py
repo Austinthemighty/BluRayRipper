@@ -32,10 +32,10 @@ def eject(device: str | None, method: str = "auto") -> None:
 def _eject_windows(device: str | None, method: str = "auto") -> None:
     """Eject a data optical disc on Windows.
 
-    "auto" tries, in order: SCSI START STOP UNIT (physically pops the tray on
-    most drives), the DeviceIoControl eject, the Shell 'Eject' verb, then MCI.
-    IOCTL_STORAGE_EJECT_MEDIA can return success without moving the tray on some
-    drives, which is why SCSI is tried first.
+    "auto" tries, in order: the DeviceIoControl eject (opened read-only, so no
+    admin needed), the Shell eject verb (what Explorer does), then SCSI START
+    STOP UNIT and MCI as last resorts (SCSI needs admin). Forcing a single method
+    is for diagnosing a stubborn drive.
     """
     raw = (device or "").strip().rstrip("\\/")  # "F:", "F:\", or "\\.\CdRom0"
     # MakeMKV may report a drive letter ("F:") or a device path ("\\.\CdRom0").
@@ -66,7 +66,8 @@ def _eject_windows(device: str | None, method: str = "auto") -> None:
         return
 
     errors: list[str] = []
-    for name in ("scsi", "ioctl", "shell", "mci"):
+    # ioctl (read-only) and shell work without admin; scsi/mci are last resorts.
+    for name in ("ioctl", "shell", "scsi", "mci"):
         arg, fn = methods[name]
         if not arg:
             continue
@@ -164,8 +165,11 @@ def _eject_ioctl(dev_path: str) -> None:
     IOCTL_STORAGE_EJECT_MEDIA = 0x002D4808
     INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
+    # Open READ-only: the eject IOCTL works from a normal (non-admin) user this
+    # way. (GENERIC_WRITE would force an elevation requirement — "access denied",
+    # err 5.) Lock/dismount below need write and will just no-op without it.
     handle = k32.CreateFileW(
-        dev_path, GENERIC_READ | GENERIC_WRITE,
+        dev_path, GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, 0, None,
     )
     if not handle or handle == INVALID_HANDLE_VALUE:
@@ -189,11 +193,15 @@ def _eject_ioctl(dev_path: str) -> None:
 
 
 def _eject_shell(drive: str) -> None:
-    # Windows Shell 'Eject' verb (Namespace(17) == ssfDRIVES). Handles some
-    # cases the IOCTL won't; fire-and-forget, so we can't fully verify it.
+    # Windows Shell eject verb (Namespace(17) == ssfDRIVES) — exactly what
+    # Explorer's right-click "Eject" does, and works without admin. The verb is
+    # actually named "E&ject" (with the menu accelerator), so InvokeVerb('Eject')
+    # silently no-ops; enumerate the verbs and fire the eject one via DoIt().
     ps = (
-        f"$item=(New-Object -comObject Shell.Application).Namespace(17).ParseName('{drive}');"
-        "if($item -eq $null){throw 'drive not found'};$item.InvokeVerb('Eject')"
+        f"$i=(New-Object -comObject Shell.Application).Namespace(17).ParseName('{drive}');"
+        "if($i -eq $null){throw 'drive not found'};"
+        "$v=$i.Verbs()|?{($_.Name -replace '&','') -match 'Eject'};"
+        "if($v){$v.DoIt()}else{throw 'no eject verb'}"
     )
     r = subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
