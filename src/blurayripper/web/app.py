@@ -90,6 +90,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
     app = FastAPI(title="BluRayRipper")
     manager = JobManager(settings)
+    app.state.manager = manager  # so serve can flip `closing` when shutdown starts
     tmdb = TMDBClient(settings.tmdb_api_key, settings.metadata_language)
 
     @app.on_event("startup")

@@ -606,7 +606,25 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         app, host=host, port=port, log_level="warning",
         timeout_graceful_shutdown=5,  # don't wait forever on the SSE stream
     )
-    await uvicorn.Server(config).serve()
+    server = uvicorn.Server(config)
+
+    # uvicorn waits for active connections (the SSE stream) to finish before it
+    # runs the lifespan shutdown that sets manager.closing — a deadlock that hangs
+    # Ctrl+C for the full grace period and logs a scary CancelledError. Flip
+    # `closing` the instant shutdown begins so the SSE generators exit at once.
+    async def _close_streams_on_exit():
+        while not server.should_exit:
+            await asyncio.sleep(0.2)
+        mgr = getattr(app.state, "manager", None)
+        if mgr is not None:
+            mgr.closing = True
+            mgr.bus.publish()
+
+    watcher = asyncio.ensure_future(_close_streams_on_exit())
+    try:
+        await server.serve()
+    finally:
+        watcher.cancel()
     return 0
 
 
