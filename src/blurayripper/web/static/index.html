@@ -143,14 +143,14 @@ function editionValue(scope){
 
 const IN_PROGRESS = ['scanning','selecting','ripping','confirming','encoding','extracting_subs','ocr_subs','identifying','placing'];
 const AWAITING = ['awaiting_titles','awaiting_mapping','awaiting_grain','awaiting_match'];
-const GROUP_LABELS = ['Ripping disc','In progress','Needs your input','Queued','Failed','Completed'];
+const GROUP_LABELS = ['Ripping disc','Needs your input','In progress','Queued','Failed','Completed'];
 function jobRank(j){
   const s = j.state;
   const isDisc = /^(disc|dev):/.test(j.source||'');
   if (s==='done') return 5;
   if (s==='failed') return 4;
-  if (IN_PROGRESS.includes(s)) return isDisc ? 0 : 1; // disc rips top, MKV work under
-  if (AWAITING.includes(s)) return 2;                 // needs you to confirm
+  if (AWAITING.includes(s)) return 1;                 // needs you to confirm
+  if (IN_PROGRESS.includes(s)) return isDisc ? 0 : 2; // disc rips top, MKV work under
   return 3;                                           // queued / ready
 }
 
