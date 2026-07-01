@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import sys
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -558,7 +559,9 @@ class Pipeline:
                     f"Ejected disc ({device or 'default drive'}) — safe to load the next one."
                 )
             except Exception as exc:
-                report.on_event(f"Auto-eject failed ({device or 'no device'}): {exc}")
+                hint = (" — on Windows the force-eject IOCTL needs admin; run "
+                        "`serve` as Administrator" if sys.platform.startswith("win") else "")
+                report.on_event(f"Auto-eject failed ({device or 'no device'}): {exc}{hint}")
         return ripped_mkv
 
     async def _process_after_rip(
