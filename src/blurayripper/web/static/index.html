@@ -141,15 +141,28 @@ function editionValue(scope){
   return v || null;
 }
 
+const IN_PROGRESS = ['scanning','selecting','ripping','confirming','encoding','extracting_subs','ocr_subs','identifying','placing'];
+const AWAITING = ['awaiting_titles','awaiting_mapping','awaiting_grain','awaiting_match'];
+const GROUP_LABELS = ['Ripping disc','Needs your input','In progress','Queued','Failed','Completed'];
+function jobRank(j){
+  const s = j.state;
+  const isDisc = /^(disc|dev):/.test(j.source||'');
+  if (s==='done') return 5;
+  if (s==='failed') return 4;
+  if (AWAITING.includes(s)) return 1;                 // needs you to confirm
+  if (IN_PROGRESS.includes(s)) return isDisc ? 0 : 2; // disc rips top, MKV work under
+  return 3;                                           // queued / ready
+}
+
 function renderJobs(snap) {
   const host = document.getElementById('jobs');
-  if (!snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); return; }
+  if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); return; }
   const ph = document.getElementById('placeholder'); if (ph) ph.remove();
+  const jobs = [...snap.jobs].sort((a,b) => jobRank(a)-jobRank(b) || a.id-b.id);
   const seen = new Set();
-  for (const j of snap.jobs) {
+  for (const j of jobs) {
     seen.add(j.id);
     let card = document.getElementById('job-'+j.id);
-    const needsForm = j.state==='awaiting_titles' || j.state==='awaiting_mapping';
     // Rebuild the card if state changed (so forms appear/disappear); else live-update.
     if (!card || renderedState[j.id] !== j.state) {
       card = card || Object.assign(document.createElement('div'), {id:'job-'+j.id, className:'job'});
@@ -166,10 +179,27 @@ function renderJobs(snap) {
     }
     liveUpdate(card, j);
   }
-  // remove cards for jobs no longer present
+  // remove cards for jobs no longer present (leave group headers)
   for (const c of [...host.children]) {
+    if (c.dataset && c.dataset.hdr !== undefined) continue;
     const id = +(c.id||'').split('-')[1];
     if (id && !seen.has(id)) c.remove();
+  }
+  // reorder into priority groups with headers (Completed pinned at the bottom)
+  for (const h of [...host.querySelectorAll('[data-hdr]')]) h.remove();
+  let lastRank = -1;
+  for (const j of jobs) {
+    const r = jobRank(j);
+    if (r !== lastRank) {
+      const hdr = document.createElement('div');
+      hdr.dataset.hdr = '';
+      hdr.textContent = GROUP_LABELS[r];
+      hdr.style.cssText = 'font:600 12px system-ui;color:#8b949e;text-transform:uppercase;letter-spacing:.05em;margin:16px 2px 6px;border-bottom:1px solid #30363d;padding-bottom:3px;';
+      host.appendChild(hdr);
+      lastRank = r;
+    }
+    const card = document.getElementById('job-'+j.id);
+    if (card) host.appendChild(card);
   }
 }
 function renderedStateClear(){ for(const k of Object.keys(renderedState)) delete renderedState[k]; }
