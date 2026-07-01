@@ -707,7 +707,16 @@ class JobManager:
                 self.bus.publish()
                 wj._task = self._spawn(self._run_job(wj))
             else:
-                wj.state = JobState.AWAITING_TITLES
+                # A movie disc has a single main-feature title — skip the title
+                # gate and go straight to naming. TV discs (multiple candidate
+                # episodes) still stop so you can pick which titles to rip.
+                suggested = self._suggested_titles(job.disc)
+                if len(suggested) == 1:
+                    wj.selected_title_ids = [next(iter(suggested))]
+                    wj.state = JobState.AWAITING_MAPPING
+                    reporter.on_event("Single title — auto-selected; confirm the name.")
+                else:
+                    wj.state = JobState.AWAITING_TITLES
                 self._persist(wj)
                 self.bus.publish()
         except Exception as exc:
