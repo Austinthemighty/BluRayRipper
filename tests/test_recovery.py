@@ -145,5 +145,5 @@ async def test_jobs_persist_to_store_on_transitions(tmp_path, monkeypatch):
     # After scan, the job is persisted and recoverable.
     rec = {r.id: r for r in store.load_all()}[wj.id]
     assert rec.source == "disc:0"
-    assert rec.state == "awaiting_titles"
+    assert rec.state == "awaiting_mapping"  # single-title disc auto-advances past titles
     assert rec.disc and rec.disc["disc_name"] == "WarGames"

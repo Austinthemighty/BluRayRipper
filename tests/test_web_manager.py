@@ -11,9 +11,22 @@ from blurayripper.web.manager import JobManager
 
 
 def _fake_disc():
+    # Three episode-length titles -> classified TV, so the job stops at the
+    # titles gate (a single-title movie disc now auto-advances past it).
     return DiscInfo(
         source="disc:0",
         disc_name="WarGames",
+        titles=[
+            Title(title_id=0, duration_seconds=2700, chapter_count=12, source_filename="00001.mpls"),
+            Title(title_id=1, duration_seconds=2700, chapter_count=12, source_filename="00002.mpls"),
+            Title(title_id=2, duration_seconds=2700, chapter_count=12, source_filename="00003.mpls"),
+        ],
+    )
+
+
+def _single_title_disc():
+    return DiscInfo(
+        source="disc:0", disc_name="WarGames",
         titles=[Title(title_id=0, duration_seconds=6762, chapter_count=12, source_filename="00002.mpls")],
     )
 
@@ -68,6 +81,22 @@ async def test_full_gate_flow(manager):
     assert wj.state is JobState.DONE
     assert wj.outputs and "WarGames" in wj.outputs[0]
     assert manager._executed["job"].assignments[0].show_or_movie_title == "WarGames"
+
+
+async def test_single_title_disc_auto_advances_to_mapping(manager, monkeypatch):
+    async def fake_scan(source, report):
+        from blurayripper.pipeline import Job
+        job = Job(source=source)
+        job.disc = _single_title_disc()
+        job.fingerprint = "fp_single"
+        return job
+
+    monkeypatch.setattr(manager.pipeline, "scan_disc", fake_scan)
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    # One main-feature title — skipped the titles gate.
+    assert wj.state is JobState.AWAITING_MAPPING
+    assert wj.selected_title_ids == [0]
 
 
 async def test_set_titles_rejected_in_wrong_state(manager):
