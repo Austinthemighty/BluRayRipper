@@ -156,7 +156,7 @@ function jobRank(j){
 
 function renderJobs(snap) {
   const host = document.getElementById('jobs');
-  if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); return; }
+  if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); renderJobs._sig = ''; return; }
   const ph = document.getElementById('placeholder'); if (ph) ph.remove();
   const jobs = [...snap.jobs].sort((a,b) => jobRank(a)-jobRank(b) || a.id-b.id);
   const seen = new Set();
@@ -185,7 +185,12 @@ function renderJobs(snap) {
     const id = +(c.id||'').split('-')[1];
     if (id && !seen.has(id)) c.remove();
   }
-  // reorder into priority groups with headers (Completed pinned at the bottom)
+  // reorder into priority groups with headers — only when the order actually
+  // changed, so a routine live update never rearranges the DOM (which would jump
+  // the page / log scroll).
+  const sig = jobs.map(j => jobRank(j)+':'+j.id).join(',');
+  if (sig === renderJobs._sig) return;
+  renderJobs._sig = sig;
   for (const h of [...host.querySelectorAll('[data-hdr]')]) h.remove();
   let lastRank = -1;
   for (const j of jobs) {
@@ -229,7 +234,14 @@ function liveUpdate(card, j){
   card.querySelector('[data-badge]').className = 'badge '+badgeClass(j.state);
   card.querySelector('[data-bar]').style.width = Math.round(j.progress*100)+'%';
   card.querySelector('[data-stage]').textContent = j.error ? ('⚠ '+j.error) : (j.stage||'');
-  card.querySelector('[data-log]').textContent = (j.log||[]).join('\n');
+  const logEl = card.querySelector('[data-log]');
+  const logText = (j.log||[]).join('\n');
+  if (logEl.textContent !== logText) {           // don't reset scroll when unchanged
+    const atBottom = logEl.scrollHeight - logEl.clientHeight - logEl.scrollTop < 4;
+    const prevTop = logEl.scrollTop;
+    logEl.textContent = logText;
+    logEl.scrollTop = atBottom ? logEl.scrollHeight : prevTop;  // pin to newest, else keep place
+  }
   if (j.state==='done' && j.outputs && j.outputs.length && !card.querySelector('[data-out]')) {
     const o=document.createElement('div'); o.className='muted'; o.dataset.out='1';
     o.style.fontSize='12px'; o.textContent = j.outputs.join('\n');
