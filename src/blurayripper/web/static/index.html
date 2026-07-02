@@ -141,17 +141,18 @@ function editionValue(scope){
   return v || null;
 }
 
-const IN_PROGRESS = ['scanning','selecting','ripping','confirming','encoding','extracting_subs','ocr_subs','identifying','placing'];
+const RIP_STATES = ['scanning','selecting','ripping'];  // actual disc read
+const IN_PROGRESS = ['confirming','encoding','extracting_subs','ocr_subs','identifying','placing'];
 const AWAITING = ['awaiting_titles','awaiting_mapping','awaiting_grain','awaiting_match'];
 const GROUP_LABELS = ['Failed','Ripping disc','Needs your input','In progress','Queued','Completed'];
 function jobRank(j){
   const s = j.state;
-  const isDisc = /^(disc|dev):/.test(j.source||'');
-  if (s==='failed') return 0;                         // failures at the very top
+  if (s==='failed') return 0;                // failures at the very top
   if (s==='done') return 5;
-  if (AWAITING.includes(s)) return 2;                 // needs you to confirm
-  if (IN_PROGRESS.includes(s)) return isDisc ? 1 : 3; // disc rips, then MKV work
-  return 4;                                           // queued / ready
+  if (AWAITING.includes(s)) return 2;        // needs you to confirm
+  if (RIP_STATES.includes(s)) return 1;      // actively ripping/scanning a disc
+  if (IN_PROGRESS.includes(s)) return 3;     // extracting subs / OCR / encoding
+  return 4;                                  // queued / ready
 }
 
 function renderJobs(snap) {
