@@ -622,18 +622,20 @@ class Pipeline:
                           if job.tune_grain is None else job.tune_grain)
         height = await self._probe_height(ripped_mkv, report)
         weight = encode_weight(height)
+        deinterlace = self._should_deinterlace(height)
         acquired = await scheduler.acquire(weight)
         try:
             job.state = JobState.ENCODING
             report.on_event(
                 f"Encoding title {title_id} ({height or '?'}p, weight {weight}, "
-                f"grain={'on' if tune_grain else 'off'}) -> {video_dest.name} ..."
+                f"grain={'on' if tune_grain else 'off'}"
+                f"{', deinterlace (SD)' if deinterlace else ''}) -> {video_dest.name} ..."
             )
             encoded = encode_dir / video_dest.name
             await self.handbrake.encode(
                 ripped_mkv, encoded,
                 on_progress=lambda p: self._encode_progress(p, report),
-                tune_grain=tune_grain,
+                tune_grain=tune_grain, deinterlace=deinterlace,
             )
         finally:
             await scheduler.release(acquired)
@@ -694,6 +696,17 @@ class Pipeline:
         await self.ffmpeg.extract_frame(on_clip, on_png, at_seconds=clip_secs / 2)
         report.on_event("Grain preview ready — choose grain on/off in the UI.")
         return off_png, on_png
+
+    def _should_deinterlace(self, height: int | None) -> bool:
+        """Whether to apply HandBrake's adaptive decomb. "auto" targets SD/DVD
+        sources (interlaced 480i/576i); "on"/"off" force it. decomb only touches
+        actually-combed frames, so it's safe on progressive SD too."""
+        mode = self.settings.encode.deinterlace
+        if mode == "on":
+            return True
+        if mode == "off":
+            return False
+        return bool(height) and height <= self.settings.encode.deinterlace_max_height
 
     async def _probe_height(self, ripped_mkv: Path, report) -> int | None:
         try:

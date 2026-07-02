@@ -113,6 +113,7 @@ class HandBrake:
 
     def build_command(
         self, src: Path, dst: Path, *, tune_grain: bool | None = None,
+        deinterlace: bool = False,
         start: float | None = None, duration: float | None = None,
     ) -> list[str]:
         enc = self._settings.encode
@@ -145,6 +146,10 @@ class HandBrake:
         ]
         if self._effective_grain(tune_grain):
             cmd += ["--encoder-tune", "grain"]
+        if deinterlace:
+            # Adaptive: comb-detect flags combed frames, decomb deinterlaces only
+            # those (progressive frames pass through untouched). Right for DVDs.
+            cmd += ["--comb-detect", "--decomb"]
         if start is not None:
             cmd += ["--start-at", f"seconds:{start:.0f}"]
         if duration is not None:
@@ -158,6 +163,7 @@ class HandBrake:
         *,
         on_progress: ProgressHandler | None = None,
         tune_grain: bool | None = None,
+        deinterlace: bool = False,
     ) -> Path:
         import json as _json
 
@@ -182,7 +188,8 @@ class HandBrake:
                     await res
 
         await process.run(
-            self.build_command(src, dst, tune_grain=tune_grain), on_line=handle,
+            self.build_command(src, dst, tune_grain=tune_grain, deinterlace=deinterlace),
+            on_line=handle,
             low_priority=self._settings.encode.low_priority,
         )
         return dst

@@ -178,6 +178,11 @@ class EncodeSettings:
     preset_name: str = "Plex H265 1080p"
     tune_grain: bool = False  # default; can be overridden per job in the UI
     low_priority: bool = True  # run encodes below normal priority so rips stay fast
+    # Deinterlace: "auto" applies HandBrake's adaptive decomb to SD/DVD sources
+    # (<= deinterlace_max_height); "on" forces it; "off" never. Decomb only
+    # touches frames that are actually combed, so it's safe on mixed content.
+    deinterlace: str = "auto"
+    deinterlace_max_height: int = 576  # NTSC 480 / PAL 576 -> DVD-era SD
 
 
 @dataclass
@@ -325,6 +330,8 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         preset_name=encode_cfg.get("preset_name", "Plex H265 1080p"),
         tune_grain=bool(encode_cfg.get("tune_grain", False)),
         low_priority=bool(encode_cfg.get("low_priority", True)),
+        deinterlace=str(encode_cfg.get("deinterlace", "auto")),
+        deinterlace_max_height=int(encode_cfg.get("deinterlace_max_height", 576)),
     )
 
     lang_cfg = data.get("languages", {})
