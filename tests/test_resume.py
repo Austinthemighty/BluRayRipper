@@ -75,7 +75,7 @@ async def test_finished_rip_is_reused(tmp_path, monkeypatch):
     async def no_height(*args, **kwargs):
         return None
 
-    async def fake_encode(src, dst, *, on_progress=None, tune_grain=None):
+    async def fake_encode(src, dst, *, on_progress=None, tune_grain=None, deinterlace=False):
         Path(dst).parent.mkdir(parents=True, exist_ok=True)
         Path(dst).write_text("encoded")
         calls["encode"] = True
@@ -123,7 +123,7 @@ async def test_resume_reuses_extracted_subtitles(tmp_path, monkeypatch):
     async def no_height(*a, **k):
         return None
 
-    async def fake_encode(src, dst, *, on_progress=None, tune_grain=None):
+    async def fake_encode(src, dst, *, on_progress=None, tune_grain=None, deinterlace=False):
         Path(dst).parent.mkdir(parents=True, exist_ok=True)
         Path(dst).write_text("enc")
         return dst
@@ -159,7 +159,7 @@ async def test_empty_subs_checkpoint_triggers_reextract(tmp_path, monkeypatch):
     async def no_height(*args, **kwargs):
         return None
 
-    async def fake_encode(src, dst, *, on_progress=None, tune_grain=None):
+    async def fake_encode(src, dst, *, on_progress=None, tune_grain=None, deinterlace=False):
         Path(dst).parent.mkdir(parents=True, exist_ok=True)
         Path(dst).write_text("enc")
         return dst
