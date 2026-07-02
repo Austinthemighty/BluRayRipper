@@ -73,3 +73,11 @@ def test_clip_command_has_start_stop():
         Path("i.mkv"), Path("o.mkv"), tune_grain=True, start=600, duration=4)
     assert cmd[cmd.index("--start-at") + 1] == "seconds:600"
     assert cmd[cmd.index("--stop-at") + 1] == "seconds:4"
+
+
+def test_deinterlace_flag_adds_comb_detect_decomb():
+    hb = HandBrake(_settings())
+    off = hb.build_command(Path("i.mkv"), Path("o.mkv"), deinterlace=False)
+    on = hb.build_command(Path("i.mkv"), Path("o.mkv"), deinterlace=True)
+    assert "--decomb" not in off and "--comb-detect" not in off
+    assert "--comb-detect" in on and "--decomb" in on

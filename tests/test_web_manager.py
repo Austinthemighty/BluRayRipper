@@ -407,3 +407,17 @@ async def test_grain_preview_gate(manager, monkeypatch, tmp_path):
     await _settle()
     assert wj.state is JobState.DONE
     assert manager._executed["grain"] is True
+
+
+def test_should_deinterlace_auto_targets_sd(manager):
+    pipe = manager.pipeline
+    pipe.settings.encode.deinterlace = "auto"
+    pipe.settings.encode.deinterlace_max_height = 576
+    assert pipe._should_deinterlace(480) is True    # NTSC DVD
+    assert pipe._should_deinterlace(576) is True     # PAL DVD
+    assert pipe._should_deinterlace(1080) is False   # HD source
+    assert pipe._should_deinterlace(0) is False      # unknown -> don't
+    pipe.settings.encode.deinterlace = "off"
+    assert pipe._should_deinterlace(480) is False
+    pipe.settings.encode.deinterlace = "on"
+    assert pipe._should_deinterlace(1080) is True
