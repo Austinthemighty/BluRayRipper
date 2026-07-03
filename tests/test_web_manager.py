@@ -216,6 +216,30 @@ async def test_edit_job_updates_grain_and_edition(manager, monkeypatch):
     assert rec.grain_mode == "on" and rec.assignments[0]["edition"] == "Director's Cut"
 
 
+async def test_redo_subs_skips_busy_jobs(manager, monkeypatch):
+    manager.settings.cluster.use_workers = True
+
+    async def fake_rip(job, staging_root, report, include_subs=True):
+        pass
+
+    monkeypatch.setattr(manager.pipeline, "prep_phase", fake_rip)
+    monkeypatch.setattr(manager.pipeline, "_persist_mapping", lambda job, report: None)
+
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    manager.set_titles(wj.id, [0])
+    manager.set_mapping(wj.id, [EpisodeAssignment(0, MediaKind.MOVIE, "WarGames", 1983)])
+    await _settle()
+    assert wj.state is JobState.READY
+
+    # A worker is now encoding it (live state mirrored from the store).
+    wj._pipeline_job.state = JobState.ENCODING
+
+    with pytest.raises(ValueError):
+        manager.redo_subtitles(wj.id)          # single re-OCR refused while busy
+    assert manager.redo_subtitles_all() == 0   # bulk re-OCR skips it
+
+
 async def test_remove_parked_job(manager):
     wj = manager.add_disc("disc:0")
     await _settle()

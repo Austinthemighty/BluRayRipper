@@ -117,7 +117,8 @@ class WorkerRunner:
         if not self.settings.database_url:
             raise RuntimeError("A worker needs a shared database. Set BLURAYRIPPER_DATABASE_URL.")
         self.store.init()
-        print(f"Worker {self.worker_id} ready — polling for jobs…", flush=True)
+        from .version import get_version
+        print(f"Worker {self.worker_id} ready (v{get_version()}) — polling for jobs…", flush=True)
         last_error = None
         while not self._stop:
             try:
