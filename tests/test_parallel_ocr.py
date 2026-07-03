@@ -64,7 +64,9 @@ async def test_prep_phase_ocr_runs_concurrently(tmp_path, monkeypatch):
     monkeypatch.setattr(pipe, "_ensure_ripped", fake_ripped)
     monkeypatch.setattr(pipe, "_extract_title_subs", fake_extract)
     monkeypatch.setattr(pipe.subtitleedit, "ocr_to_srt", fake_ocr)
-    monkeypatch.setattr(pipe, "_place_title_subs", lambda *a, **k: placed.append(1))
+    async def fake_place(*a, **k):
+        placed.append(1)
+    monkeypatch.setattr(pipe, "_place_title_subs", fake_place)
 
     async def fake_grain(job, ripped, title_id, staging_root, report):
         return False
@@ -107,7 +109,9 @@ async def test_ocr_concurrency_capped(tmp_path, monkeypatch):
     monkeypatch.setattr(pipe, "_ensure_ripped", fake_ripped)
     monkeypatch.setattr(pipe, "_extract_title_subs", fake_extract)
     monkeypatch.setattr(pipe.subtitleedit, "ocr_to_srt", fake_ocr)
-    monkeypatch.setattr(pipe, "_place_title_subs", lambda *a, **k: None)
+    async def fake_place(*a, **k):
+        return None
+    monkeypatch.setattr(pipe, "_place_title_subs", fake_place)
 
     async def fake_grain(*a, **k):
         return False

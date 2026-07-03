@@ -78,6 +78,10 @@ ocr_concurrency = 4          # how many subtitle tracks to OCR in parallel
 keep_extracted = true        # cache extracted .sup subs so re-OCR needs no re-rip
 extract_concurrency = 2      # how many titles may read the rip + extract subs at once
                              # (keep low when the rip lives on a NAS)
+# When set, each placed .srt is ALSO copied here (in a per-title subfolder) with
+# a "<name>.info.txt" sheet pre-filling the OpenSubtitles manual-upload form
+# (language, FPS, HD, hearing-impaired, forced/foreign-parts). Blank = off.
+upload_export_dir = ""       # e.g. "./subtitle_uploads". env: BLURAYRIPPER_SUB_UPLOAD_DIR
 
 [metadata]
 provider = "tmdb"

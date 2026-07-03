@@ -48,6 +48,23 @@ def parse_video_height(stdout: str) -> int | None:
     return None
 
 
+def parse_video_fps(stdout: str) -> float | None:
+    """First video track's frame rate from ``mkvmerge -J``, derived from its
+    ``default_duration`` (nanoseconds per frame). Rounded to 3 dp so common
+    rates read cleanly (23.976, 25.0, 29.97)."""
+    data = json.loads(stdout)
+    for track in data.get("tracks", []):
+        if track.get("type") != "video":
+            continue
+        dd = track.get("properties", {}).get("default_duration")
+        if dd:
+            try:
+                return round(1_000_000_000 / int(dd), 3)
+            except (ValueError, ZeroDivisionError):
+                return None
+    return None
+
+
 def parse_probe(stdout: str) -> ProbedFile:
     """Pure parser for ``mkvmerge -J`` -> duration, resolution, audio langs, subs."""
     data = json.loads(stdout)
@@ -121,6 +138,13 @@ class MkvTools:
         cmd = [self._settings.tools.require("mkvmerge"), "-J", str(mkv_path)]
         result = await asyncio.wait_for(process.run(cmd), timeout=120)
         return parse_video_height("\n".join(result.stdout_lines))
+
+    async def video_dims(self, mkv_path: Path) -> tuple[int | None, float | None]:
+        """(height, fps) from a single mkvmerge probe."""
+        cmd = [self._settings.tools.require("mkvmerge"), "-J", str(mkv_path)]
+        result = await asyncio.wait_for(process.run(cmd), timeout=120)
+        stdout = "\n".join(result.stdout_lines)
+        return parse_video_height(stdout), parse_video_fps(stdout)
 
     async def probe(self, mkv_path: Path) -> ProbedFile:
         cmd = [self._settings.tools.require("mkvmerge"), "-J", str(mkv_path)]
