@@ -35,6 +35,11 @@ tune_grain = false
 # Run encodes below normal OS priority so ripping and the UI stay responsive
 # (a 4K x265 encode otherwise pegs every core and starves new rips/drive scans).
 low_priority = true
+# Deinterlace: "auto" applies HandBrake's adaptive decomb to SD/DVD sources only
+# (height <= deinterlace_max_height); "on" forces it; "off" never. Decomb only
+# touches frames that are actually combed, so "auto" is safe on progressive SD.
+deinterlace = "auto"
+deinterlace_max_height = 576   # NTSC 480 / PAL 576 -> DVD-era SD ceiling
 
 [languages]
 # ISO 639-2/B 3-letter codes (as MakeMKV/mkvmerge report them) to KEEP.
@@ -68,7 +73,11 @@ tracks = "all"
 
 [subtitles]
 fix_common_errors = true
-remove_text_for_hi = false  # strip hearing-impaired tags during OCR
+remove_text_for_hi = false   # strip hearing-impaired (SDH) tags during OCR
+ocr_concurrency = 4          # how many subtitle tracks to OCR in parallel
+keep_extracted = true        # cache extracted .sup subs so re-OCR needs no re-rip
+extract_concurrency = 2      # how many titles may read the rip + extract subs at once
+                             # (keep low when the rip lives on a NAS)
 
 [metadata]
 provider = "tmdb"
@@ -90,6 +99,14 @@ use_workers = false
 worker_poll_seconds = 5
 heartbeat_seconds = 15
 stale_after_seconds = 180
+# When clustered, the rip box encodes a job itself if every title is <= this
+# height; taller (e.g. UHD 2160p) jobs go to the workers. 0 = never encode
+# locally (rip box only rips). 1080 = handle <=1080p on the rip box.
+local_encode_max_height = 0
+# When true, subtitle extraction + OCR move OFF the rip box onto the workers
+# (run right before each encode), so restarting `serve` never kills in-flight
+# extraction/OCR/encode. Requires use_workers; best paired with the above = 0.
+worker_does_subs = false
 
 [database]
 # Postgres URL enables crash recovery — jobs persist and resume after a restart

@@ -1,0 +1,128 @@
+# BluRayRipper — full settings reference.
+#
+# Copy to config/settings.toml and edit. Every value below is shown at its
+# DEFAULT, so a key you delete behaves exactly as if you left it here. settings.toml
+# is tracked in git; put machine-specific values and all secrets in
+# config/secrets.env instead (see secrets.env.example) so a `git pull` never
+# clobbers them.
+#
+# Precedence for any setting that supports it: process env var  >  secrets.env  >
+# settings.toml  >  built-in default. Where a key can also be set via secrets.env,
+# the BLURAYRIPPER_* / *_API_KEY name is noted next to it.
+
+[tools]
+# Absolute paths to the external binaries. Leave blank to auto-detect from PATH
+# and common install locations (Program Files on Windows, Homebrew/usr on
+# macOS/Linux). Each can also be overridden via secrets.env.
+makemkvcon = ""              # env: BLURAYRIPPER_MAKEMKVCON
+handbrakecli = ""            # env: BLURAYRIPPER_HANDBRAKECLI
+mkvmerge = ""                # env: BLURAYRIPPER_MKVMERGE
+mkvextract = ""              # env: BLURAYRIPPER_MKVEXTRACT
+# SubtitleEdit launcher. On Windows this is the path to SubtitleEdit.exe. On
+# macOS/Linux either a native "seconv"/"SubtitleEdit", or point at SubtitleEdit.exe
+# and set subtitleedit_runner = "mono".
+subtitleedit = ""            # env: BLURAYRIPPER_SUBTITLEEDIT
+subtitleedit_runner = ""     # e.g. "mono" on macOS/Linux; blank runs directly. env: BLURAYRIPPER_SUBTITLEEDIT_RUNNER
+ffmpeg = ""                  # optional — used for grain-preview clips/stills. env: BLURAYRIPPER_FFMPEG
+
+[storage]
+# Staging root: per-job intermediates (rips, extracted .sup, OCR cache, grain
+# previews, os_ref_cache) live here and are cleaned per job. Output root: final
+# Plex library. Either may point at a NAS share. Relative paths resolve against
+# the repo root.
+staging_dir = "./staging"    # env: BLURAYRIPPER_STAGING_DIR
+output_dir = "./output"      # env: BLURAYRIPPER_OUTPUT_DIR
+movies_subdir = "Movies"     # sub-folder created under output_dir for films
+tv_subdir = "TV Shows"       # sub-folder created under output_dir for TV
+
+[encode]
+container = "mp4"                       # "mp4" or "mkv" — must match the preset's FileFormat
+preset_file = "config/presets.json"     # HandBrake preset JSON (exported from the GUI)
+preset_name = "Plex H265 1080p"         # which preset inside preset_file to use
+tune_grain = false                      # x265 --tune grain by default; per-job override in the UI
+low_priority = true                     # run encodes below normal OS priority so rips/UI stay responsive
+# Deinterlace: "auto" applies HandBrake's adaptive decomb only to SD/DVD sources
+# (height <= deinterlace_max_height); "on" forces it on every source; "off" never.
+# Decomb only touches frames that are actually combed, so "auto" is safe on
+# progressive SD too.
+deinterlace = "auto"                    # "auto" | "on" | "off"
+deinterlace_max_height = 576            # NTSC 480 / PAL 576 — the DVD-era SD ceiling for "auto"
+
+[languages]
+# ISO 639-2/B 3-letter codes (as MakeMKV/mkvmerge report them) to KEEP; all other
+# language tracks are dropped. Add more, e.g. keep = ["eng", "pol"].
+keep = ["eng"]
+default = "eng"                         # the default/primary language flagged for Plex
+
+[subtitles]
+fix_common_errors = true                # run SubtitleEdit's OCR error-fix pass
+remove_text_for_hi = false              # strip hearing-impaired (SDH) tags during OCR
+ocr_concurrency = 4                     # how many subtitle tracks to OCR in parallel
+keep_extracted = true                   # cache extracted .sup subs so re-OCR needs no re-rip
+extract_concurrency = 2                 # how many titles may read the rip + extract subs at once
+                                        # (keep low when the rip lives on a NAS to avoid thrashing it)
+
+[audio]
+# "all"  = keep every track in the kept languages (incl. commentaries)
+# "main" = keep only the first (primary) track per language
+tracks = "all"
+
+[scan]
+min_length_seconds = 120                # ignore titles shorter than this (drops menus/trailers)
+
+[disc]
+auto_eject = true                       # eject the disc when ripping finishes (before the encode runs)
+auto_open = true                        # auto-scan a disc when inserted; known discs auto-rip
+poll_seconds = 15                       # how often the drive watcher checks for inserted/ejected discs
+
+[queue]
+# Encode "budget" for concurrent encodes. A UHD (2160p) encode costs 2 units,
+# anything <=1080p costs 1. Default 3 => "1 UHD + 1 lighter disc" or "up to 3
+# DVDs", but never two UHD encodes at once.
+encode_capacity = 3
+
+[cluster]
+# Distributed encoding across machines. When true, the rip box rips then ENQUEUES
+# jobs (state "ready") for `blurayripper worker` processes to encode. Requires a
+# shared Postgres (see [database]) and a shared NAS both machines can reach.
+use_workers = false
+worker_poll_seconds = 5                 # how often a worker checks for a job
+heartbeat_seconds = 15                  # how often a busy worker proves it's alive
+stale_after_seconds = 180               # reclaim a job if its worker goes quiet this long
+# When clustered, the rip box encodes a job ITSELF (instead of enqueuing it) if
+# every title is <= this height; taller (e.g. UHD 2160p) jobs go to the workers.
+# 0 = never encode locally (rip box only rips). 1080 = handle <=1080p on the rip box.
+local_encode_max_height = 0             # env: BLURAYRIPPER_LOCAL_ENCODE_MAX_HEIGHT
+# When true, subtitle extraction + OCR move OFF the rip box onto the workers (run
+# right before each encode). The rip box then only rips + resolves grain, so
+# restarting `serve` never kills in-flight extraction/OCR/encode. Requires
+# use_workers; best paired with local_encode_max_height = 0.
+worker_does_subs = false
+
+[metadata]
+# provider is currently always TMDB (set the key as TMDB_API_KEY in secrets.env).
+language = "en-US"                       # metadata language/region for TMDB lookups
+
+[web]
+# UI bind address. "127.0.0.1" = this machine only (safest). "0.0.0.0" = reachable
+# from other devices on your LAN. WARNING: there is NO login — only expose on a
+# trusted network, never to the internet, and allow the port through your firewall.
+host = "127.0.0.1"
+port = 8723
+
+[database]
+# Postgres URL enables crash recovery — jobs persist and resume after a restart
+# (a finished rip is never redone), and it's REQUIRED for [cluster] workers. Leave
+# blank for in-memory (no persistence). Because it holds credentials, prefer
+# setting BLURAYRIPPER_DATABASE_URL in secrets.env instead of here.
+url = ""                                 # env: BLURAYRIPPER_DATABASE_URL
+
+# ── Secrets (do NOT put these here) ───────────────────────────────────────────
+# API keys and other secrets go in config/secrets.env (gitignored). See
+# config/secrets.env.example. Keys read from there:
+#   TMDB_API_KEY                 — required for automatic naming lookups
+#   OPENSUBTITLES_API_KEY        — subtitle-based TV episode identification
+#   OPENSUBTITLES_USERNAME       — optional; raises the OpenSubtitles daily quota
+#   OPENSUBTITLES_PASSWORD       — optional; pairs with the username
+# Any [tools]/[storage] path, local_encode_max_height, and the database url can
+# also be set via their BLURAYRIPPER_* env names noted above.
