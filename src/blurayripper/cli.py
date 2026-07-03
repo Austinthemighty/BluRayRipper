@@ -510,6 +510,20 @@ async def _cmd_eject(args: argparse.Namespace) -> int:
         return 1
 
 
+async def _cmd_close(args: argparse.Namespace) -> int:
+    from .tools.eject import close_tray
+
+    drive = args.drive
+    console.print(f"[bold]Closing tray[/bold] {drive or 'default drive'} (method: {args.method}) …")
+    try:
+        close_tray(drive, args.method)
+        console.print(f"[green]Close command succeeded[/green] for {drive or 'default drive'}.")
+        return 0
+    except Exception as exc:
+        console.print(f"[red]Close tray failed:[/red] {exc}")
+        return 1
+
+
 async def _cmd_resub(args: argparse.Namespace) -> int:
     from pathlib import Path
 
@@ -687,6 +701,14 @@ def _build_parser() -> argparse.ArgumentParser:
                          choices=["auto", "scsi", "ioctl", "shell", "mci"],
                          help="Force a specific Windows eject method (to find which opens your drive)")
     eject_p.set_defaults(func=_cmd_eject)
+
+    close_p = sub.add_parser("close", help="Close (load) an optical drive tray")
+    close_p.add_argument("drive", nargs="?", default=None,
+                         help="Drive to close, e.g. F: or \\\\.\\CdRom0 (Windows), /dev/sr0 (Linux)")
+    close_p.add_argument("--method", default="auto",
+                         choices=["auto", "scsi", "ioctl", "mci"],
+                         help="Force a specific Windows close method")
+    close_p.set_defaults(func=_cmd_close)
     return parser
 
 

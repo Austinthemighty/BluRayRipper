@@ -96,11 +96,19 @@ async function loadDrives() {
       btns.style.cssText = 'display:flex;gap:6px;align-items:center;';
       const add = document.createElement('button');
       add.textContent = 'Add'; add.onclick = () => addDisc('disc:' + d.index);
+      const ej = document.createElement('button');
+      ej.className = 'sec'; ej.textContent = '⏏'; ej.title = 'Eject (open tray)';
+      ej.style.padding = '6px 9px';
+      ej.onclick = () => trayAction(d, 'eject');
+      const cl = document.createElement('button');
+      cl.className = 'sec'; cl.textContent = '⤒'; cl.title = 'Close tray';
+      cl.style.padding = '6px 9px';
+      cl.onclick = () => trayAction(d, 'close');
       const ren = document.createElement('button');
       ren.className = 'sec'; ren.textContent = '✎'; ren.title = 'Name this drive';
       ren.style.padding = '6px 9px';
       ren.onclick = () => renameDrive(d);
-      btns.append(add, ren);
+      btns.append(add, ej, cl, ren);
       div.appendChild(btns); el.appendChild(div);
     }
   } catch (e) {
@@ -119,6 +127,10 @@ async function renameDrive(d){
   if (name === null) return;
   try { await api('POST','/api/drives/name',{device:d.device,name}); await loadDrives(); }
   catch(e){ alert(e.message); }
+}
+async function trayAction(d, action){
+  try { await api('POST','/api/drives/'+action,{device:d.device||null}); }
+  catch(e){ alert((action==='eject'?'Eject':'Close tray')+' failed: '+e.message); }
 }
 function addManual(){ const v=document.getElementById('manualSrc').value.trim(); if(v) addDisc(v); }
 

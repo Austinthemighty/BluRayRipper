@@ -29,6 +29,105 @@ def eject(device: str | None, method: str = "auto") -> None:
         subprocess.run(cmd, check=False)
 
 
+def close_tray(device: str | None, method: str = "auto") -> None:
+    """Close (load) the optical drive tray. ``method`` (Windows) forces one of
+    "scsi"/"ioctl"/"mci"; "auto" tries scsi -> ioctl -> mci."""
+    if sys.platform.startswith("win"):
+        _close_windows(device, method)
+    elif sys.platform == "darwin":
+        subprocess.run(["drutil", "tray", "close"], check=False)
+    else:
+        cmd = ["eject", "-t"]  # -t closes the tray on Linux
+        if device:
+            cmd.append(device)
+        subprocess.run(cmd, check=False)
+
+
+def _close_windows(device: str | None, method: str = "auto") -> None:
+    dev_path, letter = _win_paths(device)
+    methods: dict[str, tuple[str | None, object]] = {
+        "scsi": (dev_path, lambda d: _scsi_start_stop(d, start=True)),
+        "ioctl": (dev_path, _close_ioctl),
+        "mci": (letter or (device or "").strip().rstrip("\\/"), _close_mci),
+    }
+    if method != "auto":
+        arg, fn = methods.get(method, (None, None))
+        if fn is None:
+            raise OSError(f"unknown close method '{method}'")
+        if not arg:
+            raise OSError(f"method '{method}' needs a drive/device")
+        fn(arg)  # type: ignore[operator]
+        return
+    errors: list[str] = []
+    for name in ("scsi", "ioctl", "mci"):
+        arg, fn = methods[name]
+        if not arg:
+            continue
+        try:
+            fn(arg)  # type: ignore[operator]
+            return
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+    raise OSError("; ".join(errors) or "no close method available")
+
+
+def _close_ioctl(dev_path: str) -> None:
+    """Close the tray via IOCTL_STORAGE_LOAD_MEDIA (read-only handle, no admin)."""
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    GENERIC_READ = 0x80000000
+    FILE_SHARE_READ = 0x1
+    FILE_SHARE_WRITE = 0x2
+    OPEN_EXISTING = 3
+    IOCTL_STORAGE_LOAD_MEDIA = 0x002D480C
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    handle = k32.CreateFileW(
+        dev_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        None, OPEN_EXISTING, 0, None,
+    )
+    if not handle or handle == INVALID_HANDLE_VALUE:
+        raise OSError(f"open {dev_path} failed (err {ctypes.get_last_error()})")
+    try:
+        returned = wintypes.DWORD(0)
+        if not k32.DeviceIoControl(
+            handle, IOCTL_STORAGE_LOAD_MEDIA, None, 0, None, 0,
+            ctypes.byref(returned), None,
+        ):
+            raise OSError(f"load-media ioctl failed on {dev_path} (err {ctypes.get_last_error()})")
+    finally:
+        k32.CloseHandle(handle)
+
+
+def _close_mci(drive: str) -> None:
+    import ctypes
+
+    winmm = ctypes.windll.winmm  # type: ignore[attr-defined]
+    alias = "blurayripper_close"
+    winmm.mciSendStringW(f"open {drive} type cdaudio alias {alias}", None, 0, None)
+    rc = winmm.mciSendStringW(f"set {alias} door closed wait", None, 0, None)
+    winmm.mciSendStringW(f"close {alias}", None, 0, None)
+    if rc:
+        raise OSError(f"MCI returned {rc}")
+
+
+def _win_paths(device: str | None) -> tuple[str | None, str | None]:
+    """(device_path, drive_letter) from a "F:" or "\\.\CdRom0" hint."""
+    raw = (device or "").strip().rstrip("\\/")
+    if raw.startswith("\\\\"):
+        return raw, None
+    if ":" in raw:
+        return rf"\\.\{raw}", raw
+    return None, None
+
+
 def _eject_windows(device: str | None, method: str = "auto") -> None:
     """Eject a data optical disc on Windows.
 
@@ -80,8 +179,14 @@ def _eject_windows(device: str | None, method: str = "auto") -> None:
 
 
 def _eject_scsi(dev_path: str) -> None:
-    """Physically eject via the SCSI START STOP UNIT command (LoadEject=1,
-    Start=0). The most reliable way to actually move the tray."""
+    """Physically eject via SCSI START STOP UNIT (LoadEject=1, Start=0)."""
+    _scsi_start_stop(dev_path, start=False)
+
+
+def _scsi_start_stop(dev_path: str, start: bool) -> None:
+    """SCSI START STOP UNIT with LoadEject=1: start=False ejects (open tray),
+    start=True loads (close tray). The most reliable way to move the tray."""
+    op = "load" if start else "eject"
     import ctypes
     from ctypes import wintypes
 
@@ -129,8 +234,8 @@ def _eject_scsi(dev_path: str) -> None:
         sptd.CdbLength = 6
         sptd.DataIn = SCSI_IOCTL_DATA_UNSPECIFIED
         sptd.TimeOutValue = 15
-        sptd.Cdb[0] = 0x1B  # START STOP UNIT
-        sptd.Cdb[4] = 0x02  # LoadEject=1, Start=0 -> eject
+        sptd.Cdb[0] = 0x1B          # START STOP UNIT
+        sptd.Cdb[4] = 0x03 if start else 0x02  # LoadEject=1; Start bit -> load/eject
         returned = wintypes.DWORD(0)
         ok = k32.DeviceIoControl(
             handle, IOCTL_SCSI_PASS_THROUGH_DIRECT,
@@ -139,7 +244,7 @@ def _eject_scsi(dev_path: str) -> None:
             ctypes.byref(returned), None,
         )
         if not ok:
-            raise OSError(f"scsi eject failed on {dev_path} (err {ctypes.get_last_error()})")
+            raise OSError(f"scsi {op} failed on {dev_path} (err {ctypes.get_last_error()})")
     finally:
         k32.CloseHandle(handle)
 

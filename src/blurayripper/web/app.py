@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from ..config import Settings, load_settings
 from ..models import EpisodeAssignment, MediaKind
 from ..services.metadata import MetadataError, TMDBClient
+from ..tools.eject import close_tray, eject
 from .manager import JobManager
 
 _STATIC = Path(__file__).parent / "static"
@@ -84,6 +85,10 @@ class EditJob(BaseModel):
 class NameDrive(BaseModel):
     device: str
     name: str | None = None  # null/empty clears the custom name
+
+
+class DriveDevice(BaseModel):
+    device: str | None = None  # e.g. "F:" or "\\.\CdRom0"; null = default drive
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -145,6 +150,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/drives/name")
     async def name_drive(body: NameDrive):
         manager.set_drive_name(body.device, body.name)
+        return {"ok": True}
+
+    @app.post("/api/drives/eject")
+    async def drive_eject(body: DriveDevice):
+        try:
+            await asyncio.to_thread(eject, body.device)  # off-thread: ctypes/MCI can block
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Eject failed: {exc}")
+        return {"ok": True}
+
+    @app.post("/api/drives/close")
+    async def drive_close(body: DriveDevice):
+        try:
+            await asyncio.to_thread(close_tray, body.device)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Close tray failed: {exc}")
         return {"ok": True}
 
     @app.get("/api/jobs")
