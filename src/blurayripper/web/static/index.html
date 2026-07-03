@@ -38,7 +38,7 @@
   /* Fullscreen grain A/B: fill the screen, controls stay visible below. */
   .grainab:fullscreen { max-width:none; width:100%; height:100%; background:#0d1117; box-sizing:border-box;
     padding:16px; display:flex; flex-direction:column; justify-content:center; }
-  .grainab:fullscreen [data-stage] { flex:1; width:auto; aspect-ratio:auto; cursor:zoom-out; }
+  .grainab:fullscreen [data-gstage] { flex:1; width:auto; aspect-ratio:auto; cursor:zoom-out; }
   .job .top { display:flex; justify-content:space-between; align-items:center; gap:8px; }
   .badge { font-size:11px; padding:2px 8px; border-radius:999px; background:#30363d; text-transform:uppercase; letter-spacing:.04em;}
   .badge.done{background:#238636;} .badge.failed{background:#da3633;} .badge.await{background:#9e6a03;}
@@ -586,12 +586,12 @@ function grainVideoAB(offSrc, onSrc, offPoster, onPoster){
   wrap.className = 'grainab';
   wrap.style.cssText = 'outline:none;max-width:520px;';
   wrap.innerHTML = `
-    <div data-stage style="position:relative;width:100%;aspect-ratio:16/9;background:#000;border:1px solid #30363d;cursor:zoom-in;">
+    <div data-gstage style="position:relative;width:100%;aspect-ratio:16/9;background:#000;border:1px solid #30363d;cursor:zoom-in;">
       <video data-voff muted loop playsinline preload="auto" poster="${offPoster||''}" src="${offSrc}"
              style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;"></video>
       <video data-von muted loop playsinline preload="auto" poster="${onPoster||''}" src="${onSrc}"
              style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:0;"></video>
-      <div data-badge style="position:absolute;top:6px;left:6px;padding:2px 8px;border-radius:3px;background:rgba(0,0,0,.7);color:#e6edf3;font:600 12px monospace;">Grain OFF</div>
+      <div data-gbadge style="position:absolute;top:6px;left:6px;padding:2px 8px;border-radius:3px;background:rgba(0,0,0,.7);color:#e6edf3;font:600 12px monospace;">Grain OFF</div>
     </div>
     <div class="row" style="gap:8px;align-items:center;margin-top:6px;">
       <button class="sec" data-play title="Play / pause (Space)" style="min-width:40px;">▶</button>
@@ -600,9 +600,9 @@ function grainVideoAB(offSrc, onSrc, offPoster, onPoster){
       <button class="sec" data-fs title="Fullscreen (F · double-click)">⛶</button>
     </div>
     <div class="muted" style="font-size:12px;">← / → or Flip swaps OFF/ON instantly in place · F or double-click = fullscreen · watch flat areas (skies, walls) and motion.</div>`;
-  const stage = wrap.querySelector('[data-stage]');
+  const stage = wrap.querySelector('[data-gstage]');
   const voff = wrap.querySelector('[data-voff]'), von = wrap.querySelector('[data-von]');
-  const badge = wrap.querySelector('[data-badge]'), seek = wrap.querySelector('[data-seek]');
+  const badge = wrap.querySelector('[data-gbadge]'), seek = wrap.querySelector('[data-seek]');
   const playBtn = wrap.querySelector('[data-play]');
   let showOn = false, playing = false;   // start paused — no autoplay
   // Both clips play at once; a flip is just an opacity swap, so it's instant —
