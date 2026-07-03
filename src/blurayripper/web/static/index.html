@@ -37,6 +37,7 @@
 <body>
 <header>
   <h1>BluRayRipper</h1>
+  <span class="cap" id="ver" title="Running version (git commit count + hash). Compare across machines to spot stale code."></span>
   <span class="cap" id="cap"></span>
   <button class="sec" id="redoall" style="margin-left:auto;" title="Re-OCR subtitles for every job that has names assigned (uses staged/cached subs; no re-encode).">Re-OCR all subtitles</button>
   <label class="cap"><input type="checkbox" id="autoconfirm"> Auto-confirm single matches</label>
@@ -169,6 +170,7 @@ function jobRank(j){
 
 function renderJobs(snap) {
   const host = document.getElementById('jobs');
+  if (snap.version) { const v = document.getElementById('ver'); if (v) v.textContent = 'v' + snap.version; }
   if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); renderJobs._sig = ''; return; }
   const ph = document.getElementById('placeholder'); if (ph) ph.remove();
   const jobs = [...snap.jobs].sort((a,b) => jobRank(a)-jobRank(b) || a.id-b.id);

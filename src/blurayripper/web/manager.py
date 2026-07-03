@@ -34,6 +34,7 @@ from ..services.opensubtitles import OpenSubtitlesClient, gather_references
 from ..services.sub_match import identify
 from ..tools import discinfo
 from ..tools.makemkv import Drive
+from ..version import get_version
 
 
 _STATUS_CONTROL_C_EXIT = 3221225786  # 0xC000013A — Windows process terminated
@@ -411,7 +412,7 @@ class JobManager:
                     "kind_guess": None, "titles": [], "selected": [], "outputs": [],
                     "preview": None, "log": [],
                 })
-        return {"jobs": jobs}
+        return {"jobs": jobs, "version": get_version()}
 
     # --- commands -------------------------------------------------------
 
@@ -607,20 +608,33 @@ class JobManager:
         reporter.on_event("Subtitle match needs confirmation — review in the UI.")
         return False
 
+    # Re-OCR is background maintenance — refuse it while a job is actively being
+    # ripped/subbed/encoded (by this box or a worker), so it can't clobber the
+    # live state badge or race the worker that owns the job.
+    _REDO_BUSY = (
+        JobState.SCANNING, JobState.SELECTING, JobState.CONFIRMING, JobState.RIPPING,
+        JobState.EXTRACTING_SUBS, JobState.OCR_SUBS, JobState.IDENTIFYING,
+        JobState.ENCODING, JobState.PLACING,
+    )
+
     def redo_subtitles(self, job_id: int) -> None:
         """Re-OCR + place subtitles for a job using its staged or cached subs
         (no rip, no encode). Runs in the background; progress shows in the log."""
         wj = self.jobs[job_id]
         if wj._pipeline_job is None or not wj.assignments:
             raise ValueError("Job has no naming assignments to attach subtitles to.")
+        if self._live_state(wj) in self._REDO_BUSY:
+            raise ValueError("Job is busy (being ripped/encoded) — re-OCR once it's done.")
         wj._task = self._spawn(self._redo_subs_task(wj))
         self.bus.publish()
 
     def redo_subtitles_all(self) -> int:
-        """Re-OCR subtitles for every job that has naming assignments, one at a
-        time in the background. Returns how many jobs were queued."""
+        """Re-OCR subtitles for every resting job that has naming assignments, one
+        at a time in the background. Skips jobs a worker is actively processing.
+        Returns how many jobs were queued."""
         eligible = [wj for wj in self.jobs.values()
-                    if wj._pipeline_job is not None and wj.assignments]
+                    if wj._pipeline_job is not None and wj.assignments
+                    and self._live_state(wj) not in self._REDO_BUSY]
         if eligible:
             self._spawn(self._redo_subs_all_task(eligible))
         return len(eligible)
@@ -635,6 +649,9 @@ class JobManager:
         job.selected_title_ids = wj.selected_title_ids
         job.assignments = wj.assignments
         staging_root = self.settings.storage.staging_dir / f"job_{wj.id}"
+        # redo_subtitles flips job.state to OCR_SUBS for progress; restore it after
+        # so a maintenance re-OCR never leaves a stray state on a resting job.
+        prior_state = job.state
         try:
             reporter.on_event("Re-OCR subtitles: looking for staged/cached subs …")
             placed = await self.pipeline.redo_subtitles(job, staging_root, reporter)
@@ -643,6 +660,8 @@ class JobManager:
                 else "Re-OCR found no staged or cached subtitles — a re-rip is needed.")
         except Exception as exc:
             reporter.on_event(f"Re-OCR failed: {type(exc).__name__}: {exc}")
+        finally:
+            job.state = prior_state
         self._persist(wj)
         self.bus.publish()
 

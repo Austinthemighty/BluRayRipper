@@ -610,7 +610,8 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
 
     app = create_app(settings)
     where = "all interfaces" if host == "0.0.0.0" else host
-    console.print(f"[bold green]BluRayRipper UI[/bold green] → http://{host}:{port}  ({where})")
+    from .version import get_version
+    console.print(f"[bold green]BluRayRipper UI[/bold green] v{get_version()} → http://{host}:{port}  ({where})")
     if host == "0.0.0.0":
         console.print(
             "[yellow]Bound to all interfaces — reachable on your LAN with no login. "
