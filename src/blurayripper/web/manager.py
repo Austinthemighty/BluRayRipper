@@ -255,9 +255,13 @@ class JobManager:
         # Rip-box work (rip + subtitles + grain). In clustered mode the rip box
         # ONLY re-runs these; READY / worker-owned states are left for workers to
         # claim from the store (so we don't stampede re-prepping everything).
-        prep_states = (JobState.SCANNING, JobState.SELECTING, JobState.RIPPING,
-                       JobState.EXTRACTING_SUBS, JobState.OCR_SUBS, JobState.AWAITING_GRAIN,
-                       JobState.IDENTIFYING)
+        prep_states = [JobState.SCANNING, JobState.SELECTING, JobState.RIPPING,
+                       JobState.AWAITING_GRAIN, JobState.IDENTIFYING]
+        # When workers own subtitle work, EXTRACTING_SUBS / OCR_SUBS are worker
+        # states — leave them for a worker to reclaim, don't re-prep on the rip box.
+        if not self.settings.cluster.worker_does_subs:
+            prep_states += [JobState.EXTRACTING_SUBS, JobState.OCR_SUBS]
+        prep_states = tuple(prep_states)
         clustered = self.settings.cluster.use_workers
         for rec in records:
             wj = self._from_record(rec)
@@ -793,7 +797,8 @@ class JobManager:
                 # locally (if every title is <= the configured height, e.g. 1080p)
                 # or enqueue for a worker to do the heavy (UHD) encode.
                 staging_root = self.settings.storage.staging_dir / f"job_{wj.id}"
-                await self.pipeline.prep_phase(job, staging_root, reporter)
+                include_subs = not self.settings.cluster.worker_does_subs
+                await self.pipeline.prep_phase(job, staging_root, reporter, include_subs=include_subs)
                 self.pipeline._persist_mapping(job, reporter)
                 limit = self.settings.cluster.local_encode_max_height
                 heights = (

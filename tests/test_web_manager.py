@@ -119,7 +119,7 @@ async def test_clustered_mode_rips_then_enqueues(manager, monkeypatch):
     manager.settings.cluster.use_workers = True
     ripped, executed = [], []
 
-    async def fake_rip(job, staging_root, report):
+    async def fake_rip(job, staging_root, report, include_subs=True):
         ripped.append(job)
 
     async def fake_execute(*a, **k):
@@ -143,7 +143,7 @@ def _patch_cluster_encode(manager, monkeypatch, heights):
     from blurayripper.pipeline import TitleResult
     encoded = []
 
-    async def fake_prep(job, staging_root, report):
+    async def fake_prep(job, staging_root, report, include_subs=True):
         pass
 
     async def fake_heights(job, staging_root, report):
@@ -194,7 +194,7 @@ async def test_clustered_uhd_still_enqueues_for_worker(manager, monkeypatch):
 async def test_edit_job_updates_grain_and_edition(manager, monkeypatch):
     manager.settings.cluster.use_workers = True
 
-    async def fake_rip(job, staging_root, report):
+    async def fake_rip(job, staging_root, report, include_subs=True):
         pass
 
     monkeypatch.setattr(manager.pipeline, "prep_phase", fake_rip)
