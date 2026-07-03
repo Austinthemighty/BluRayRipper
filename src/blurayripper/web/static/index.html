@@ -25,6 +25,16 @@
   .drive-info b, .drive-info .disc-name { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .drive-btns { flex-shrink:0; display:flex; gap:6px; align-items:center; }
   .job { border:1px solid #30363d; border-radius:8px; padding:12px; margin-bottom:12px; }
+  /* Newly-added/auto-opened job: a brief green pulse so it's not missed. */
+  .job.flash { animation: jobflash 2.2s ease-out; }
+  @keyframes jobflash {
+    0%,15% { border-color:#2ea043; box-shadow:0 0 0 2px rgba(46,160,67,.5), 0 0 14px rgba(46,160,67,.5); }
+    100%   { border-color:#30363d; box-shadow:none; }
+  }
+  #toasts { position:fixed; top:14px; right:14px; z-index:2000; display:flex; flex-direction:column; gap:8px; }
+  .toast { background:#1f6feb; color:#fff; padding:9px 14px; border-radius:6px; font-size:13px;
+    box-shadow:0 3px 10px rgba(0,0,0,.45); opacity:0; transform:translateY(-6px); transition:opacity .2s, transform .2s; }
+  .toast.show { opacity:1; transform:none; }
   /* Fullscreen grain A/B: fill the screen, controls stay visible below. */
   .grainab:fullscreen { max-width:none; width:100%; height:100%; background:#0d1117; box-sizing:border-box;
     padding:16px; display:flex; flex-direction:column; justify-content:center; }
@@ -130,7 +140,20 @@ async function loadDrives() {
   }
 }
 
-async function addDisc(source) { try { await api('POST','/api/jobs',{source}); } catch(e){ alert(e.message);} }
+function toast(msg){
+  let host = document.getElementById('toasts');
+  if (!host){ host = document.createElement('div'); host.id = 'toasts'; document.body.appendChild(host); }
+  const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg;
+  host.appendChild(t);
+  requestAnimationFrame(() => t.classList.add('show'));
+  setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 250); }, 3500);
+}
+async function addDisc(source) {
+  try {
+    const res = await api('POST','/api/jobs',{source});
+    const ids = (res && res.ids) || [];
+    toast(ids.length ? `Added ${source} — queued as #${ids.join(', #')}` : `Added ${source}`);
+  } catch(e){ alert(e.message);} }
 async function renameDrive(d){
   const current = d.label || '';
   const name = prompt(`Name for drive ${d.device||('disc:'+d.index)} (blank to clear):`, current);
@@ -166,21 +189,21 @@ function editionValue(scope){
 const RIP_STATES = ['scanning','selecting','ripping'];  // actual disc read
 const IN_PROGRESS = ['confirming','encoding','extracting_subs','ocr_subs','identifying','placing'];
 const AWAITING = ['awaiting_titles','awaiting_mapping','awaiting_grain','awaiting_match'];
-const GROUP_LABELS = ['Queued','Failed','Ripping disc','Needs your input','In progress','Completed'];
+const GROUP_LABELS = ['Failed','Ripping disc','Needs your input','In progress','Queued','Completed'];
 function jobRank(j){
   const s = j.state;
-  if (s==='failed') return 1;                // failures just under the queue
+  if (s==='failed') return 0;                // failures at the very top
   if (s==='done') return 5;
-  if (AWAITING.includes(s)) return 3;        // needs you to confirm
-  if (RIP_STATES.includes(s)) return 2;      // actively ripping/scanning a disc
-  if (IN_PROGRESS.includes(s)) return 4;     // extracting subs / OCR / encoding
-  return 0;                                  // queued / ready -> very top
+  if (AWAITING.includes(s)) return 2;        // needs you to confirm
+  if (RIP_STATES.includes(s)) return 1;      // actively ripping/scanning a disc
+  if (IN_PROGRESS.includes(s)) return 3;     // extracting subs / OCR / encoding
+  return 4;                                  // queued / ready
 }
 
 function renderJobs(snap) {
   const host = document.getElementById('jobs');
   if (snap.version) { const v = document.getElementById('ver'); if (v) v.textContent = 'v' + snap.version; }
-  if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); renderJobs._sig = ''; return; }
+  if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); renderJobs._sig = ''; renderJobs._known = new Set(); return; }
   const ph = document.getElementById('placeholder'); if (ph) ph.remove();
   const jobs = [...snap.jobs].sort((a,b) => jobRank(a)-jobRank(b) || a.id-b.id);
   const seen = new Set();
@@ -230,6 +253,22 @@ function renderJobs(snap) {
     const card = document.getElementById('job-'+j.id);
     if (card) host.appendChild(card);
   }
+  // Flash + scroll to any newly-appeared job so an added/auto-opened disc is
+  // obvious — they land in the Queued group and are otherwise easy to miss.
+  // (Skipped on the first render so a page load doesn't flash everything.)
+  const nowIds = jobs.map(j => j.id);
+  if (renderJobs._known) {
+    const fresh = nowIds.filter(id => !renderJobs._known.has(id));
+    if (fresh.length) {
+      const first = document.getElementById('job-'+fresh[0]);
+      if (first) first.scrollIntoView({behavior:'smooth', block:'nearest'});
+      for (const id of fresh) {
+        const c = document.getElementById('job-'+id);
+        if (c){ c.classList.remove('flash'); void c.offsetWidth; c.classList.add('flash'); }
+      }
+    }
+  }
+  renderJobs._known = new Set(nowIds);
 }
 function renderedStateClear(){ for(const k of Object.keys(renderedState)) delete renderedState[k]; }
 
