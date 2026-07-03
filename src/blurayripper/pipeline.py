@@ -194,17 +194,18 @@ class Pipeline:
             )
             job.results.append(result)
 
-    async def prep_phase(self, job: Job, staging_root: Path, report) -> None:
-        """Rip + subtitles (extract/OCR/place sidecars) + grain decision. Runs
-        on the rip machine so the grain preview can use the UI; afterwards a
-        worker only has to encode.
+    async def prep_phase(
+        self, job: Job, staging_root: Path, report, include_subs: bool = True
+    ) -> None:
+        """Rip + (optionally) subtitles + grain decision. Runs on the rip machine
+        so the grain preview can use the UI.
 
-        OCR (the slow per-track step) is run concurrently across all of the job's
-        titles; encoding only starts after prep_phase returns, so it always waits
-        for OCR to finish."""
+        ``include_subs=False`` defers extraction/OCR to the worker (so restarting
+        the rip box's serve doesn't kill that long NAS-bound work); the rip box
+        then only rips and resolves grain."""
         assert job.disc is not None
-        # 1) Rip + extract subtitle images per title (sequential — one drive).
-        todo: list[tuple[int, EpisodeAssignment, Path, Path, list]] = []
+        # 1) Rip per title (sequential — one drive).
+        todo: list[tuple[int, EpisodeAssignment, Path, Path]] = []
         for title_id in job.selected_title_ids:
             assignment = job.assignments.get(title_id)
             if assignment is None:
@@ -214,21 +215,35 @@ class Pipeline:
                 continue
             ripped = await self._ensure_ripped(job, title_id, staging_root, report)
             sub_dir = staging_root / "sub" / f"t{title_id:03d}"
-            sub_jobs = await self._extract_title_subs(job, title_id, ripped, sub_dir, report)
-            todo.append((title_id, assignment, ripped, sub_dir, sub_jobs))
+            todo.append((title_id, assignment, ripped, sub_dir))
 
-        # 2) OCR every (title, track) concurrently, bounded by ocr_concurrency.
-        ocr = await self._ocr_all(job, todo, report)
+        # 2) Subtitles (extract + OCR + place sidecars) — unless a worker will.
+        if include_subs:
+            await self._subtitles_for_titles(job, todo, report)
 
-        # 3) Place sidecars + resolve grain per title.
-        for title_id, assignment, ripped, sub_dir, _sub_jobs in todo:
-            result = TitleResult(title_id=title_id)
-            video_dest = self._video_path_for(assignment)
-            self._place_title_subs(result, video_dest, ocr.get(title_id, []), report)
-            self._cache_subs(video_dest, _sub_jobs)
+        # 3) Resolve grain per title (interactive; stays on the rip box).
+        for title_id, assignment, ripped, sub_dir in todo:
             tune_grain = await self._resolve_grain(job, ripped, title_id, staging_root, report)
             job.checkpoints[title_id]["tune_grain"] = tune_grain
             _checkpoint(report)
+
+    async def _subtitles_for_titles(
+        self, job: Job, todo: list[tuple[int, EpisodeAssignment, Path, Path]], report
+    ) -> None:
+        """Extract + OCR (concurrent) + place sidecars for a set of ripped titles.
+        Shared by prep_phase (rip box) and the worker's encode_phase."""
+        if not todo:
+            return
+        extracted: dict[int, list] = {}
+        for title_id, _assignment, ripped, sub_dir in todo:
+            extracted[title_id] = await self._extract_title_subs(job, title_id, ripped, sub_dir, report)
+        ocr = await self._ocr_all(
+            job, [(tid, a, r, sd, extracted[tid]) for tid, a, r, sd in todo], report)
+        for title_id, assignment, _ripped, _sub_dir in todo:
+            result = TitleResult(title_id=title_id)
+            video_dest = self._video_path_for(assignment)
+            self._place_title_subs(result, video_dest, ocr.get(title_id, []), report)
+            self._cache_subs(video_dest, extracted[title_id])
 
     async def _extract_title_subs(
         self, job: Job, title_id: int, ripped_mkv: Path, sub_dir: Path, report
@@ -322,7 +337,11 @@ class Pipeline:
         self, job: Job, staging_root: Path, scheduler: EncodeScheduler, report
     ) -> list[TitleResult]:
         """Encode + place the video for all selected titles. Runs on any worker;
-        subtitles + grain were already done by prep_phase on the rip machine."""
+        grain was decided by prep_phase on the rip machine. When
+        cluster.worker_does_subs is set, the (deferred) subtitle extraction + OCR
+        also run here, right before encoding."""
+        if self.settings.cluster.worker_does_subs:
+            await self._worker_subtitles(job, staging_root, report)
         results: list[TitleResult] = []
         for title_id in job.selected_title_ids:
             assignment = job.assignments.get(title_id)
@@ -337,6 +356,26 @@ class Pipeline:
             results.append(await self._encode_title(
                 job, title_id, assignment, staging_root, ripped, scheduler, report))
         return results
+
+    async def _worker_subtitles(self, job: Job, staging_root: Path, report) -> None:
+        """Deferred subtitle work (extract + OCR + place) done on the worker from
+        the already-ripped files, for the worker_does_subs mode."""
+        todo: list[tuple[int, EpisodeAssignment, Path, Path]] = []
+        for title_id in job.selected_title_ids:
+            assignment = job.assignments.get(title_id)
+            if assignment is None:
+                continue
+            cp = job.checkpoints.setdefault(title_id, {})
+            if cp.get("placed") and self._video_path_for(assignment).exists():
+                continue
+            prior = cp.get("ripped_path")
+            ripped = _resolve_path(self.settings.storage.staging_dir, prior) if prior else None
+            if ripped is None or not ripped.exists():
+                raise RuntimeError(f"Title {title_id} has no ripped file for subtitles.")
+            todo.append((title_id, assignment, ripped, staging_root / "sub" / f"t{title_id:03d}"))
+        if todo:
+            report.on_event("Extracting + OCR'ing subtitles (worker) …")
+            await self._subtitles_for_titles(job, todo, report)
 
     def _sub_cache_dir(self, video_dest: Path) -> Path:
         return (self.settings.storage.output_dir / ".blurayripper" / "subcache"
