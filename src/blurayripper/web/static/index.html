@@ -25,6 +25,10 @@
   .drive-info b, .drive-info .disc-name { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .drive-btns { flex-shrink:0; display:flex; gap:6px; align-items:center; }
   .job { border:1px solid #30363d; border-radius:8px; padding:12px; margin-bottom:12px; }
+  /* Fullscreen grain A/B: fill the screen, controls stay visible below. */
+  .grainab:fullscreen { max-width:none; width:100%; height:100%; background:#0d1117; box-sizing:border-box;
+    padding:16px; display:flex; flex-direction:column; justify-content:center; }
+  .grainab:fullscreen [data-stage] { flex:1; width:auto; aspect-ratio:auto; cursor:zoom-out; }
   .job .top { display:flex; justify-content:space-between; align-items:center; gap:8px; }
   .badge { font-size:11px; padding:2px 8px; border-radius:999px; background:#30363d; text-transform:uppercase; letter-spacing:.04em;}
   .badge.done{background:#238636;} .badge.failed{background:#da3633;} .badge.await{background:#9e6a03;}
@@ -540,9 +544,10 @@ function buildMatch(card, j){
 function grainVideoAB(offSrc, onSrc, offPoster, onPoster){
   const wrap = document.createElement('div');
   wrap.tabIndex = 0;
+  wrap.className = 'grainab';
   wrap.style.cssText = 'outline:none;max-width:520px;';
   wrap.innerHTML = `
-    <div style="position:relative;width:100%;aspect-ratio:16/9;background:#000;border:1px solid #30363d;">
+    <div data-stage style="position:relative;width:100%;aspect-ratio:16/9;background:#000;border:1px solid #30363d;cursor:zoom-in;">
       <video data-voff muted loop playsinline preload="auto" poster="${offPoster||''}" src="${offSrc}"
              style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;"></video>
       <video data-von muted loop playsinline preload="auto" poster="${onPoster||''}" src="${onSrc}"
@@ -553,40 +558,63 @@ function grainVideoAB(offSrc, onSrc, offPoster, onPoster){
       <button class="sec" data-play title="Play / pause (Space)" style="min-width:40px;">⏸</button>
       <input data-seek type="range" min="0" max="1000" value="0" style="flex:1;">
       <button class="sec" data-flip title="Flip OFF/ON (← / →)">Flip ⇄</button>
+      <button class="sec" data-fs title="Fullscreen (F · double-click)">⛶</button>
     </div>
-    <div class="muted" style="font-size:12px;">← / → or the Flip button swaps OFF/ON in place — both stay locked to the same instant. Watch flat areas (skies, walls) and motion.</div>`;
+    <div class="muted" style="font-size:12px;">← / → or Flip swaps OFF/ON instantly in place · F or double-click = fullscreen · watch flat areas (skies, walls) and motion.</div>`;
+  const stage = wrap.querySelector('[data-stage]');
   const voff = wrap.querySelector('[data-voff]'), von = wrap.querySelector('[data-von]');
   const badge = wrap.querySelector('[data-badge]'), seek = wrap.querySelector('[data-seek]');
   const playBtn = wrap.querySelector('[data-play]');
   let showOn = false, playing = true;
-  const vis = () => showOn ? von : voff;
+  // Both clips play at once; a flip is just an opacity swap, so it's instant —
+  // no seek/decode stutter. The hidden clip is kept in sync with the visible one
+  // (invisible corrections don't stutter), so whichever you flip to is already on
+  // the right frame.
+  const master = () => showOn ? von : voff;
+  const hidden = () => showOn ? voff : von;
   const paint = () => {
     von.style.opacity = showOn ? 1 : 0;
     voff.style.opacity = showOn ? 0 : 1;
     badge.textContent = 'Grain ' + (showOn ? 'ON' : 'OFF');
   };
-  const flip = () => {
-    const from = vis(); showOn = !showOn; const to = vis();
-    if (from.duration) to.currentTime = from.currentTime;  // carry the playhead
-    from.pause(); paint();
-    if (playing) to.play().catch(()=>{});
-  };
+  const flip = () => { showOn = !showOn; paint(); };
   const togglePlay = () => {
     playing = !playing;
     playBtn.textContent = playing ? '⏸' : '▶';
-    if (playing) vis().play().catch(()=>{}); else vis().pause();
+    if (playing) { voff.play().catch(()=>{}); von.play().catch(()=>{}); }
+    else { voff.pause(); von.pause(); }
+  };
+  const toggleFs = () => {
+    if (document.fullscreenElement === wrap) document.exitFullscreen().catch(()=>{});
+    else wrap.requestFullscreen ? wrap.requestFullscreen().then(()=>wrap.focus()).catch(()=>{}) : null;
   };
   playBtn.onclick = togglePlay;
   wrap.querySelector('[data-flip]').onclick = flip;
+  wrap.querySelector('[data-fs]').onclick = toggleFs;
+  stage.ondblclick = toggleFs;
   voff.addEventListener('timeupdate', () => { if (!showOn && voff.duration) seek.value = 1000*voff.currentTime/voff.duration; });
   von.addEventListener('timeupdate',  () => { if ( showOn && von.duration)  seek.value = 1000*von.currentTime/von.duration; });
-  seek.addEventListener('input', () => { const v = vis(); if (v.duration) v.currentTime = (seek.value/1000)*v.duration; });
+  seek.addEventListener('input', () => {
+    const t = (seek.value/1000) * (master().duration || 0);
+    voff.currentTime = t; von.currentTime = t;      // scrub both together
+  });
   wrap.addEventListener('keydown', (e) => {
     if (e.key==='ArrowLeft' || e.key==='ArrowRight'){ flip(); e.preventDefault(); }
     else if (e.key===' '){ togglePlay(); e.preventDefault(); }
+    else if (e.key==='f' || e.key==='F'){ toggleFs(); e.preventDefault(); }
   });
+  // Drift correction: nudge the hidden clip to the visible one's playhead when
+  // they slip apart. Self-cleans when the card is rebuilt (node disconnected).
+  const sync = setInterval(() => {
+    if (!wrap.isConnected) { clearInterval(sync); return; }
+    if (!playing) return;
+    const m = master(), h = hidden();
+    if (m.duration && h.readyState >= 2 && Math.abs(h.currentTime - m.currentTime) > 0.05) {
+      try { h.currentTime = m.currentTime; } catch (e) {}
+    }
+  }, 150);
   paint();
-  voff.play().catch(()=>{});
+  voff.play().catch(()=>{}); von.play().catch(()=>{});
   return wrap;
 }
 
