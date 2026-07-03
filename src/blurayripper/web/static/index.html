@@ -162,15 +162,15 @@ function editionValue(scope){
 const RIP_STATES = ['scanning','selecting','ripping'];  // actual disc read
 const IN_PROGRESS = ['confirming','encoding','extracting_subs','ocr_subs','identifying','placing'];
 const AWAITING = ['awaiting_titles','awaiting_mapping','awaiting_grain','awaiting_match'];
-const GROUP_LABELS = ['Failed','Ripping disc','Needs your input','In progress','Queued','Completed'];
+const GROUP_LABELS = ['Queued','Failed','Ripping disc','Needs your input','In progress','Completed'];
 function jobRank(j){
   const s = j.state;
-  if (s==='failed') return 0;                // failures at the very top
+  if (s==='failed') return 1;                // failures just under the queue
   if (s==='done') return 5;
-  if (AWAITING.includes(s)) return 2;        // needs you to confirm
-  if (RIP_STATES.includes(s)) return 1;      // actively ripping/scanning a disc
-  if (IN_PROGRESS.includes(s)) return 3;     // extracting subs / OCR / encoding
-  return 4;                                  // queued / ready
+  if (AWAITING.includes(s)) return 3;        // needs you to confirm
+  if (RIP_STATES.includes(s)) return 2;      // actively ripping/scanning a disc
+  if (IN_PROGRESS.includes(s)) return 4;     // extracting subs / OCR / encoding
+  return 0;                                  // queued / ready -> very top
 }
 
 function renderJobs(snap) {
