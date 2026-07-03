@@ -66,11 +66,13 @@ class TitleResult:
 @dataclass
 class GrainPreview:
     """Grain-tune A/B preview assets: playable clips (shown in motion) plus
-    still frames used as <video> posters / fallbacks."""
-    off_png: Path
-    on_png: Path
+    optional still frames used as <video> posters / fallbacks. The posters need
+    ffmpeg; the clips (the real preview) come from HandBrake, so posters may be
+    None when ffmpeg isn't installed."""
     off_clip: Path
     on_clip: Path
+    off_png: Path | None = None
+    on_png: Path | None = None
 
 
 @dataclass
@@ -745,10 +747,12 @@ class Pipeline:
         if job.grain_mode != "preview":
             return default
 
+        # The preview is HandBrake-rendered clips; ffmpeg is only for optional
+        # poster stills. So we only need the UI resolver (CLI runs can't gate).
         resolver = getattr(report, "resolve_grain", None)
-        if resolver is None or not self.ffmpeg.available:
+        if resolver is None:
             if job.grain_mode == "preview":
-                report.on_event("Grain preview unavailable here; using default.")
+                report.on_event("Grain preview needs the web UI; using default.")
             return default
         try:
             report.on_event("Rendering grain preview (short sample, both ways)…")
@@ -776,13 +780,21 @@ class Pipeline:
         await self.handbrake.encode_clip(
             ripped_mkv, on_clip, start=start, duration=clip_secs, tune_grain=True)
         # Still frames double as <video> posters (instant paint before the clip
-        # buffers) and as a fallback where video can't play.
-        off_png = preview_dir / "grain_off.png"
-        on_png = preview_dir / "grain_on.png"
-        await self.ffmpeg.extract_frame(off_clip, off_png, at_seconds=clip_secs / 2)
-        await self.ffmpeg.extract_frame(on_clip, on_png, at_seconds=clip_secs / 2)
+        # buffers) and as a fallback where video can't play. They need ffmpeg,
+        # which is optional — the clips above are the real preview, so skip the
+        # posters (rather than failing the whole preview) when ffmpeg is absent.
+        off_png = on_png = None
+        if self.ffmpeg.available:
+            try:
+                off_png = preview_dir / "grain_off.png"
+                on_png = preview_dir / "grain_on.png"
+                await self.ffmpeg.extract_frame(off_clip, off_png, at_seconds=clip_secs / 2)
+                await self.ffmpeg.extract_frame(on_clip, on_png, at_seconds=clip_secs / 2)
+            except Exception as exc:
+                report.on_event(f"Preview poster frames skipped ({type(exc).__name__}).")
+                off_png = on_png = None
         report.on_event("Grain preview ready — choose grain on/off in the UI.")
-        return GrainPreview(off_png=off_png, on_png=on_png, off_clip=off_clip, on_clip=on_clip)
+        return GrainPreview(off_clip=off_clip, on_clip=on_clip, off_png=off_png, on_png=on_png)
 
     def _should_deinterlace(self, height: int | None) -> bool:
         """Whether to apply HandBrake's adaptive decomb. "auto" targets SD/DVD

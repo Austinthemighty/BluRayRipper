@@ -667,14 +667,14 @@ class JobManager:
         self.bus.publish()
 
     async def generate_preview(self, job_id: int) -> None:
-        """Render a grain still-comparison on demand for a queued job (so jobs
-        don't have to park at a preview gate). Stores the stills on the job."""
+        """Render the grain A/B preview clips on demand for a queued job (so jobs
+        don't have to park at a preview gate). Stores clips (+ optional poster
+        stills) on the job. Clips come from HandBrake; ffmpeg is only needed for
+        the posters, so it's not required."""
         wj = self.jobs[job_id]
         job = wj._pipeline_job
         if job is None or not wj.selected_title_ids:
             raise ValueError("Job is not ready for a preview yet.")
-        if not self.pipeline.ffmpeg.available:
-            raise ValueError("ffmpeg not installed — grain preview unavailable.")
         title_id = wj.selected_title_ids[0]
         cp = job.checkpoints.get(title_id, {})
         prior = cp.get("ripped_path")
@@ -901,14 +901,17 @@ class JobManager:
             "outputs": wj.outputs,
             "preview": (
                 {
-                    "off": f"/api/jobs/{wj.id}/preview/off",
-                    "on": f"/api/jobs/{wj.id}/preview/on",
+                    # Poster URLs only when ffmpeg produced the stills.
+                    "off": (f"/api/jobs/{wj.id}/preview/off" if wj.preview_off else None),
+                    "on": (f"/api/jobs/{wj.id}/preview/on" if wj.preview_on else None),
                     "off_clip": (f"/api/jobs/{wj.id}/preview-clip/off"
                                  if wj.preview_off_clip else None),
                     "on_clip": (f"/api/jobs/{wj.id}/preview-clip/on"
                                 if wj.preview_on_clip else None),
                 }
-                if live_state == JobState.AWAITING_GRAIN and wj.preview_off else None
+                # Gate on the CLIPS (the real preview), not the optional posters,
+                # so a ready preview shows even when ffmpeg isn't installed.
+                if live_state == JobState.AWAITING_GRAIN and wj.preview_off_clip else None
             ),
             "match": (
                 {"show": wj.show_title, "season": wj.season,

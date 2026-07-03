@@ -436,6 +436,30 @@ async def test_grain_preview_gate(manager, monkeypatch, tmp_path):
     assert manager._executed["grain"] is True
 
 
+async def test_grain_gate_shows_without_ffmpeg_posters(manager, monkeypatch, tmp_path):
+    """No ffmpeg -> no poster stills, but the clips (real preview) still gate the
+    grain UI, so the preview appears instead of being silently skipped."""
+    async def exec_with_grain(job, scheduler, report, job_name=None):
+        from blurayripper.pipeline import GrainPreview, TitleResult
+        preview = GrainPreview(off_clip=tmp_path / "off.mp4", on_clip=tmp_path / "on.mp4")
+        await report.resolve_grain(job, preview)   # off_png/on_png default to None
+        job.results = [TitleResult(title_id=0, video_path=tmp_path / "x.mkv")]
+        return job
+
+    monkeypatch.setattr(manager.pipeline, "execute", exec_with_grain)
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    manager.set_titles(wj.id, [0])
+    manager.set_mapping(
+        wj.id, [EpisodeAssignment(0, MediaKind.MOVIE, "WarGames", 1983)], grain_mode="preview")
+    await _settle()
+    assert wj.state is JobState.AWAITING_GRAIN
+    p = manager.snapshot()["jobs"][0]["preview"]
+    assert p is not None                                    # not silently skipped
+    assert p["off_clip"].endswith("/preview-clip/off")      # clip is present
+    assert p["off"] is None and p["on"] is None             # no posters without ffmpeg
+
+
 def test_should_deinterlace_auto_targets_sd(manager):
     pipe = manager.pipeline
     pipe.settings.encode.deinterlace = "auto"
