@@ -302,6 +302,16 @@ def load_settings(config_dir: Path | None = None) -> Settings:
     def _override(env_key: str, toml_value) -> str | None:
         return secrets.get(env_key) or (toml_value or None)
 
+    def _bool_override(env_key: str, toml_value, default: bool) -> bool:
+        # secrets.env values are strings, so parse them explicitly ("false" is a
+        # truthy string!). Precedence: secrets.env/env > settings.toml > default.
+        raw = secrets.get(env_key)
+        if raw is not None and raw.strip() != "":  # blank env = unset, fall through
+            return raw.strip().lower() in ("1", "true", "yes", "on")
+        if toml_value is not None:
+            return bool(toml_value)
+        return default
+
     tools_cfg = data.get("tools", {})
     tools = ToolPaths(
         makemkvcon=autodetect_tool(
@@ -367,14 +377,16 @@ def load_settings(config_dir: Path | None = None) -> Settings:
 
     cluster_cfg = data.get("cluster", {})
     cluster = ClusterSettings(
-        use_workers=bool(cluster_cfg.get("use_workers", False)),
+        use_workers=_bool_override(
+            "BLURAYRIPPER_USE_WORKERS", cluster_cfg.get("use_workers"), False),
         worker_poll_seconds=int(cluster_cfg.get("worker_poll_seconds", 5)),
         heartbeat_seconds=int(cluster_cfg.get("heartbeat_seconds", 15)),
         stale_after_seconds=int(cluster_cfg.get("stale_after_seconds", 180)),
         local_encode_max_height=int(
             _override("BLURAYRIPPER_LOCAL_ENCODE_MAX_HEIGHT",
                       cluster_cfg.get("local_encode_max_height")) or 0),
-        worker_does_subs=bool(cluster_cfg.get("worker_does_subs", False)),
+        worker_does_subs=_bool_override(
+            "BLURAYRIPPER_WORKER_DOES_SUBS", cluster_cfg.get("worker_does_subs"), False),
     )
 
     scan_cfg = data.get("scan", {})
