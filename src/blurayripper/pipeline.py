@@ -22,9 +22,10 @@ from typing import Protocol
 from .config import Settings
 from .models import DiscInfo, EpisodeAssignment, MediaKind
 from .scheduler import EncodeScheduler, encode_weight
-from .services import library, naming
+from .services import library, naming, os_upload
 from .services.mapping_store import MappingStore
 from .services.subtitles import looks_like_sdh
+from .version import get_version
 from .tools import discinfo
 from .tools.eject import eject
 from .tools.ffmpeg import FFmpeg
@@ -249,10 +250,12 @@ class Pipeline:
             extracted[title_id] = await self._extract_title_subs(job, title_id, ripped, sub_dir, report)
         ocr = await self._ocr_all(
             job, [(tid, a, r, sd, extracted[tid]) for tid, a, r, sd in todo], report)
-        for title_id, assignment, _ripped, _sub_dir in todo:
+        for title_id, assignment, ripped, _sub_dir in todo:
             result = TitleResult(title_id=title_id)
             video_dest = self._video_path_for(assignment)
-            self._place_title_subs(result, video_dest, ocr.get(title_id, []), report)
+            await self._place_title_subs(
+                result, video_dest, ocr.get(title_id, []), report,
+                source_video=ripped, assignment=assignment)
             self._cache_subs(video_dest, extracted[title_id])
 
     async def _extract_title_subs(
@@ -306,12 +309,24 @@ class Pipeline:
             await asyncio.gather(*tasks)
         return {tid: [x for x in lst if x is not None] for tid, lst in out.items()}
 
-    def _place_title_subs(
+    async def _place_title_subs(
         self, result: TitleResult, video_dest: Path,
         ocr_pairs: list[tuple[Path, SubtitleTrack]], report,
+        *, source_video: Path | None = None, assignment: EpisodeAssignment | None = None,
     ) -> None:
         """Place OCR'd SRT sidecars next to the video, disambiguating same-language
-        tracks by forced/SDH flags and an index so they never collide."""
+        tracks by forced/SDH flags and an index so they never collide. When
+        subtitles.upload_export_dir is set, each sidecar is also exported with an
+        OpenSubtitles manual-upload sheet (FPS/HD probed once from source_video)."""
+        export_dir = self.settings.subtitles.upload_export_dir
+        height = fps = None
+        if export_dir and source_video is not None and source_video.exists():
+            try:
+                height, fps = await self.mkvtools.video_dims(source_video)
+            except Exception as exc:
+                report.on_event(
+                    f"Upload export: could not probe video ({type(exc).__name__}); "
+                    "FPS/HD left blank.")
         default_lang = self.settings.languages.default.lower()
         plain_counts: dict[str, int] = {}
         for srt, track in ocr_pairs:
@@ -342,6 +357,16 @@ class Pipeline:
             library.place(srt, srt_dest)
             result.subtitle_paths.append(srt_dest)
             report.on_event(f"Placed subtitle: {srt_dest.name}")
+            if export_dir and assignment is not None:
+                try:
+                    os_upload.export_subtitle(
+                        export_dir, srt_dest, assignment=assignment,
+                        language_code=track.language, is_sdh=is_sdh, forced=track.forced,
+                        height=height, fps=fps, version=get_version())
+                    report.on_event(f"Exported for OpenSubtitles upload: {srt_dest.name}")
+                except Exception as exc:
+                    report.on_event(
+                        f"Upload export failed ({srt_dest.name}): {type(exc).__name__}: {exc}")
 
     async def encode_phase(
         self, job: Job, staging_root: Path, scheduler: EncodeScheduler, report
@@ -456,7 +481,10 @@ class Pipeline:
         job = Job(source=str(video_dest))  # lightweight holder for _ocr_all
         ocr = await self._ocr_all(job, [(0, None, video_dest, sub_dir, extracted)], report)
         result = TitleResult(title_id=0)
-        self._place_title_subs(result, video_dest, ocr.get(0, []), report)
+        # No naming assignment on the raw resubtitle path, so upload export (which
+        # needs title/year) is skipped; still probes from source_mkv if present.
+        await self._place_title_subs(
+            result, video_dest, ocr.get(0, []), report, source_video=source_mkv)
         if source_mkv is not None:
             self._cache_subs(video_dest, extracted)  # cache so next time needs no rip
         report.on_event(f"Placed {len(result.subtitle_paths)} subtitle sidecar(s).")
@@ -495,7 +523,11 @@ class Pipeline:
                 continue
             ocr = await self._ocr_all(job, [(title_id, assignment, None, sub_dir, sub_jobs)], report)
             result = TitleResult(title_id=title_id)
-            self._place_title_subs(result, video_dest, ocr.get(title_id, []), report)
+            prior = cp.get("ripped_path")
+            source = _resolve_path(self.settings.storage.staging_dir, prior) if prior else None
+            await self._place_title_subs(
+                result, video_dest, ocr.get(title_id, []), report,
+                source_video=source, assignment=assignment)
             self._cache_subs(video_dest, sub_jobs)
             placed.extend(result.subtitle_paths)
         return placed
@@ -643,7 +675,9 @@ class Pipeline:
         # parallel path lives in prep_phase; here OCR runs inline for one title.)
         sub_jobs = await self._extract_title_subs(job, title_id, ripped_mkv, sub_dir, report)
         ocr = await self._ocr_all(job, [(title_id, assignment, ripped_mkv, sub_dir, sub_jobs)], report)
-        self._place_title_subs(result, video_dest, ocr.get(title_id, []), report)
+        await self._place_title_subs(
+            result, video_dest, ocr.get(title_id, []), report,
+            source_video=ripped_mkv, assignment=assignment)
         self._cache_subs(video_dest, sub_jobs)
 
         # Resolve grain (may park at an interactive preview gate — UI only).

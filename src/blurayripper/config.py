@@ -192,6 +192,9 @@ class SubtitleSettings:
     ocr_concurrency: int = 4  # how many subtitle tracks to OCR at once
     keep_extracted: bool = True  # cache extracted .sup subs so re-OCR needs no re-rip
     extract_concurrency: int = 2  # how many titles may read the rip + extract subs at once
+    # When set, each placed SRT is also copied here with a text sheet pre-filling
+    # the OpenSubtitles manual-upload form. Blank/None = off.
+    upload_export_dir: Path | None = None
 
 
 @dataclass
@@ -346,12 +349,14 @@ def load_settings(config_dir: Path | None = None) -> Settings:
     )
 
     sub_cfg = data.get("subtitles", {})
+    _upload_dir = _override("BLURAYRIPPER_SUB_UPLOAD_DIR", sub_cfg.get("upload_export_dir"))
     subtitles = SubtitleSettings(
         fix_common_errors=bool(sub_cfg.get("fix_common_errors", True)),
         remove_text_for_hi=bool(sub_cfg.get("remove_text_for_hi", False)),
         ocr_concurrency=int(sub_cfg.get("ocr_concurrency", 4)),
         keep_extracted=bool(sub_cfg.get("keep_extracted", True)),
         extract_concurrency=int(sub_cfg.get("extract_concurrency", 2)),
+        upload_export_dir=_resolve_path(_upload_dir, REPO_ROOT) if _upload_dir else None,
     )
 
     audio_cfg = data.get("audio", {})

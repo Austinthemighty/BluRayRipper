@@ -61,6 +61,11 @@ ocr_concurrency = 4                     # how many subtitle tracks to OCR in par
 keep_extracted = true                   # cache extracted .sup subs so re-OCR needs no re-rip
 extract_concurrency = 2                 # how many titles may read the rip + extract subs at once
                                         # (keep low when the rip lives on a NAS to avoid thrashing it)
+# When set, each placed .srt is ALSO copied here (in a per-title subfolder) with a
+# "<name>.info.txt" sheet pre-filling the OpenSubtitles manual-upload form —
+# language, FPS, HD, hearing-impaired (SDH), and forced/foreign-parts are filled
+# from what the app already detects. Blank = off.
+upload_export_dir = ""                  # e.g. "./subtitle_uploads". env: BLURAYRIPPER_SUB_UPLOAD_DIR
 
 [audio]
 # "all"  = keep every track in the kept languages (incl. commentaries)
