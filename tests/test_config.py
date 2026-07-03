@@ -45,3 +45,23 @@ def test_blank_env_value_falls_back_to_toml(tmp_path):
     _write(tmp_path / "secrets.env", "BLURAYRIPPER_HANDBRAKECLI=\n")
     s = load_settings(tmp_path)
     assert s.tools.handbrakecli == "C:/from-toml/HandBrakeCLI.exe"
+
+
+def test_use_workers_env_override(tmp_path):
+    """use_workers can be set from the gitignored secrets.env (per-machine), and
+    the string is parsed as a bool (so "false" is not truthy)."""
+    _write(tmp_path / "settings.toml", "[cluster]\nuse_workers = false\n")
+    _write(tmp_path / "secrets.env", "BLURAYRIPPER_USE_WORKERS=true\n")
+    assert load_settings(tmp_path).cluster.use_workers is True
+
+    _write(tmp_path / "secrets.env", "BLURAYRIPPER_USE_WORKERS=false\n")
+    assert load_settings(tmp_path).cluster.use_workers is False
+
+
+def test_cluster_bools_fall_back_to_toml_when_env_blank(tmp_path):
+    _write(tmp_path / "settings.toml",
+           "[cluster]\nuse_workers = true\nworker_does_subs = true\n")
+    _write(tmp_path / "secrets.env", "BLURAYRIPPER_USE_WORKERS=\n")  # blank -> ignore
+    s = load_settings(tmp_path)
+    assert s.cluster.use_workers is True          # from toml
+    assert s.cluster.worker_does_subs is True     # from toml (no env key at all)
