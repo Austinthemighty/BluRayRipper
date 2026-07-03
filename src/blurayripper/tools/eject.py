@@ -119,7 +119,7 @@ def _close_mci(drive: str) -> None:
 
 
 def _win_paths(device: str | None) -> tuple[str | None, str | None]:
-    """(device_path, drive_letter) from a "F:" or "\\.\CdRom0" hint."""
+    r"""(device_path, drive_letter) from a "F:" or "\\.\CdRom0" hint."""
     raw = (device or "").strip().rstrip("\\/")
     if raw.startswith("\\\\"):
         return raw, None
