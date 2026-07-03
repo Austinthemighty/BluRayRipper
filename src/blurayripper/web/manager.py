@@ -155,6 +155,7 @@ class JobManager:
             settings.opensubtitles_api_key,
             settings.opensubtitles_username,
             settings.opensubtitles_password,
+            cache_dir=settings.storage.staging_dir / "os_ref_cache",
         )
         self.scheduler = EncodeScheduler(settings.queue.encode_capacity)
         self.bus = EventBus()
