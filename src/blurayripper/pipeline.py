@@ -63,6 +63,16 @@ class TitleResult:
 
 
 @dataclass
+class GrainPreview:
+    """Grain-tune A/B preview assets: playable clips (shown in motion) plus
+    still frames used as <video> posters / fallbacks."""
+    off_png: Path
+    on_png: Path
+    off_clip: Path
+    on_clip: Path
+
+
+@dataclass
 class Job:
     source: str
     state: JobState = JobState.QUEUED
@@ -708,33 +718,37 @@ class Pipeline:
             return default
         try:
             report.on_event("Rendering grain preview (short sample, both ways)…")
-            off_png, on_png = await self._generate_grain_preview(
+            preview = await self._generate_grain_preview(
                 job, ripped_mkv, title_id, staging_root / "preview", report
             )
-            return await resolver(job, off_png, on_png)
+            return await resolver(job, preview)
         except Exception as exc:
             report.on_event(f"Grain preview failed ({type(exc).__name__}: {exc}); using default.")
             return default
 
     async def _generate_grain_preview(
         self, job: Job, ripped_mkv: Path, title_id: int, preview_dir: Path, report
-    ) -> tuple[Path, Path]:
+    ) -> "GrainPreview":
         title = job.disc.title(title_id) if job.disc else None
         duration_s = title.duration_seconds if title else 1800
         start = max(1, int(duration_s * 0.33))  # sample ~1/3 in
-        clip_secs = 2.0
-        off_clip = preview_dir / "off.mkv"
-        on_clip = preview_dir / "on.mkv"
+        # A few seconds so the grain reads in motion (it's a temporal effect);
+        # still short enough to render in seconds on veryfast.
+        clip_secs = 4.0
+        off_clip = preview_dir / "off.mp4"
+        on_clip = preview_dir / "on.mp4"
         await self.handbrake.encode_clip(
             ripped_mkv, off_clip, start=start, duration=clip_secs, tune_grain=False)
         await self.handbrake.encode_clip(
             ripped_mkv, on_clip, start=start, duration=clip_secs, tune_grain=True)
+        # Still frames double as <video> posters (instant paint before the clip
+        # buffers) and as a fallback where video can't play.
         off_png = preview_dir / "grain_off.png"
         on_png = preview_dir / "grain_on.png"
         await self.ffmpeg.extract_frame(off_clip, off_png, at_seconds=clip_secs / 2)
         await self.ffmpeg.extract_frame(on_clip, on_png, at_seconds=clip_secs / 2)
         report.on_event("Grain preview ready — choose grain on/off in the UI.")
-        return off_png, on_png
+        return GrainPreview(off_png=off_png, on_png=on_png, off_clip=off_clip, on_clip=on_clip)
 
     def _should_deinterlace(self, height: int | None) -> bool:
         """Whether to apply HandBrake's adaptive decomb. "auto" targets SD/DVD

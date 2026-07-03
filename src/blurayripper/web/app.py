@@ -268,6 +268,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="No preview.")
         return FileResponse(path)
 
+    @app.get("/api/jobs/{job_id}/preview-clip/{which}")
+    async def preview_clip(job_id: int, which: str):
+        wj = manager.jobs.get(job_id)
+        path = wj and (wj.preview_on_clip if which == "on" else wj.preview_off_clip)
+        if not path or not Path(path).exists():
+            raise HTTPException(status_code=404, detail="No preview clip.")
+        # FileResponse honors the Range header (206), so <video> can seek/scrub.
+        return FileResponse(path, media_type="video/mp4")
+
     @app.delete("/api/jobs/{job_id}")
     async def remove_job(job_id: int):
         await manager.remove(job_id)

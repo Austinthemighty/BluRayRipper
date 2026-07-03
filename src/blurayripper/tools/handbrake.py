@@ -201,7 +201,13 @@ class HandBrake:
 
         Built minimally (no audio/subtitle selection) to avoid the full-encode
         builder's conflicting audio flags, which made HandBrake exit 0 with no
-        output."""
+        output.
+
+        Output is browser-playable H.264 MP4 (faststart) so the web UI can show
+        the actual moving clip — grain shows best in motion — rather than a
+        still. x264's "grain" tune is the same knob x265 exposes, so the on/off
+        difference is faithful even though the preview codec differs from the
+        final encode."""
         dst.parent.mkdir(parents=True, exist_ok=True)
         enc = self._settings.encode
         cmd = [
@@ -215,6 +221,10 @@ class HandBrake:
             "--stop-at", f"seconds:{duration:.0f}",
             "-a", "none",
             "-s", "none",
+            # Browser-friendly: H.264 in MP4, moov atom up front for seeking.
+            "--format", "av_mp4",
+            "--encoder", "x264",
+            "--optimize",
             # A preview only needs to show the grain-tune difference, not the
             # final quality — use a fast preset so it renders in seconds, not the
             # minutes the real (e.g. "slower") preset would take.

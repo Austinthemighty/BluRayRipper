@@ -455,15 +455,13 @@ function buildEdit(card, j){
     pv.innerHTML = '<span class="muted">Rendering preview (a few seconds)…</span>';
     try {
       await api('POST','/api/jobs/'+j.id+'/preview-grain');
-      const off='/api/jobs/'+j.id+'/preview/off?t='+Date.now(), on='/api/jobs/'+j.id+'/preview/on?t='+Date.now();
-      pv.innerHTML = `<div class="row" style="align-items:flex-start;">
-          <div><div class="muted">Grain OFF</div><img data-po src="${off}" style="width:260px;cursor:zoom-in;border:1px solid #30363d;"></div>
-          <div><div class="muted">Grain ON</div><img data-pn src="${on}" style="width:260px;cursor:zoom-in;border:1px solid #30363d;"></div>
-        </div>
-        <div class="row"><button class="sec" data-uoff>Use grain OFF</button><button data-uon>Use grain ON</button></div>`;
-      const pvItems=[{label:'OFF',src:off},{label:'ON',src:on}];
-      pv.querySelector('[data-po]').onclick=()=>lightbox(pvItems,0);
-      pv.querySelector('[data-pn]').onclick=()=>lightbox(pvItems,1);
+      const t = Date.now();
+      const preview = {
+        off:'/api/jobs/'+j.id+'/preview/off?t='+t, on:'/api/jobs/'+j.id+'/preview/on?t='+t,
+        off_clip:'/api/jobs/'+j.id+'/preview-clip/off?t='+t, on_clip:'/api/jobs/'+j.id+'/preview-clip/on?t='+t,
+      };
+      pv.innerHTML = `<div data-ab></div><div class="row" style="margin-top:8px;"><button class="sec" data-uoff>Use grain OFF</button><button data-uon>Use grain ON</button></div>`;
+      grainCompare(pv.querySelector('[data-ab]'), preview);
       const useGrain = async (on)=>{ try{ await api('POST','/api/jobs/'+j.id+'/edit',{grain_mode:on?'on':'off', tune_grain:on}); body.querySelector('[data-gm]').value=on?'on':'off'; pv.innerHTML='<span class="muted">Grain set to '+(on?'ON':'OFF')+' ✓</span>'; }catch(e){ alert(e.message);} };
       pv.querySelector('[data-uoff]').onclick=()=>useGrain(false);
       pv.querySelector('[data-uon]').onclick=()=>useGrain(true);
@@ -528,18 +526,85 @@ function buildMatch(card, j){
   };
 }
 
+// Synced A/B grain player: two clips stacked in the same box, only the visible
+// one plays so they stay frame-locked. ← / → / Space (or the Flip button) swap
+// which encode is shown, carrying the exact playhead across so you compare the
+// same instant. Falls back to stills if a job has no clips. Returns a DOM node.
+function grainVideoAB(offSrc, onSrc, offPoster, onPoster){
+  const wrap = document.createElement('div');
+  wrap.tabIndex = 0;
+  wrap.style.cssText = 'outline:none;max-width:520px;';
+  wrap.innerHTML = `
+    <div style="position:relative;width:100%;aspect-ratio:16/9;background:#000;border:1px solid #30363d;">
+      <video data-voff muted loop playsinline preload="auto" poster="${offPoster||''}" src="${offSrc}"
+             style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;"></video>
+      <video data-von muted loop playsinline preload="auto" poster="${onPoster||''}" src="${onSrc}"
+             style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:0;"></video>
+      <div data-badge style="position:absolute;top:6px;left:6px;padding:2px 8px;border-radius:3px;background:rgba(0,0,0,.7);color:#e6edf3;font:600 12px monospace;">Grain OFF</div>
+    </div>
+    <div class="row" style="gap:8px;align-items:center;margin-top:6px;">
+      <button class="sec" data-play title="Play / pause (Space)" style="min-width:40px;">⏸</button>
+      <input data-seek type="range" min="0" max="1000" value="0" style="flex:1;">
+      <button class="sec" data-flip title="Flip OFF/ON (← / →)">Flip ⇄</button>
+    </div>
+    <div class="muted" style="font-size:12px;">← / → or the Flip button swaps OFF/ON in place — both stay locked to the same instant. Watch flat areas (skies, walls) and motion.</div>`;
+  const voff = wrap.querySelector('[data-voff]'), von = wrap.querySelector('[data-von]');
+  const badge = wrap.querySelector('[data-badge]'), seek = wrap.querySelector('[data-seek]');
+  const playBtn = wrap.querySelector('[data-play]');
+  let showOn = false, playing = true;
+  const vis = () => showOn ? von : voff;
+  const paint = () => {
+    von.style.opacity = showOn ? 1 : 0;
+    voff.style.opacity = showOn ? 0 : 1;
+    badge.textContent = 'Grain ' + (showOn ? 'ON' : 'OFF');
+  };
+  const flip = () => {
+    const from = vis(); showOn = !showOn; const to = vis();
+    if (from.duration) to.currentTime = from.currentTime;  // carry the playhead
+    from.pause(); paint();
+    if (playing) to.play().catch(()=>{});
+  };
+  const togglePlay = () => {
+    playing = !playing;
+    playBtn.textContent = playing ? '⏸' : '▶';
+    if (playing) vis().play().catch(()=>{}); else vis().pause();
+  };
+  playBtn.onclick = togglePlay;
+  wrap.querySelector('[data-flip]').onclick = flip;
+  voff.addEventListener('timeupdate', () => { if (!showOn && voff.duration) seek.value = 1000*voff.currentTime/voff.duration; });
+  von.addEventListener('timeupdate',  () => { if ( showOn && von.duration)  seek.value = 1000*von.currentTime/von.duration; });
+  seek.addEventListener('input', () => { const v = vis(); if (v.duration) v.currentTime = (seek.value/1000)*v.duration; });
+  wrap.addEventListener('keydown', (e) => {
+    if (e.key==='ArrowLeft' || e.key==='ArrowRight'){ flip(); e.preventDefault(); }
+    else if (e.key===' '){ togglePlay(); e.preventDefault(); }
+  });
+  paint();
+  voff.play().catch(()=>{});
+  return wrap;
+}
+
+// Render the grain A/B into `host`: synced video if clips exist, else still-image lightbox.
+function grainCompare(host, preview){
+  if (preview.off_clip && preview.on_clip){
+    host.appendChild(grainVideoAB(preview.off_clip, preview.on_clip, preview.off, preview.on));
+    return;
+  }
+  host.innerHTML = `<div class="row" style="align-items:flex-start;">
+      <div><div class="muted">Grain OFF</div><img data-imgoff src="${preview.off}" style="width:320px;max-width:46vw;border:1px solid #30363d;cursor:zoom-in;"></div>
+      <div><div class="muted">Grain ON</div><img data-imgon src="${preview.on}" style="width:320px;max-width:46vw;border:1px solid #30363d;cursor:zoom-in;"></div>
+    </div>`;
+  const items = [{label:'OFF',src:preview.off},{label:'ON',src:preview.on}];
+  host.querySelector('[data-imgoff]').onclick = () => lightbox(items,0);
+  host.querySelector('[data-imgon]').onclick = () => lightbox(items,1);
+}
+
 function buildGrain(card, j){
   const body = card.querySelector('[data-body]');
   if (!j.preview){ body.innerHTML='<div class="muted">Rendering grain preview…</div>'; return; }
-  body.innerHTML = `<div class="muted" style="font-size:12px;">Same frame encoded both ways — click an image to zoom, then use ← / → to flip between OFF and ON in the same spot (look at flat areas: skies, walls). Grain shows best in motion, so this still is an approximation.</div>
-    <div class="row" style="align-items:flex-start;">
-      <div><div class="muted">Grain OFF</div><img data-imgoff src="${j.preview.off}" style="width:320px;max-width:46vw;border:1px solid #30363d;cursor:zoom-in;"></div>
-      <div><div class="muted">Grain ON</div><img data-imgon src="${j.preview.on}" style="width:320px;max-width:46vw;border:1px solid #30363d;cursor:zoom-in;"></div>
-    </div>
-    <div class="row"><button class="sec" data-off>Use grain OFF</button><button data-on>Use grain ON</button></div>`;
-  const gItems=[{label:'OFF',src:j.preview.off},{label:'ON',src:j.preview.on}];
-  body.querySelector('[data-imgoff]').onclick=()=>lightbox(gItems,0);
-  body.querySelector('[data-imgon]').onclick=()=>lightbox(gItems,1);
+  body.innerHTML = `<div class="muted" style="font-size:12px;margin-bottom:6px;">Short sample encoded both ways — grain reads best in motion.</div>
+    <div data-ab></div>
+    <div class="row" style="margin-top:8px;"><button class="sec" data-off>Use grain OFF</button><button data-on>Use grain ON</button></div>`;
+  grainCompare(body.querySelector('[data-ab]'), j.preview);
   body.querySelector('[data-off]').onclick=()=>api('POST',`/api/jobs/${j.id}/grain`,{tune_grain:false}).catch(e=>alert(e.message));
   body.querySelector('[data-on]').onclick=()=>api('POST',`/api/jobs/${j.id}/grain`,{tune_grain:true}).catch(e=>alert(e.message));
 }

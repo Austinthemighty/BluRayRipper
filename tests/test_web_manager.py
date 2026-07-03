@@ -386,7 +386,10 @@ async def test_add_mkv_folder_creates_a_job_each(manager, monkeypatch, tmp_path)
 
 async def test_grain_preview_gate(manager, monkeypatch, tmp_path):
     async def exec_with_grain(job, scheduler, report, job_name=None):
-        chosen = await report.resolve_grain(job, tmp_path / "off.png", tmp_path / "on.png")
+        from blurayripper.pipeline import GrainPreview
+        preview = GrainPreview(off_png=tmp_path / "off.png", on_png=tmp_path / "on.png",
+                               off_clip=tmp_path / "off.mp4", on_clip=tmp_path / "on.mp4")
+        chosen = await report.resolve_grain(job, preview)
         manager._executed["grain"] = chosen
         from blurayripper.pipeline import TitleResult
         job.results = [TitleResult(title_id=0, video_path=tmp_path / "x.mkv")]
