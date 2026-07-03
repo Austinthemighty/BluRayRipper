@@ -10,6 +10,8 @@ optional username/password raise the daily download quota.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import httpx
 
 _BASE = "https://api.opensubtitles.com/api/v1"
@@ -68,11 +70,21 @@ class OpenSubtitlesClient:
         api_key: str | None,
         username: str | None = None,
         password: str | None = None,
+        cache_dir: Path | None = None,
     ) -> None:
         self._api_key = api_key
         self._username = username
         self._password = password
         self._token: str | None = None
+        # Reference SRTs are cached to disk so re-running identification (or the
+        # same episode appearing on another disc) never re-spends the daily
+        # /download quota. Only the killer call — /download — is skipped on a hit.
+        self._cache_dir = cache_dir
+
+    def _cache_path(self, tmdb_id: int, season: int, episode: int, language: str) -> Path | None:
+        if not self._cache_dir:
+            return None
+        return self._cache_dir / f"{tmdb_id}_s{season:02d}e{episode:02d}_{language}.srt"
 
     @property
     def configured(self) -> bool:
@@ -107,12 +119,18 @@ class OpenSubtitlesClient:
         episode: int,
         language: str = "en",
     ) -> str | None:
-        """Download the best reference SRT for one episode, or None if not found."""
+        """Download the best reference SRT for one episode, or None if not found.
+
+        A cached SRT is returned without touching the network, so it costs no
+        download quota."""
         if not self._api_key:
             raise OpenSubtitlesError(
                 "OpenSubtitles API key not configured. Set OPENSUBTITLES_API_KEY in "
                 "config/secrets.env."
             )
+        cache_path = self._cache_path(parent_tmdb_id, season, episode, language)
+        if cache_path and cache_path.exists():
+            return cache_path.read_text(encoding="utf-8", errors="replace")
         async with httpx.AsyncClient(timeout=30) as client:
             await self._login(client)
             search = await client.get(
@@ -139,4 +157,7 @@ class OpenSubtitlesClient:
                 return None
             srt = await client.get(link, headers={"User-Agent": _UA})
             srt.raise_for_status()
+            if cache_path:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(srt.text, encoding="utf-8")
             return srt.text
