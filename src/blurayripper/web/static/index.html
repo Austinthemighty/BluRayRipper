@@ -17,8 +17,13 @@
   button { background: #238636; color: #fff; border: 0; border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
   button.sec { background: #30363d; }
   button:disabled { opacity:.5; cursor: default; }
-  .drive { display:flex; justify-content:space-between; align-items:center; padding:8px; border:1px solid #30363d; border-radius:6px; margin-bottom:8px; }
+  .drive { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:8px; border:1px solid #30363d; border-radius:6px; margin-bottom:8px; }
   .drive small { color:#8b949e; display:block; }
+  /* Let the text column shrink and ellipsize a long disc name so the buttons
+     never get pushed off-screen. */
+  .drive-info { min-width:0; flex:1; }
+  .drive-info b, .drive-info .disc-name { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .drive-btns { flex-shrink:0; display:flex; gap:6px; align-items:center; }
   .job { border:1px solid #30363d; border-radius:8px; padding:12px; margin-bottom:12px; }
   .job .top { display:flex; justify-content:space-between; align-items:center; gap:8px; }
   .badge { font-size:11px; padding:2px 8px; border-radius:999px; background:#30363d; text-transform:uppercase; letter-spacing:.04em;}
@@ -92,9 +97,9 @@ async function loadDrives() {
       const title = d.label || ('Drive ' + (d.device || ('disc:' + d.index)));
       const disc = d.disc_name ? d.disc_name : '<i>no disc / mounting…</i>';
       div.innerHTML =
-        `<div><b>${title}</b><small>${disc} · disc:${d.index} ${d.device||''}</small></div>`;
+        `<div class="drive-info"><b>${title}</b><small class="disc-name" title="${d.disc_name||''}">${disc}</small><small>disc:${d.index} ${d.device||''}</small></div>`;
       const btns = document.createElement('div');
-      btns.style.cssText = 'display:flex;gap:6px;align-items:center;';
+      btns.className = 'drive-btns';
       const add = document.createElement('button');
       add.textContent = 'Add'; add.onclick = () => addDisc('disc:' + d.index);
       const ej = document.createElement('button');
