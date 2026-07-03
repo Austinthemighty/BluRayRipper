@@ -101,8 +101,10 @@ class WebJob:
     show_title: str | None = None
     show_year: int | None = None
     match_candidates: list = field(default_factory=list)  # proposals for AWAITING_MATCH
-    preview_off: object = None  # Path to grain-off still
+    preview_off: object = None  # Path to grain-off still (poster / fallback)
     preview_on: object = None   # Path to grain-on still
+    preview_off_clip: object = None  # Path to grain-off playable clip (mp4)
+    preview_on_clip: object = None   # Path to grain-on playable clip
     _pipeline_job: object = None  # the underlying pipeline.Job once scanned
     _grain_future: object = None  # asyncio.Future resolved when user picks grain
     _task: object = None          # the asyncio.Task running scan/process (for cancel)
@@ -130,11 +132,13 @@ class _Reporter:
         """Pipeline reached a durable checkpoint (rip done / output placed)."""
         self._m._persist(self._wj)
 
-    async def resolve_grain(self, job, off_png, on_png) -> bool:
-        """Park the job at the grain gate with preview stills; wait for the pick."""
+    async def resolve_grain(self, job, preview) -> bool:
+        """Park the job at the grain gate with preview assets; wait for the pick."""
         wj = self._wj
-        wj.preview_off = off_png
-        wj.preview_on = on_png
+        wj.preview_off = preview.off_png
+        wj.preview_on = preview.on_png
+        wj.preview_off_clip = preview.off_clip
+        wj.preview_on_clip = preview.on_clip
         wj.state = JobState.AWAITING_GRAIN
         wj._grain_future = asyncio.get_event_loop().create_future()
         self._m._persist(wj)
@@ -659,9 +663,10 @@ class JobManager:
             raise ValueError("Ripped file not available for preview.")
         reporter = _Reporter(self, wj)
         preview_dir = self.settings.storage.staging_dir / f"job_{wj.id}" / "preview"
-        off_png, on_png = await self.pipeline._generate_grain_preview(
+        preview = await self.pipeline._generate_grain_preview(
             job, ripped, title_id, preview_dir, reporter)
-        wj.preview_off, wj.preview_on = off_png, on_png
+        wj.preview_off, wj.preview_on = preview.off_png, preview.on_png
+        wj.preview_off_clip, wj.preview_on_clip = preview.off_clip, preview.on_clip
         self.bus.publish()
 
     def set_grain(self, job_id: int, tune_grain: bool) -> None:
@@ -875,7 +880,14 @@ class JobManager:
             "selected": wj.selected_title_ids,
             "outputs": wj.outputs,
             "preview": (
-                {"off": f"/api/jobs/{wj.id}/preview/off", "on": f"/api/jobs/{wj.id}/preview/on"}
+                {
+                    "off": f"/api/jobs/{wj.id}/preview/off",
+                    "on": f"/api/jobs/{wj.id}/preview/on",
+                    "off_clip": (f"/api/jobs/{wj.id}/preview-clip/off"
+                                 if wj.preview_off_clip else None),
+                    "on_clip": (f"/api/jobs/{wj.id}/preview-clip/on"
+                                if wj.preview_on_clip else None),
+                }
                 if live_state == JobState.AWAITING_GRAIN and wj.preview_off else None
             ),
             "match": (
