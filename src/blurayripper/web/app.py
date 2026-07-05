@@ -19,7 +19,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -311,7 +311,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=502, detail=f"TMDB request failed: {type(exc).__name__}: {exc}")
 
     @app.get("/api/events")
-    async def events():
+    async def events(request: Request):
         async def stream():
             q = manager.bus.subscribe()
             try:
@@ -319,13 +319,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if first:
                     yield first
                 while not manager.closing:
+                    if await request.is_disconnected():
+                        break  # client went away — stop before writing to a dead socket
                     try:
                         await asyncio.wait_for(q.get(), timeout=15)
                         while not q.empty():
                             q.get_nowait()
                     except asyncio.TimeoutError:
                         pass  # heartbeat
-                    if manager.closing:
+                    if manager.closing or await request.is_disconnected():
                         break
                     msg = _safe_sse(manager)
                     if msg:
