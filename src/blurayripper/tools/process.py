@@ -61,6 +61,32 @@ def _low_priority_kwargs() -> dict:
     return {"preexec_fn": lambda: os.nice(10)}  # POSIX: nicer scheduling
 
 
+async def kill_stale_tools(image_names: Sequence[str]) -> list[str]:
+    """Best-effort kill of leftover tool processes by image name.
+
+    Called ONLY at serve startup, before any jobs run — so anything matching is
+    an orphan from a prior crash/power-off (Windows doesn't reap a dead parent's
+    children), never work we own. Prevents e.g. SubtitleEdit windows piling up
+    across restarts until they exhaust the system commit limit. Returns the names
+    it attempted to kill."""
+    killed: list[str] = []
+    for name in image_names:
+        if not name:
+            continue
+        if sys.platform.startswith("win"):
+            cmd = ["taskkill", "/F", "/IM", name]
+        else:
+            cmd = ["pkill", "-9", "-f", name]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await proc.wait()
+            killed.append(name)
+        except Exception:
+            pass  # tool not running / taskkill unavailable — nothing to do
+    return killed
+
+
 async def run(
     cmd: Sequence[str],
     *,
@@ -68,11 +94,14 @@ async def run(
     cwd: str | None = None,
     check: bool = True,
     low_priority: bool = False,
+    timeout: float | None = None,
 ) -> ProcessResult:
     """Run ``cmd``, streaming stdout lines to ``on_line``.
 
     Raises ``ProcessError`` on a non-zero exit when ``check`` is True.
-    ``low_priority`` runs the child below normal OS priority.
+    ``low_priority`` runs the child below normal OS priority. ``timeout`` (seconds)
+    kills the child if it runs longer — important for tools that can hang on an
+    error dialog (e.g. SubtitleEdit) and otherwise pile up holding memory.
     """
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -104,9 +133,16 @@ async def run(
                 break
             stderr_chunks.append(chunk)
 
-    try:
+    async def _drive() -> int:
         await asyncio.gather(_pump_stdout(), _pump_stderr())
-        returncode = await proc.wait()
+        return await proc.wait()
+
+    try:
+        returncode = await (asyncio.wait_for(_drive(), timeout) if timeout else _drive())
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise TimeoutError(f"{cmd[0]} exceeded {timeout:.0f}s and was killed")
     except asyncio.CancelledError:
         proc.kill()
         await proc.wait()

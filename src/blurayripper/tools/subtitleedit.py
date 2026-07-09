@@ -78,7 +78,10 @@ class SubtitleEdit:
     async def ocr_to_srt(self, sup_path: Path, language: str, out_dir: Path) -> Path:
         """OCR ``sup_path`` to SRT in ``out_dir``; returns the produced .srt path."""
         out_dir.mkdir(parents=True, exist_ok=True)
-        await process.run(self.build_command(sup_path, language, out_dir))
+        await process.run(
+            self.build_command(sup_path, language, out_dir),
+            timeout=self._settings.subtitles.ocr_timeout_seconds or None,
+        )
         srt_path = out_dir / (sup_path.stem + ".srt")
         if not srt_path.exists():
             # SubtitleEdit names the output after the input stem; surface a clear error.

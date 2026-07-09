@@ -59,6 +59,8 @@ fix_common_errors = true                # run SubtitleEdit's OCR error-fix pass
 remove_text_for_hi = false              # strip hearing-impaired (SDH) tags during OCR
 ocr_concurrency = 4                     # how many subtitle tracks to OCR in parallel
 keep_extracted = true                   # cache extracted .sup subs so re-OCR needs no re-rip
+ocr_timeout_seconds = 3600              # kill one track's OCR if it runs longer (SubtitleEdit
+                                        # can hang on an error dialog and pile up holding memory)
 extract_concurrency = 2                 # how many titles may read the rip + extract subs at once
                                         # (keep low when the rip lives on a NAS to avoid thrashing it)
 # When set, each placed .srt is ALSO copied here (in a per-title subfolder) with a
@@ -71,6 +73,12 @@ upload_export_dir = ""                  # e.g. "./subtitle_uploads". env: BLURAY
 # "all"  = keep every track in the kept languages (incl. commentaries)
 # "main" = keep only the first (primary) track per language
 tracks = "all"
+
+[serve]
+# At serve startup, kill leftover SubtitleEdit/MakeMKV/HandBrake processes
+# orphaned by a prior crash/power-off, before any jobs run. Prevents orphans
+# piling up across restarts until they exhaust the commit limit (out-of-memory).
+cleanup_stale_tools = true
 
 [scan]
 min_length_seconds = 120                # ignore titles shorter than this (drops menus/trailers)
