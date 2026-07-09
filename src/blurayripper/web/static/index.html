@@ -225,6 +225,13 @@ function renderJobs(snap) {
       if (j.state==='done' || j.state==='failed') buildResting(card, j);
     }
     liveUpdate(card, j);
+    // The preview often arrives a tick AFTER the card first entered awaiting_grain
+    // (or after a recovery re-render), and buildGrain only runs on state change —
+    // so re-render it here the moment j.preview shows up, else it's stuck on
+    // "Rendering grain preview…" forever.
+    if (j.state==='awaiting_grain' && j.preview && card && !card.querySelector('[data-ab]')) {
+      buildGrain(card, j);
+    }
   }
   // remove cards for jobs no longer present (leave group headers)
   for (const c of [...host.children]) {
