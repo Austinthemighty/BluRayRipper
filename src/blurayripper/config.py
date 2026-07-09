@@ -192,6 +192,9 @@ class SubtitleSettings:
     ocr_concurrency: int = 4  # how many subtitle tracks to OCR at once
     keep_extracted: bool = True  # cache extracted .sup subs so re-OCR needs no re-rip
     extract_concurrency: int = 2  # how many titles may read the rip + extract subs at once
+    # Kill a single track's OCR if it runs longer than this (SubtitleEdit can hang
+    # on an error dialog and otherwise pile up holding memory). Per track.
+    ocr_timeout_seconds: int = 3600
     # When set, each placed SRT is also copied here with a text sheet pre-filling
     # the OpenSubtitles manual-upload form. Blank/None = off.
     upload_export_dir: Path | None = None
@@ -247,6 +250,9 @@ class Settings:
     auto_eject: bool = True
     auto_open: bool = True          # auto-scan a disc when one is inserted
     drive_poll_seconds: int = 15    # how often the drive watcher checks
+    # At serve startup, kill leftover tool processes (SubtitleEdit/MakeMKV/
+    # HandBrake) orphaned by a prior crash or power-off, before any jobs run.
+    cleanup_stale_tools: bool = True
     min_length_seconds: int = 120
     web_host: str = "127.0.0.1"  # set to 0.0.0.0 to allow LAN access (no auth!)
     web_port: int = 8723
@@ -366,6 +372,7 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         ocr_concurrency=int(sub_cfg.get("ocr_concurrency", 4)),
         keep_extracted=bool(sub_cfg.get("keep_extracted", True)),
         extract_concurrency=int(sub_cfg.get("extract_concurrency", 2)),
+        ocr_timeout_seconds=int(sub_cfg.get("ocr_timeout_seconds", 3600)),
         upload_export_dir=_resolve_path(_upload_dir, REPO_ROOT) if _upload_dir else None,
     )
 
@@ -391,6 +398,7 @@ def load_settings(config_dir: Path | None = None) -> Settings:
 
     scan_cfg = data.get("scan", {})
     disc_cfg = data.get("disc", {})
+    serve_cfg = data.get("serve", {})
     meta_cfg = data.get("metadata", {})
     db_cfg = data.get("database", {})
     database_url = _override("BLURAYRIPPER_DATABASE_URL", db_cfg.get("url"))
@@ -408,6 +416,7 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         auto_eject=bool(disc_cfg.get("auto_eject", True)),
         auto_open=bool(disc_cfg.get("auto_open", True)),
         drive_poll_seconds=int(disc_cfg.get("poll_seconds", 15)),
+        cleanup_stale_tools=bool(serve_cfg.get("cleanup_stale_tools", True)),
         min_length_seconds=int(scan_cfg.get("min_length_seconds", 120)),
         web_host=web_cfg.get("host", "127.0.0.1"),
         web_port=int(web_cfg.get("port", 8723)),

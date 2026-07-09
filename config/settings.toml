@@ -60,11 +60,18 @@ auto_open = true
 # How often (seconds) the web UI checks the drives for inserted/ejected discs.
 poll_seconds = 15
 
+[serve]
+# At serve startup, kill leftover SubtitleEdit/MakeMKV/HandBrake processes
+# orphaned by a prior crash or power-off (before any jobs run). Without this,
+# orphans pile up across restarts until they exhaust the system commit limit
+# (0xc000012d / WinError 1455 "paging file too small" out-of-memory errors).
+cleanup_stale_tools = true
+
 [queue]
 # Encode "budget" for the `queue` command. A UHD (2160p) encode costs 2 units,
-# anything 1080p or smaller costs 1. Default 3 => "1 UHD + 1 lighter disc" or
-# "up to 3 DVDs" run together, but never two UHD encodes at once.
-encode_capacity = 3
+# anything 1080p or smaller costs 1. Lowered to 1 to cap peak memory (never two
+# encodes at once) on the memory-constrained VM.
+encode_capacity = 1
 
 [audio]
 # "all"  = keep every track in your kept languages (incl. commentaries)
@@ -74,7 +81,10 @@ tracks = "all"
 [subtitles]
 fix_common_errors = true
 remove_text_for_hi = false   # strip hearing-impaired (SDH) tags during OCR
-ocr_concurrency = 4          # how many subtitle tracks to OCR in parallel
+ocr_concurrency = 2          # how many subtitle tracks to OCR in parallel (lowered
+                             # from 4 to cap simultaneous SubtitleEdit memory)
+ocr_timeout_seconds = 3600   # kill a track's OCR if it hangs this long (SubtitleEdit
+                             # can stick on an error dialog and hold memory)
 keep_extracted = true        # cache extracted .sup subs so re-OCR needs no re-rip
 extract_concurrency = 2      # how many titles may read the rip + extract subs at once
                              # (keep low when the rip lives on a NAS)

@@ -608,6 +608,23 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
 
     asyncio.get_running_loop().set_exception_handler(_quiet_disconnects)
 
+    # Reap tool processes orphaned by a prior crash/power-off before starting —
+    # otherwise leftover SubtitleEdit/MakeMKV/HandBrake instances pile up across
+    # restarts until they exhaust the system commit limit (out-of-memory errors).
+    if settings.cleanup_stale_tools:
+        from pathlib import Path as _Path
+
+        from .tools import process as _process
+        names = {
+            _Path(p).name
+            for p in (settings.tools.subtitleedit, settings.tools.makemkvcon,
+                      settings.tools.handbrakecli)
+            if p
+        }
+        killed = await _process.kill_stale_tools(sorted(names))
+        if killed:
+            console.print(f"[dim]Cleaned up any stale tool processes: {', '.join(killed)}[/dim]")
+
     app = create_app(settings)
     where = "all interfaces" if host == "0.0.0.0" else host
     from .version import get_version
