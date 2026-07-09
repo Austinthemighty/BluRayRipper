@@ -716,7 +716,10 @@ class JobManager:
                 pass
         library.cleanup(self.settings.storage.staging_dir / f"job_{wj.id}")
         self.jobs.pop(job_id, None)
-        self.store.delete(job_id)
+        try:
+            self.store.delete(job_id)
+        except Exception as exc:  # a down DB must not fail the in-memory removal
+            print(f"[store] delete job {job_id} failed: {type(exc).__name__}: {exc}")
         self.bus.publish()
 
     # --- internals ------------------------------------------------------
