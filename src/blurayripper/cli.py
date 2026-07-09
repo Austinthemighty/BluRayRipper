@@ -625,6 +625,25 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         if killed:
             console.print(f"[dim]Cleaned up any stale tool processes: {', '.join(killed)}[/dim]")
 
+    # Pre-flight: the staging/output roots (often a mapped NAS drive) must be
+    # reachable, or the app crashes deep in a mkdir with a cryptic WinError 3.
+    # Fail here with a clear, actionable message instead.
+    for label, folder in (("staging_dir", settings.storage.staging_dir),
+                          ("output_dir", settings.storage.output_dir)):
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            drive = folder.drive or str(folder)
+            console.print(
+                f"[red]Cannot access {label} at {folder}[/red]\n"
+                f"[yellow]The drive {drive} isn't available to this process. Check:\n"
+                f"  • the NAS / network path is up (this same outage also breaks Postgres),\n"
+                f"  • the drive is actually mapped in THIS session — run: net use\n"
+                f"  • you're NOT in an elevated/admin prompt (mapped drives are hidden from "
+                f"elevated processes).[/yellow]\n"
+                f"[dim]({type(exc).__name__}: {exc})[/dim]")
+            return 2
+
     app = create_app(settings)
     where = "all interfaces" if host == "0.0.0.0" else host
     from .version import get_version
