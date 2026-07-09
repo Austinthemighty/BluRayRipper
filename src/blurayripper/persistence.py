@@ -17,6 +17,7 @@ MemoryStore without needing a database.
 from __future__ import annotations
 
 import json
+import time
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 
@@ -233,11 +234,24 @@ class PostgresStore(Store):
 
     def __init__(self, url: str) -> None:
         self._url = url
+        self._down_until = 0.0  # circuit breaker: skip connects until this time
 
     def _connect(self):
         import psycopg  # lazy: only needed when Postgres is configured
 
-        return psycopg.connect(self._url, autocommit=True)
+        # Circuit breaker: once a connect fails, fail the next few seconds of
+        # calls INSTANTLY instead of blocking 5s each. Without this, a dead DB
+        # freezes the async event loop (and thus the whole UI) on every persist.
+        if time.monotonic() < self._down_until:
+            raise ConnectionError("database unreachable (in cooldown after a recent failure)")
+        try:
+            # connect_timeout bounds a single hang; libpq clamps it to >= 2s.
+            conn = psycopg.connect(self._url, autocommit=True, connect_timeout=5)
+        except Exception:
+            self._down_until = time.monotonic() + 15  # back off before retrying
+            raise
+        self._down_until = 0.0  # recovered
+        return conn
 
     def init(self) -> None:
         with self._connect() as conn, conn.cursor() as cur:
