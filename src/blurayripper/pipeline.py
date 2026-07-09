@@ -185,9 +185,12 @@ class Pipeline:
             job.state = JobState.DONE
             report.on_event("Done.")
         except Exception as exc:  # surface which stage failed
+            phase = job.state.value  # capture the real phase BEFORE marking FAILED
             job.state = JobState.FAILED
             job.error = f"{type(exc).__name__}: {exc}"
-            report.on_event(f"FAILED during {job.state.value}: {job.error}")
+            hint = _failure_hint(exc)
+            report.on_event(
+                f"FAILED during {phase}: {job.error}" + (f"  — {hint}" if hint else ""))
             raise
         return job
 
@@ -915,6 +918,18 @@ class Pipeline:
 
 def _slug(text: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in text)[:40] or "job"
+
+
+def _failure_hint(exc: Exception) -> str | None:
+    """A plain-language hint for common environmental failures, so a cryptic
+    OSError in the log points at the actual fix."""
+    # WinError 1455 = ERROR_COMMITMENT_LIMIT (the system can't commit more memory).
+    if getattr(exc, "winerror", None) == 1455 or isinstance(exc, MemoryError):
+        return ("out of virtual memory: increase the Windows page file (System "
+                "Properties > Advanced > Performance > Virtual Memory) or give the VM "
+                "more RAM. Lowering [queue] encode_capacity / [subtitles] "
+                "ocr_concurrency also reduces peak memory.")
+    return None
 
 
 def _checkpoint(report) -> None:
