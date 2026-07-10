@@ -65,6 +65,37 @@ async def _settle():
         await asyncio.sleep(0)
 
 
+async def test_retry_clears_failed_live_state(manager, monkeypatch, tmp_path):
+    """Retry must move the job out of 'failed' in the LIVE state (not just
+    wj.state), or the UI keeps showing it failed and a re-click double-spawns."""
+    calls = {"n": 0}
+
+    async def flaky_execute(job, scheduler, report, job_name=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        from blurayripper.pipeline import TitleResult
+        job.results = [TitleResult(title_id=0, video_path=tmp_path / "x.mkv")]
+        return job
+
+    monkeypatch.setattr(manager.pipeline, "execute", flaky_execute)
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    manager.set_titles(wj.id, [0])
+    manager.set_mapping(wj.id, [EpisodeAssignment(0, MediaKind.MOVIE, "WarGames", 1983)])
+    await _settle()
+    assert manager.snapshot()["jobs"][0]["state"] == "failed"  # first run failed
+
+    manager.retry(wj.id)
+    # immediately after retry the live state must no longer read "failed"
+    assert manager.snapshot()["jobs"][0]["state"] != "failed"
+    # a second retry now is rejected (not failed) instead of double-spawning
+    with pytest.raises(ValueError):
+        manager.retry(wj.id)
+    await _settle()
+    assert manager.snapshot()["jobs"][0]["state"] == "done"  # retry re-ran and succeeded
+
+
 async def test_full_gate_flow(manager):
     wj = manager.add_disc("disc:0")
     await _settle()
