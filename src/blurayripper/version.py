@@ -24,11 +24,19 @@ _REPO = Path(__file__).resolve().parents[2]  # repo root (…/src/blurayripper -
 def _git_candidates() -> list[Path]:
     """Common Git-for-Windows install locations, probed when git isn't on PATH
     (the `serve` shell often lacks it, esp. a no-admin per-user install)."""
-    return [
+    cands = [
         Path(r"C:\Program Files\Git\cmd\git.exe"),
         Path(r"C:\Program Files (x86)\Git\cmd\git.exe"),
         Path.home() / "AppData" / "Local" / "Programs" / "Git" / "cmd" / "git.exe",
     ]
+    # GitHub Desktop bundles git but never adds it to PATH; its app dir is
+    # versioned (app-X.Y.Z), so glob and prefer the newest.
+    gh = Path.home() / "AppData" / "Local" / "GitHubDesktop"
+    try:
+        cands += sorted(gh.glob("app-*/resources/app/git/cmd/git.exe"), reverse=True)
+    except OSError:
+        pass
+    return cands
 
 
 @lru_cache(maxsize=1)
