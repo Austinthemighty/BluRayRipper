@@ -602,7 +602,15 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     # connection, the loop logs ConnectionResetError (WinError 10054) from a
     # teardown callback. Harmless — swallow just that, keep everything else.
     def _quiet_disconnects(loop, context):
-        if isinstance(context.get("exception"), ConnectionResetError):
+        # Benign Windows/Proactor noise when a browser drops an SSE/HTTP
+        # connection: the loop logs a ConnectionReset/Aborted, or a bare
+        # "socket.send() raised exception" from a teardown callback. Swallow just
+        # those; pass everything else to the default handler.
+        exc = context.get("exception")
+        msg = context.get("message", "")
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return
+        if "raised exception" in msg and ("socket.send" in msg or "socket.shutdown" in msg):
             return
         loop.default_exception_handler(context)
 
