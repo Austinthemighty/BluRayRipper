@@ -623,12 +623,19 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         from pathlib import Path as _Path
 
         from .tools import process as _process
-        names = {
-            _Path(p).name
-            for p in (settings.tools.subtitleedit, settings.tools.makemkvcon,
-                      settings.tools.handbrakecli)
-            if p
-        }
+        # Only reap the tools THIS serve process spawns — otherwise a `worker`
+        # running on the same machine would have its live encode/OCR killed by
+        # name every time serve restarts. serve always rips (makemkvcon); it only
+        # encodes/OCRs locally when not fully delegated to workers.
+        cl = settings.cluster
+        serve_encodes = (not cl.use_workers) or cl.local_encode_max_height > 0
+        serve_does_subs = not cl.worker_does_subs
+        paths = [settings.tools.makemkvcon]
+        if serve_encodes:
+            paths.append(settings.tools.handbrakecli)
+        if serve_does_subs:
+            paths += [settings.tools.subtitleedit, settings.tools.mkvextract]
+        names = {_Path(p).name for p in paths if p}
         killed = await _process.kill_stale_tools(sorted(names))
         if killed:
             console.print(f"[dim]Cleaned up any stale tool processes: {', '.join(killed)}[/dim]")
