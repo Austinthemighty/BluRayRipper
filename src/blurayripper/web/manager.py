@@ -486,13 +486,19 @@ class JobManager:
         """Re-queue a failed job. It resumes from its checkpoints — a finished
         rip is reused, so typically only the encode (and later stages) re-run."""
         wj = self.jobs[job_id]
-        if wj.state is not JobState.FAILED:
+        # Check the LIVE state (a failed job's pipeline_job.state is FAILED too),
+        # so a second click while it's already re-queued is rejected instead of
+        # spawning a duplicate task.
+        if self._live_state(wj) is not JobState.FAILED:
             raise ValueError(f"Job {job_id} is not failed.")
         if wj._pipeline_job is None:
             raise ValueError(f"Job {job_id} cannot be retried (no scan state).")
         wj.error = None
         wj.progress = 0.0
         wj.state = JobState.READY
+        # Also clear the pipeline job's FAILED state, or _live_state keeps
+        # reporting "failed" and the retry looks like it did nothing.
+        wj._pipeline_job.state = JobState.READY
         wj.log.append("Retrying…")
         self._persist(wj)
         self.bus.publish()
