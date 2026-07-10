@@ -117,6 +117,17 @@ class WorkerRunner:
         if not self.settings.database_url:
             raise RuntimeError("A worker needs a shared database. Set BLURAYRIPPER_DATABASE_URL.")
         self.store.init()
+        # Reap THIS worker's orphaned tools from a prior crash (HandBrake / OCR),
+        # but never makemkvcon — that belongs to a co-located serve's live rip.
+        if self.settings.cleanup_stale_tools:
+            from pathlib import Path as _Path
+
+            from .tools import process as _process
+            names = {_Path(p).name for p in (self.settings.tools.handbrakecli,
+                     self.settings.tools.subtitleedit, self.settings.tools.mkvextract) if p}
+            killed = await _process.kill_stale_tools(sorted(names))
+            if killed:
+                print(f"Cleaned up stale tool processes: {', '.join(killed)}", flush=True)
         from .version import get_version
         print(f"Worker {self.worker_id} ready (v{get_version()}) — polling for jobs…", flush=True)
         last_error = None
