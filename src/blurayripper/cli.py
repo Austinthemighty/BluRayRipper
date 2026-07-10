@@ -723,14 +723,21 @@ async def _cmd_coverart(args: argparse.Namespace) -> int:
     if root is None or not root.exists():
         console.print(f"[red]Could not resolve a readable disc root from {src!r}.[/red]")
         return 2
-    imgs = coverart.find_cover_images(root)
-    if not imgs:
+    portraits, landscapes = coverart.classify_images(root)
+    if not portraits and not landscapes:
         console.print(f"[yellow]No cover art found under {root} "
                       "(no BDMV/META/DL or JACKET_P images).[/yellow]")
         return 1
-    dest = coverart.extract_poster(root, Path(args.out))
+    art = coverart.extract_art(root, Path(args.out))
     title = coverart.disc_title(root)
-    console.print(f"[green]Saved[/green] {dest}  (from {imgs[0].name}; {len(imgs)} image(s) found)")
+    console.print(
+        f"[green]Saved[/green] "
+        + (f"poster={art.poster.name} " if art.poster else "")
+        + (f"fanart={art.fanart.name}" if art.fanart else "")
+        + f"  ({len(portraits)} portrait, {len(landscapes)} landscape image(s))")
+    if not art.poster and art.fanart:
+        console.print("[dim]Disc only had a landscape image → saved as backdrop "
+                      "(fanart); Plex will fetch the poster from its metadata agent.[/dim]")
     if title:
         console.print(f"Disc title: [bold]{title}[/bold]")
     return 0

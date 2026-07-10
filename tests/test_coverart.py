@@ -30,16 +30,51 @@ def test_find_includes_dvd_jacket(tmp_path):
     assert any(p.name == "J00___5L.jpg" for p in imgs)
 
 
-def test_extract_poster_copies_largest(tmp_path):
-    _make_bd(tmp_path, big=9000, small=100)
+# --- tiny valid JPEGs of a chosen orientation (SOF0 with width/height) ---
+def _jpeg(w: int, h: int) -> bytes:
+    sof = b"\xff\xc0\x00\x11\x08" + h.to_bytes(2, "big") + w.to_bytes(2, "big") + b"\x03\x01\x22\x00\x02\x11\x01\x03\x11\x01"
+    return b"\xff\xd8" + sof + b"\xff\xd9"
+
+
+def test_image_size_parses_jpeg(tmp_path):
+    p = tmp_path / "x.jpg"
+    p.write_bytes(_jpeg(1920, 1080))
+    assert coverart.image_size(p) == (1920, 1080)
+
+
+def test_classify_splits_portrait_and_landscape(tmp_path):
+    dl = tmp_path / "BDMV" / "META" / "DL"
+    dl.mkdir(parents=True)
+    (dl / "wide.jpg").write_bytes(_jpeg(1920, 1080))    # landscape -> fanart
+    (dl / "tall.jpg").write_bytes(_jpeg(600, 900))      # portrait  -> poster
+    portraits, landscapes = coverart.classify_images(tmp_path)
+    assert [p.name for p in portraits] == ["tall.jpg"]
+    assert [p.name for p in landscapes] == ["wide.jpg"]
+
+
+def test_extract_art_lands_poster_and_fanart(tmp_path):
+    dl = tmp_path / "BDMV" / "META" / "DL"
+    dl.mkdir(parents=True)
+    (dl / "wide.jpg").write_bytes(_jpeg(1920, 1080))
+    (dl / "tall.jpg").write_bytes(_jpeg(600, 900))
     out = tmp_path / "Movies" / "The Big Movie (2020)"
-    dest = coverart.extract_poster(tmp_path, out)
-    assert dest is not None and dest.name == "poster.jpg"
-    assert dest.read_bytes() == b"x" * 9000  # the largest image
+    art = coverart.extract_art(tmp_path, out)
+    assert art.poster and art.poster.name == "poster.jpg"
+    assert art.fanart and art.fanart.name == "fanart.jpg"
 
 
-def test_extract_poster_none_when_no_art(tmp_path):
-    assert coverart.extract_poster(tmp_path, tmp_path / "out") is None
+def test_landscape_only_disc_makes_fanart_not_poster(tmp_path):
+    dl = tmp_path / "BDMV" / "META" / "DL"
+    dl.mkdir(parents=True)
+    (dl / "wide.jpg").write_bytes(_jpeg(1280, 720))     # the common Blu-ray case
+    art = coverart.extract_art(tmp_path, tmp_path / "out")
+    assert art.poster is None
+    assert art.fanart and art.fanart.name == "fanart.jpg"
+
+
+def test_extract_art_none_when_no_art(tmp_path):
+    art = coverart.extract_art(tmp_path, tmp_path / "out")
+    assert art.poster is None and art.fanart is None
 
 
 def test_disc_title_from_bdmt(tmp_path):

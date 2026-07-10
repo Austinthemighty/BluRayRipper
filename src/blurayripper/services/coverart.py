@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import re
 import shutil
+import struct
+from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -109,16 +111,88 @@ def disc_title(root: Path) -> str | None:
     return None
 
 
-def extract_poster(root: Path, dest_dir: Path, *, name: str = "poster.jpg") -> Path | None:
-    """Copy the largest disc cover image into ``dest_dir`` as ``name`` (converting
-    the extension label only, not the bytes). Returns the written path, or None if
-    the disc carries no cover art."""
-    imgs = find_cover_images(root)
-    if not imgs:
+def image_size(path: Path) -> tuple[int, int] | None:
+    """(width, height) from a JPEG/PNG/GIF header, no Pillow dependency. None if
+    it can't be determined."""
+    try:
+        with path.open("rb") as f:
+            head = f.read(24)
+            if head[:8] == b"\x89PNG\r\n\x1a\n" and len(head) >= 24:
+                w, h = struct.unpack(">II", head[16:24])
+                return int(w), int(h)
+            if head[:6] in (b"GIF87a", b"GIF89a"):
+                w, h = struct.unpack("<HH", head[6:10])
+                return int(w), int(h)
+            if head[:2] == b"\xff\xd8":  # JPEG — scan for the SOF marker
+                f.seek(2)
+                while True:
+                    b = f.read(1)
+                    if not b:
+                        return None
+                    if b != b"\xff":
+                        continue
+                    marker = f.read(1)
+                    while marker == b"\xff":
+                        marker = f.read(1)
+                    if not marker:
+                        return None
+                    m = marker[0]
+                    if m in (0xD8, 0xD9) or 0xD0 <= m <= 0xD7:
+                        continue  # standalone markers carry no length
+                    ln = f.read(2)
+                    if len(ln) < 2:
+                        return None
+                    seg = struct.unpack(">H", ln)[0]
+                    if 0xC0 <= m <= 0xCF and m not in (0xC4, 0xC8, 0xCC):  # SOFn
+                        data = f.read(5)
+                        if len(data) < 5:
+                            return None
+                        h, w = struct.unpack(">HH", data[1:5])
+                        return int(w), int(h)
+                    f.seek(seg - 2, 1)
+    except (OSError, struct.error):
         return None
-    src = imgs[0]
+    return None
+
+
+def classify_images(root: Path) -> tuple[list[Path], list[Path]]:
+    """Split disc images into (portraits, landscapes), each largest-file first.
+    Portrait (h >= w) makes a poster; landscape (w > h) makes a backdrop/fanart.
+    Images whose size can't be read are treated as landscape (disc thumbnails
+    almost always are)."""
+    portraits: list[Path] = []
+    landscapes: list[Path] = []
+    for p in find_cover_images(root):
+        size = image_size(p)
+        if size and size[1] >= size[0] and size[0] > 0:
+            portraits.append(p)
+        else:
+            landscapes.append(p)
+    return portraits, landscapes
+
+
+@dataclass
+class DiscArt:
+    poster: Path | None = None   # best portrait, written as poster.<ext>
+    fanart: Path | None = None   # best landscape, written as fanart.<ext>
+
+
+def _copy_as(src: Path, dest_dir: Path, stem: str) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
-    # Keep the source extension so a .png isn't mislabeled .jpg.
-    dest = dest_dir / (Path(name).stem + src.suffix.lower())
+    dest = dest_dir / (stem + src.suffix.lower())  # keep real ext (.png vs .jpg)
     shutil.copy2(src, dest)
     return dest
+
+
+def extract_art(root: Path, dest_dir: Path, *, poster: bool = True,
+                fanart: bool = True) -> DiscArt:
+    """Copy the disc's best portrait to poster.jpg and best landscape to
+    fanart.jpg (Plex's backdrop). Most Blu-ray disc thumbnails are landscape, so
+    typically only fanart is produced. Returns what was written."""
+    portraits, landscapes = classify_images(root)
+    art = DiscArt()
+    if poster and portraits:
+        art.poster = _copy_as(portraits[0], dest_dir, "poster")
+    if fanart and landscapes:
+        art.fanart = _copy_as(landscapes[0], dest_dir, "fanart")
+    return art
