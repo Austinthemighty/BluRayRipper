@@ -57,11 +57,39 @@ def _git(*args: str) -> str | None:
     return out.stdout.strip() or None
 
 
+def _sha_from_git_dir() -> str | None:
+    """Read the current commit's short SHA straight from .git, no git binary
+    needed — so the version still identifies the build on a box without git on
+    PATH (which otherwise pins everyone to a useless bare '0.1.0')."""
+    git_dir = _REPO / ".git"
+    try:
+        head = (git_dir / "HEAD").read_text().strip()
+    except OSError:
+        return None
+    if not head.startswith("ref:"):
+        return head[:7]  # detached HEAD holds the SHA directly
+    ref = head[4:].strip()
+    try:
+        return (git_dir / ref).read_text().strip()[:7]  # loose ref
+    except OSError:
+        pass
+    try:  # packed-refs fallback
+        for line in (git_dir / "packed-refs").read_text().splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1] == ref:
+                return parts[0][:7]
+    except OSError:
+        pass
+    return None
+
+
 @lru_cache(maxsize=1)
 def get_version() -> str:
     count = _git("rev-list", "--count", "HEAD")
     short = _git("rev-parse", "--short", "HEAD")
-    if not count or not short:
-        return _BASE
-    dirty = bool(_git("status", "--porcelain"))
-    return f"{_BASE}+{count}.{short}{'-dirty' if dirty else ''}"
+    if count and short:
+        dirty = bool(_git("status", "--porcelain"))
+        return f"{_BASE}+{count}.{short}{'-dirty' if dirty else ''}"
+    # git binary unavailable — still surface the commit SHA from .git directly.
+    sha = _sha_from_git_dir()
+    return f"{_BASE}+g{sha}" if sha else _BASE
