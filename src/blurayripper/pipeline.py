@@ -22,7 +22,7 @@ from typing import Protocol
 from .config import Settings
 from .models import DiscInfo, EpisodeAssignment, MediaKind
 from .scheduler import EncodeScheduler, encode_weight
-from .services import library, naming, os_upload
+from .services import coverart, library, naming, os_upload
 from .services.mapping_store import MappingStore
 from .services.subtitles import looks_like_sdh
 from .version import get_version
@@ -200,6 +200,7 @@ class Pipeline:
         self, job: Job, staging_root: Path, scheduler: EncodeScheduler, report
     ) -> None:
         assert job.disc is not None
+        await self._place_cover_art(job, report)  # before any rip/eject
         for title_id in job.selected_title_ids:
             assignment = job.assignments.get(title_id)
             if assignment is None:
@@ -220,6 +221,8 @@ class Pipeline:
         the rip box's serve doesn't kill that long NAS-bound work); the rip box
         then only rips and resolves grain."""
         assert job.disc is not None
+        # 0) Grab the disc's cover art while the disc is still in the drive.
+        await self._place_cover_art(job, report)
         # 1) Rip per title (sequential — one drive).
         todo: list[tuple[int, EpisodeAssignment, Path, Path]] = []
         for title_id in job.selected_title_ids:
@@ -902,6 +905,36 @@ class Pipeline:
         report.on_event("Saved disc mapping for automatic future re-rips.")
 
     # --- naming ---------------------------------------------------------
+
+    def _poster_folder(self, a: EpisodeAssignment) -> Path:
+        """Where Plex wants the poster: the movie folder, or a show's root folder
+        (above Season NN) for TV."""
+        vp = self._video_path_for(a)
+        return vp.parent.parent if a.kind is MediaKind.TV else vp.parent
+
+    async def _place_cover_art(self, job: Job, report) -> None:
+        """Copy the disc's own cover art to each output folder as poster.jpg.
+        Best-effort and idempotent; must run BEFORE ripping (auto-eject removes
+        the disc after the last rip)."""
+        if not self.settings.extract_cover_art or job.disc is None:
+            return
+        root = coverart.disc_root(job.disc)
+        if root is None:
+            return
+        folders = {
+            self._poster_folder(a)
+            for tid in job.selected_title_ids
+            if (a := job.assignments.get(tid)) is not None
+        }
+        for folder in folders:
+            if any((folder / f"poster{e}").exists() for e in (".jpg", ".jpeg", ".png")):
+                continue  # already have one (resume / other disc of a set)
+            try:
+                dest = await asyncio.to_thread(coverart.extract_poster, root, folder)
+                if dest:
+                    report.on_event(f"Saved disc cover art → {folder.name}/{dest.name}")
+            except Exception as exc:
+                report.on_event(f"Cover art skipped ({type(exc).__name__}: {exc}).")
 
     def _video_path_for(self, a: EpisodeAssignment) -> Path:
         container = self.settings.encode.container

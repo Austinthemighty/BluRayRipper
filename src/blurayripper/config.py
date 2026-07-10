@@ -250,6 +250,9 @@ class Settings:
     auto_eject: bool = True
     auto_open: bool = True          # auto-scan a disc when one is inserted
     drive_poll_seconds: int = 15    # how often the drive watcher checks
+    # Copy the disc's own cover art (BDMV/META or DVD JACKET_P) to the output
+    # folder as poster.jpg for Plex. Read before ripping (disc still in the drive).
+    extract_cover_art: bool = True
     # At serve startup, kill leftover tool processes (SubtitleEdit/MakeMKV/
     # HandBrake) orphaned by a prior crash or power-off, before any jobs run.
     cleanup_stale_tools: bool = True
@@ -416,6 +419,7 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         auto_eject=bool(disc_cfg.get("auto_eject", True)),
         auto_open=bool(disc_cfg.get("auto_open", True)),
         drive_poll_seconds=int(disc_cfg.get("poll_seconds", 15)),
+        extract_cover_art=bool(disc_cfg.get("extract_cover_art", True)),
         cleanup_stale_tools=bool(serve_cfg.get("cleanup_stale_tools", True)),
         min_length_seconds=int(scan_cfg.get("min_length_seconds", 120)),
         web_host=web_cfg.get("host", "127.0.0.1"),

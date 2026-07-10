@@ -87,6 +87,9 @@ min_length_seconds = 120                # ignore titles shorter than this (drops
 auto_eject = true                       # eject the disc when ripping finishes (before the encode runs)
 auto_open = true                        # auto-scan a disc when inserted; known discs auto-rip
 poll_seconds = 15                       # how often the drive watcher checks for inserted/ejected discs
+# Copy the disc's own cover art (Blu-ray BDMV/META or DVD JACKET_P) to the movie
+# folder as poster.jpg for Plex, read before ripping (disc still in the drive).
+extract_cover_art = true
 
 [queue]
 # Encode "budget" for concurrent encodes. A UHD (2160p) encode costs 2 units,

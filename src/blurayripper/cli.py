@@ -694,6 +694,48 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_coverart(args: argparse.Namespace) -> int:
+    import re as _re
+    from pathlib import Path
+
+    from .services import coverart
+    from .tools.makemkv import MakeMKV
+
+    settings = load_settings(args.config)
+    src = args.source.strip()
+    root: Path | None = None
+    if src.startswith("file:"):
+        root = Path(src[5:])
+    elif src.startswith("disc:"):
+        try:
+            idx = int(src.split(":", 1)[1])
+        except ValueError:
+            console.print("[red]Bad disc selector.[/red]")
+            return 2
+        drives = await MakeMKV(settings).list_drives()
+        drv = next((d for d in drives if d.index == idx), None)
+        dev = drv.device if drv else None
+        root = Path(dev + "\\") if dev and _re.match(r"^[A-Za-z]:$", dev) else None
+    elif _re.match(r"^[A-Za-z]:\\?$", src):
+        root = Path(src if src.endswith("\\") else src + "\\")
+    else:
+        root = Path(src)
+    if root is None or not root.exists():
+        console.print(f"[red]Could not resolve a readable disc root from {src!r}.[/red]")
+        return 2
+    imgs = coverart.find_cover_images(root)
+    if not imgs:
+        console.print(f"[yellow]No cover art found under {root} "
+                      "(no BDMV/META/DL or JACKET_P images).[/yellow]")
+        return 1
+    dest = coverart.extract_poster(root, Path(args.out))
+    title = coverart.disc_title(root)
+    console.print(f"[green]Saved[/green] {dest}  (from {imgs[0].name}; {len(imgs)} image(s) found)")
+    if title:
+        console.print(f"Disc title: [bold]{title}[/bold]")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="blurayripper", description=__doc__)
     parser.add_argument("--config", help="Path to config directory", default=None)
@@ -710,6 +752,12 @@ def _build_parser() -> argparse.ArgumentParser:
     rip.add_argument("source", help="makemkvcon source, e.g. disc:0 / file:/path / iso:/path")
     rip.add_argument("--name", help="Optional job name (staging subfolder)", default=None)
     rip.set_defaults(func=_cmd_rip)
+
+    cover = sub.add_parser(
+        "coverart", help="Extract a disc's cover art (poster) from BDMV/META or DVD JACKET_P")
+    cover.add_argument("source", help="disc:N, a drive (F:), or a path / file:BDMV_parent")
+    cover.add_argument("--out", default=".", help="Output directory (default: current dir)")
+    cover.set_defaults(func=_cmd_coverart)
 
     queue = sub.add_parser(
         "queue",
