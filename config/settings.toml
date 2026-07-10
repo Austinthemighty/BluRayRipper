@@ -59,6 +59,9 @@ auto_eject = true
 auto_open = true
 # How often (seconds) the web UI checks the drives for inserted/ejected discs.
 poll_seconds = 15
+# Copy the disc's own cover art (Blu-ray BDMV/META or DVD JACKET_P) to the movie
+# folder as poster.jpg for Plex. Read before ripping, while the disc is still in.
+extract_cover_art = true
 
 [serve]
 # At serve startup, kill leftover SubtitleEdit/MakeMKV/HandBrake processes
