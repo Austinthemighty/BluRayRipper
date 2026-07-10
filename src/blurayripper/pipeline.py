@@ -926,13 +926,19 @@ class Pipeline:
             for tid in job.selected_title_ids
             if (a := job.assignments.get(tid)) is not None
         }
+        exts = (".jpg", ".jpeg", ".png")
         for folder in folders:
-            if any((folder / f"poster{e}").exists() for e in (".jpg", ".jpeg", ".png")):
-                continue  # already have one (resume / other disc of a set)
+            have_poster = any((folder / f"poster{e}").exists() for e in exts)
+            have_fanart = any((folder / f"fanart{e}").exists() for e in exts)
+            if have_poster and have_fanart:
+                continue  # already placed (resume / other disc of a set)
             try:
-                dest = await asyncio.to_thread(coverart.extract_poster, root, folder)
-                if dest:
-                    report.on_event(f"Saved disc cover art → {folder.name}/{dest.name}")
+                art = await asyncio.to_thread(
+                    coverart.extract_art, root, folder,
+                    poster=not have_poster, fanart=not have_fanart)
+                placed = [p.name for p in (art.poster, art.fanart) if p]
+                if placed:
+                    report.on_event(f"Saved disc art → {folder.name}/{', '.join(placed)}")
             except Exception as exc:
                 report.on_event(f"Cover art skipped ({type(exc).__name__}: {exc}).")
 
