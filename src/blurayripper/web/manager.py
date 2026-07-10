@@ -144,7 +144,15 @@ class _Reporter:
         wj._grain_future = asyncio.get_event_loop().create_future()
         self._m._persist(wj)
         self._m.bus.publish()
-        return await wj._grain_future
+        chosen = await wj._grain_future
+        # Gate resolved — hand the live state back to the pipeline. Without this,
+        # wj.state stays AWAITING_GRAIN (a parked state), so _live_state keeps
+        # reporting "awaiting grain" through the whole encode and set_grain
+        # rejects further clicks ("not awaiting a grain decision").
+        wj._grain_future = None
+        wj.state = getattr(job, "state", JobState.ENCODING)
+        self._m.bus.publish()
+        return chosen
 
 
 class JobManager:
