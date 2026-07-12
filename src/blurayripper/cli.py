@@ -267,11 +267,16 @@ async def _cmd_check(args: argparse.Namespace) -> int:
             ok = False
     runner = settings.tools.subtitleedit_runner
     tool_table.add_row("subtitleedit_runner", runner or "[dim](none — runs directly)[/dim]")
-    # ffmpeg is optional (only the grain preview uses it) — don't fail on it.
+    # ffmpeg is optional (grain preview + UHD/HDR encoding) — don't fail on it.
     tool_table.add_row(
         "ffmpeg [dim](optional)[/dim]",
         f"[green]{settings.tools.ffmpeg}[/green]" if settings.tools.ffmpeg
-        else "[yellow]not found — grain preview disabled[/yellow]",
+        else "[yellow]not found — grain preview + UHD/HDR encoding disabled[/yellow]",
+    )
+    tool_table.add_row(
+        "dovitool [dim](optional)[/dim]",
+        f"[green]{settings.tools.dovitool}[/green]" if settings.tools.dovitool
+        else "[yellow]not found — Dolby Vision falls back to HDR10[/yellow]",
     )
     console.print(tool_table)
 
@@ -319,6 +324,30 @@ async def _cmd_check(args: argparse.Namespace) -> int:
         except json.JSONDecodeError as exc:
             console.print(f"[red]Preset file is not valid JSON: {exc}[/red]")
             ok = False
+
+    # UHD / HDR / Dolby Vision encoding path
+    enc = settings.encode
+    if enc.ffmpeg_uhd:
+        if not settings.tools.ffmpeg:
+            console.print("[red]ffmpeg_uhd is on but ffmpeg not found — UHD titles can't encode.[/red]")
+            ok = False
+        else:
+            console.print(
+                f"[green]UHD via ffmpeg:[/green] titles >= {enc.uhd_min_height}p -> libx265 "
+                f"(crf {enc.ffmpeg_crf}, {enc.ffmpeg_preset}, audio={enc.ffmpeg_audio})")
+            if enc.ffmpeg_audio == "copy" and enc.container != "mkv":
+                console.print(
+                    f"[yellow]ffmpeg_audio='copy' needs container='mkv' (yours is "
+                    f"'{enc.container}') — lossless audio (TrueHD/DTS-HD) won't fit mp4.[/yellow]")
+        if enc.dovi:
+            if not settings.tools.dovitool:
+                console.print("[yellow]dovi is on but dovi_tool not found — DV falls back to HDR10.[/yellow]")
+            elif not settings.tools.mkvmerge:
+                console.print("[yellow]dovi is on but mkvmerge not found — DV falls back to HDR10.[/yellow]")
+            else:
+                console.print("[green]Dolby Vision:[/green] dovi_tool + mkvmerge present — DV preserved (profile 8.1).")
+    elif enc.dovi:
+        console.print("[yellow]dovi is on but ffmpeg_uhd is off — DV needs ffmpeg_uhd=true; no effect.[/yellow]")
 
     # Languages + TMDB
     console.print(
