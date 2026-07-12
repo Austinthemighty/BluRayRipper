@@ -13,6 +13,9 @@ venv/
 # Secrets and local config
 config/secrets.env
 *.local.toml
+# Web-edited settings overlay (⚙ Settings in the UI). Gitignored so it survives
+# `git pull` and never clobbers the tracked settings.toml.
+config/settings.local.json
 
 # Runtime data
 *.db

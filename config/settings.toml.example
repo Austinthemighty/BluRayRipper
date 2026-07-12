@@ -7,8 +7,14 @@
 # clobbers them.
 #
 # Precedence for any setting that supports it: process env var  >  secrets.env  >
-# settings.toml  >  built-in default. Where a key can also be set via secrets.env,
-# the BLURAYRIPPER_* / *_API_KEY name is noted next to it.
+# settings.local.json  >  settings.toml  >  built-in default. Where a key can also
+# be set via secrets.env, the BLURAYRIPPER_* / *_API_KEY name is noted next to it.
+#
+# settings.local.json is the gitignored overlay written by the web UI's
+# "⚙ Settings" panel — edit almost everything from the browser instead of this
+# file; changes there survive `git pull` and apply on the next `serve` restart.
+# The database URL is deliberately NOT web-editable (it's a secret) — set it in
+# config/secrets.env.
 
 [tools]
 # Absolute paths to the external binaries. Leave blank to auto-detect from PATH

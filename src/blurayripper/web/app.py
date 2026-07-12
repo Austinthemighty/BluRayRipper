@@ -19,11 +19,12 @@ import asyncio
 import json
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from ..config import Settings, load_settings
+from ..settings_store import save_overlay, settings_ui_payload
 from ..models import EpisodeAssignment, MediaKind
 from ..services.metadata import MetadataError, TMDBClient
 from ..tools.eject import close_tray, eject
@@ -324,6 +325,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         n = await manager.remove_many(
             lambda wj: manager._live_state(wj).value in wanted)
         return {"removed": n}
+
+    @app.get("/api/settings")
+    async def get_settings():
+        return settings_ui_payload(settings.config_dir)
+
+    @app.post("/api/settings")
+    async def post_settings(updates: dict = Body(...)):
+        try:
+            save_overlay(settings.config_dir, updates)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"ok": True, "restart_required": True}
 
     @app.get("/api/tmdb/search")
     async def tmdb_search(kind: str, query: str):

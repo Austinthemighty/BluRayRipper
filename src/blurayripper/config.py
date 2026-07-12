@@ -329,6 +329,21 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         with settings_file.open("rb") as fh:
             data = tomllib.load(fh)
 
+    # Merge the web-edited overlay (config/settings.local.json, gitignored) over
+    # the tracked TOML. It sits ABOVE settings.toml but BELOW secrets.env/env
+    # (loaded next), so secrets — the database URL especially — stay in charge.
+    overlay_file = cfg_dir / "settings.local.json"
+    if overlay_file.exists():
+        import json
+
+        try:
+            overlay = json.loads(overlay_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            overlay = {}
+        for section, values in (overlay or {}).items():
+            if isinstance(values, dict):
+                data.setdefault(section, {}).update(values)
+
     # Load gitignored env overrides first so they win over the tracked TOML.
     secrets = _load_secrets(cfg_dir)
 
