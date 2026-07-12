@@ -20,7 +20,7 @@ import json
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from ..config import Settings, load_settings
@@ -126,6 +126,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             _STATIC / "index.html",
             headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
         )
+
+    @app.get("/manifest.webmanifest")
+    async def manifest():
+        # Makes the UI installable (Add to Home Screen) as a fullscreen app.
+        return JSONResponse({
+            "name": "BluRayRipper", "short_name": "BluRayRipper",
+            "start_url": "/", "display": "standalone",
+            "background_color": "#0e1116", "theme_color": "#0e1116",
+            "icons": [{"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml",
+                       "purpose": "any"}],
+        })
+
+    @app.get("/icon.svg")
+    async def icon():
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">'
+            '<rect width="512" height="512" rx="104" fill="#0e1116"/>'
+            '<circle cx="256" cy="256" r="150" fill="none" stroke="#58a6ff" stroke-width="30"/>'
+            '<circle cx="256" cy="256" r="46" fill="#161b22" stroke="#58a6ff" stroke-width="22"/>'
+            '</svg>'
+        )
+        return Response(content=svg, media_type="image/svg+xml",
+                        headers={"Cache-Control": "max-age=86400"})
 
     @app.get("/api/drives")
     async def drives():
