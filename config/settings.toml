@@ -108,6 +108,7 @@ upload_export_dir = ""       # e.g. "./subtitle_uploads". env: BLURAYRIPPER_SUB_
 [metadata]
 provider = "tmdb"
 language = "en-US"
+write_nfo = true   # write a Kodi/Plex .nfo sidecar next to each output video
 
 [web]
 # Web UI bind address. "127.0.0.1" = this machine only (default, safest).
