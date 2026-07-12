@@ -183,6 +183,14 @@ class EncodeSettings:
     # touches frames that are actually combed, so it's safe on mixed content.
     deinterlace: str = "auto"
     deinterlace_max_height: int = 576  # NTSC 480 / PAL 576 -> DVD-era SD
+    # UHD via ffmpeg+libx265 (preserves HDR10 metadata HandBrake mangles). When
+    # True, titles >= uhd_min_height encode with ffmpeg; everything else stays on
+    # HandBrake. Needs ffmpeg installed.
+    ffmpeg_uhd: bool = False
+    uhd_min_height: int = 2160
+    ffmpeg_crf: int = 18            # x265 quality (lower = better/bigger); ~18 for UHD
+    ffmpeg_preset: str = "medium"  # x265 preset
+    ffmpeg_audio: str = "copy"     # "copy" (keep originals, incl. TrueHD/DTS-HD) or "aac"
 
 
 @dataclass
@@ -369,6 +377,11 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         low_priority=bool(encode_cfg.get("low_priority", True)),
         deinterlace=str(encode_cfg.get("deinterlace", "auto")),
         deinterlace_max_height=int(encode_cfg.get("deinterlace_max_height", 576)),
+        ffmpeg_uhd=bool(encode_cfg.get("ffmpeg_uhd", False)),
+        uhd_min_height=int(encode_cfg.get("uhd_min_height", 2160)),
+        ffmpeg_crf=int(encode_cfg.get("ffmpeg_crf", 18)),
+        ffmpeg_preset=str(encode_cfg.get("ffmpeg_preset", "medium")),
+        ffmpeg_audio=str(encode_cfg.get("ffmpeg_audio", "copy")),
     )
 
     lang_cfg = data.get("languages", {})

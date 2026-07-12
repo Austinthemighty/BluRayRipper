@@ -40,6 +40,14 @@ low_priority = true
 # touches frames that are actually combed, so "auto" is safe on progressive SD.
 deinterlace = "auto"
 deinterlace_max_height = 576   # NTSC 480 / PAL 576 -> DVD-era SD ceiling
+# UHD via ffmpeg+libx265 to preserve HDR10 metadata (HandBrake mangles it).
+# titles >= uhd_min_height use ffmpeg; the rest stay on HandBrake. Needs ffmpeg;
+# ffmpeg_audio="copy" needs container="mkv".
+ffmpeg_uhd = false
+uhd_min_height = 2160
+ffmpeg_crf = 18
+ffmpeg_preset = "medium"
+ffmpeg_audio = "copy"
 
 [languages]
 # ISO 639-2/B 3-letter codes (as MakeMKV/mkvmerge report them) to KEEP.
