@@ -283,6 +283,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # FileResponse honors the Range header (206), so <video> can seek/scrub.
         return FileResponse(path, media_type="video/mp4")
 
+    @app.get("/api/jobs/{job_id}/artwork")
+    async def job_artwork(job_id: int):
+        path = manager.artwork_path(job_id)
+        if not path or not Path(path).exists():
+            raise HTTPException(status_code=404, detail="No artwork.")
+        return FileResponse(path)
+
     @app.delete("/api/jobs/{job_id}")
     async def remove_job(job_id: int):
         await manager.remove(job_id)

@@ -25,6 +25,7 @@
   .drive-info b, .drive-info .disc-name { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .drive-btns { flex-shrink:0; display:flex; gap:6px; align-items:center; }
   .job { border:1px solid #30363d; border-radius:8px; padding:12px; margin-bottom:12px; }
+  .thumb { height:44px; max-width:66px; border-radius:4px; object-fit:cover; border:1px solid #30363d; flex-shrink:0; }
   /* Newly-added/auto-opened job: a brief green pulse so it's not missed. */
   .job.flash { animation: jobflash 2.2s ease-out; }
   @keyframes jobflash {
@@ -379,8 +380,11 @@ function renderedStateClear(){ for(const k of Object.keys(renderedState)) delete
 
 function cardHtml(j){
   return `<div class="top">
-      <div><b>${j.disc_name || j.source}</b> <span class="muted">#${j.id}</span></div>
-      <div style="display:flex;gap:8px;align-items:center;">
+      <div style="display:flex;gap:8px;align-items:center;min-width:0;">
+        <img class="thumb" src="/api/jobs/${j.id}/artwork?t=${j.state}" onerror="this.remove()" alt="">
+        <div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><b>${j.disc_name || j.source}</b> <span class="muted">#${j.id}</span></div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-shrink:0;">
         <span class="badge ${badgeClass(j.state)}" data-badge>${j.state.replace(/_/g,' ')}</span>
         <button class="sec" data-remove title="Remove from queue" style="padding:2px 9px;">✕</button>
       </div>

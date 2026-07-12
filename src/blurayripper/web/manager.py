@@ -991,6 +991,23 @@ class JobManager:
     def _name_of(self, wj: WebJob) -> str:
         return (wj.disc.disc_name if wj.disc else None) or wj.source
 
+    def artwork_path(self, job_id: int):
+        """Path to a job's extracted cover art (poster preferred, else fanart),
+        or None. Used to show a thumbnail on the card."""
+        wj = self.jobs.get(job_id)
+        if wj is None or not wj.assignments:
+            return None
+        a = next(iter(wj.assignments.values()), None)
+        if a is None:
+            return None
+        folder = self.pipeline._poster_folder(a)
+        for base in ("poster", "fanart"):
+            for ext in (".jpg", ".jpeg", ".png"):
+                p = folder / f"{base}{ext}"
+                if p.exists():
+                    return p
+        return None
+
     _PARKED = (
         JobState.DONE, JobState.FAILED, JobState.AWAITING_TITLES,
         JobState.AWAITING_MAPPING, JobState.AWAITING_GRAIN, JobState.AWAITING_MATCH,
