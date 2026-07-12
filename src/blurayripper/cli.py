@@ -278,6 +278,15 @@ async def _cmd_check(args: argparse.Namespace) -> int:
         f"[green]{settings.tools.dovitool}[/green]" if settings.tools.dovitool
         else "[yellow]not found — Dolby Vision falls back to HDR10[/yellow]",
     )
+    # MSVC runtime: dovi_tool.exe / mkvtoolnix are MSVC-linked and won't launch
+    # without vcruntime140.dll. Only meaningful (and shown) on Windows.
+    vcr_level, vcr_msg = _vcruntime_status()
+    if vcr_level != "na":
+        _vcr_color = {"ok": "green", "warn": "yellow", "missing": "red"}.get(vcr_level, "dim")
+        tool_table.add_row(
+            "vcruntime140.dll [dim](Windows)[/dim]",
+            f"[{_vcr_color}]{vcr_msg}[/{_vcr_color}]",
+        )
     console.print(tool_table)
 
     # Folders (writability)
@@ -344,8 +353,16 @@ async def _cmd_check(args: argparse.Namespace) -> int:
                 console.print("[yellow]dovi is on but dovi_tool not found — DV falls back to HDR10.[/yellow]")
             elif not settings.tools.mkvmerge:
                 console.print("[yellow]dovi is on but mkvmerge not found — DV falls back to HDR10.[/yellow]")
+            elif vcr_level == "missing":
+                console.print(
+                    "[red]dovi is on and dovi_tool is present, but vcruntime140.dll is MISSING — "
+                    "dovi_tool.exe won't launch, so DV falls back to HDR10. Install the Microsoft "
+                    "Visual C++ x64 Redistributable (aka.ms/vs/17/release/vc_redist.x64.exe).[/red]")
+                ok = False
             else:
                 console.print("[green]Dolby Vision:[/green] dovi_tool + mkvmerge present — DV preserved (profile 8.1).")
+                if vcr_level == "warn":
+                    console.print(f"[yellow]Note: {vcr_msg}[/yellow]")
     elif enc.dovi:
         console.print("[yellow]dovi is on but ffmpeg_uhd is off — DV needs ffmpeg_uhd=true; no effect.[/yellow]")
 
@@ -364,6 +381,48 @@ async def _cmd_check(args: argparse.Namespace) -> int:
         else "\n[bold red]Some checks failed — fix the items above before ripping.[/bold red]"
     )
     return 0 if ok else 1
+
+
+def _vcruntime_status() -> tuple[str, str]:
+    """Check the MSVC runtime that dovi_tool.exe / mkvtoolnix need on Windows.
+
+    Returns (level, message) where level is one of:
+      "na"      not Windows — nothing to check
+      "ok"      vcruntime140.dll and vcruntime140_1.dll both present
+      "warn"    vcruntime140.dll present but vcruntime140_1.dll missing
+                (older dovi_tool builds run; newer MSVC builds need _1)
+      "missing" vcruntime140.dll not found — MSVC-linked tools won't launch
+    """
+    import sys
+
+    if sys.platform != "win32":
+        return "na", "n/a (not Windows)"
+
+    import ctypes
+    import os
+    from pathlib import Path
+
+    def _locate(name: str) -> str | None:
+        try:
+            ctypes.WinDLL(name)  # searches the app dir, System32, and PATH
+            return name
+        except OSError:
+            root = os.environ.get("SystemRoot", r"C:\Windows")
+            for sub in ("System32", "SysWOW64"):
+                cand = Path(root) / sub / name
+                if cand.exists():
+                    return str(cand)
+            return None
+
+    core = _locate("vcruntime140.dll")
+    if not core:
+        return "missing", (
+            "MISSING — install the Microsoft Visual C++ x64 Redistributable "
+            "(aka.ms/vs/17/release/vc_redist.x64.exe)"
+        )
+    if not _locate("vcruntime140_1.dll"):
+        return "warn", f"{core} — but vcruntime140_1.dll missing (newer dovi_tool builds need it)"
+    return "ok", core
 
 
 def _check_writable(path) -> bool:
