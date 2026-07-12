@@ -90,6 +90,25 @@
   .worker:last-child{border-bottom:none;}
   .worker .wname, .worker .wsub{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   .worker .wsub{font-size:12px;}
+  /* Settings modal */
+  #settings-modal{position:fixed; inset:0; background:rgba(1,4,9,.7); z-index:3000; display:none;
+    align-items:flex-start; justify-content:center; overflow:auto; padding:24px;}
+  #settings-modal.open{display:flex;}
+  .sheet{background:#161b22; border:1px solid #30363d; border-radius:10px; max-width:860px; width:100%; margin:auto;
+    padding:0 20px 16px; box-shadow:0 10px 40px rgba(0,0,0,.5);}
+  .sheet .shead{position:sticky; top:0; background:#161b22; padding:16px 0 10px; border-bottom:1px solid #21262d; z-index:1;}
+  .sheet h2{margin:0; text-transform:none; letter-spacing:0; font-size:16px; color:#e6edf3;}
+  .sgroup{border:1px solid #21262d; border-radius:8px; padding:8px 12px 10px; margin-top:12px;}
+  .sgroup > h3{font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:#8b949e; margin:2px 0 6px;}
+  .sfield{display:grid; grid-template-columns:210px 1fr; gap:6px 12px; align-items:center; padding:5px 0; border-top:1px solid #1b2129;}
+  .sgroup .sfield:first-of-type{border-top:0;}
+  .sfield > label{font-size:13px;}
+  .sfield .fhelp{grid-column:2; font-size:12px; color:#8b949e;}
+  .sfield.shadow{opacity:.7;}
+  .sfield input[type=text], .sfield input[type=number], .sfield select{width:100%;}
+  .sfoot{position:sticky; bottom:0; background:#161b22; padding:12px 0 2px; border-top:1px solid #21262d; margin-top:12px;
+    display:flex; gap:10px; align-items:center;}
+  @media (max-width:760px){ .sfield{grid-template-columns:1fr;} .sfield .fhelp{grid-column:1;} #opensettings{margin-left:0;} }
 </style>
 </head>
 <body>
@@ -99,6 +118,7 @@
   <span class="cap" id="cap"></span>
   <button class="sec" id="redoall" style="margin-left:auto;" title="Re-OCR subtitles for every job that has names assigned (uses staged/cached subs; no re-encode).">Re-OCR all subtitles</button>
   <label class="cap"><input type="checkbox" id="autoconfirm"> Auto-confirm single matches</label>
+  <button class="sec" id="opensettings" title="Edit server settings (saved to config/settings.local.json; applied on next restart).">⚙ Settings</button>
 </header>
 <div id="stats"></div>
 <div id="bulkbar"></div>
@@ -125,6 +145,21 @@
   <div class="panel">
     <h2>Queue</h2>
     <div id="jobs"><span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span></div>
+  </div>
+</div>
+
+<div id="settings-modal">
+  <div class="sheet">
+    <div class="shead">
+      <h2>Settings</h2>
+      <div class="muted" style="font-size:12px;">Saved to <code>config/settings.local.json</code> (survives updates). Applied on the next server restart. The database connection is set in <code>config/secrets.env</code>.</div>
+    </div>
+    <div id="settings-body"><span class="muted">Loading…</span></div>
+    <div class="sfoot">
+      <button onclick="saveSettings()">Save</button>
+      <button class="sec" onclick="closeSettings()">Close</button>
+      <span id="settings-msg" class="muted"></span>
+    </div>
   </div>
 </div>
 
@@ -833,6 +868,74 @@ document.getElementById('redoall').onclick = async (e) => {
   catch(err){ alert(err.message); }
   finally { setTimeout(()=>{ btn.disabled=false; btn.textContent=label; }, 4000); }
 };
+// ---- Settings modal ----
+const esc = (s) => String(s == null ? '' : s).replace(/"/g,'&quot;').replace(/</g,'&lt;');
+async function openSettings(){
+  const modal = document.getElementById('settings-modal');
+  const body = document.getElementById('settings-body');
+  document.getElementById('settings-msg').textContent = '';
+  body.innerHTML = '<span class="muted">Loading…</span>';
+  modal.classList.add('open');
+  let data;
+  try { data = await api('GET','/api/settings'); }
+  catch(e){ body.innerHTML = `<span style="color:#f85149;">Failed to load: ${esc(e.message)}</span>`; return; }
+  body.innerHTML = '';
+  for(const g of data.groups){
+    const gd = document.createElement('div'); gd.className = 'sgroup';
+    gd.innerHTML = `<h3>${esc(g.title)}</h3>`;
+    for(const f of g.fields){
+      const id = `set_${f.section}_${f.key}`;
+      const shadowed = f.env_value != null;
+      const dis = shadowed ? 'disabled' : '';
+      let ctrl;
+      if(f.type === 'bool'){
+        ctrl = `<input type="checkbox" id="${id}" ${f.value ? 'checked' : ''} ${dis}>`;
+      } else if(f.type === 'choice'){
+        const cur = shadowed ? f.env_value : f.value;
+        ctrl = `<select id="${id}" ${dis}>` +
+          f.choices.map(c => `<option ${String(cur)===c?'selected':''}>${esc(c)}</option>`).join('') + `</select>`;
+      } else if(f.type === 'int'){
+        ctrl = `<input type="number" id="${id}" value="${esc(shadowed ? f.env_value : f.value)}" ${dis}>`;
+      } else {
+        const raw = f.type === 'list' ? (Array.isArray(f.value) ? f.value.join(', ') : f.value) : f.value;
+        ctrl = `<input type="text" id="${id}" value="${esc(shadowed ? f.env_value : raw)}" ${dis}>`;
+      }
+      const row = document.createElement('div');
+      row.className = 'sfield' + (shadowed ? ' shadow' : '');
+      row.dataset.section = f.section; row.dataset.key = f.key; row.dataset.type = f.type;
+      row.dataset.shadow = shadowed ? '1' : '';
+      let note = f.help || '';
+      if(shadowed) note = `Set in secrets.env (${f.env}) — that overrides this. ` + note;
+      row.innerHTML = `<label for="${id}">${esc(f.label)}</label><div>${ctrl}</div>` +
+        (note ? `<div class="fhelp">${esc(note)}</div>` : '');
+      gd.appendChild(row);
+    }
+    body.appendChild(gd);
+  }
+}
+function closeSettings(){ document.getElementById('settings-modal').classList.remove('open'); }
+async function saveSettings(){
+  const updates = {};
+  document.querySelectorAll('#settings-body .sfield').forEach(row => {
+    if(row.dataset.shadow) return;   // env-shadowed inputs are disabled; don't send
+    const {section, key, type} = row.dataset;
+    const el = document.getElementById(`set_${section}_${key}`);
+    if(!el) return;
+    (updates[section] = updates[section] || {})[key] = (type === 'bool') ? el.checked : el.value;
+  });
+  const msg = document.getElementById('settings-msg');
+  msg.style.color = '#8b949e'; msg.textContent = 'Saving…';
+  try {
+    await api('POST','/api/settings', updates);
+    msg.style.color = '#3fb950';
+    msg.textContent = 'Saved. Restart the server to apply.';
+  } catch(e){ msg.style.color = '#f85149'; msg.textContent = 'Error: ' + e.message; }
+}
+document.getElementById('opensettings').onclick = openSettings;
+document.getElementById('settings-modal').addEventListener('click', (e) => {
+  if(e.target.id === 'settings-modal') closeSettings();   // click backdrop to close
+});
+
 const ev = new EventSource('/api/events');
 ev.onmessage = (m) => { try { renderJobs(JSON.parse(m.data)); } catch (e) { /* ignore a partial/empty frame */ } };
 loadDrives();
