@@ -556,20 +556,32 @@ class Pipeline:
         return heights
 
     async def identify_phase(self, job: Job, staging_root: Path, report) -> dict[int, str]:
-        """Rip each selected title and OCR its main subtitle track to SRT text,
-        for subtitle-based episode identification. Places nothing — returns
-        ``{title_id: srt_text}`` for the caller to match against references."""
+        """Rip the selected titles, then OCR each one's main subtitle track to SRT
+        text for subtitle-based episode identification. Places nothing — returns
+        ``{title_id: srt_text}`` for the caller to match against references.
+
+        Ripping is done for ALL titles up front, back-to-back, so the optical
+        drive never idles mid-job (some drives spin down between reads and
+        misbehave on resume). The OCR reads only the ripped files, so the disc is
+        already ejected by the time it runs."""
         assert job.disc is not None
         default_lang = self.settings.languages.default.lower()
-        rips: dict[int, str] = {}
-        job.state = JobState.IDENTIFYING
+
+        # Phase 1 — rip every title back-to-back (ejects after the last).
+        ripped_paths: dict[int, Path] = {}
         for title_id in job.selected_title_ids:
-            ripped = await self._ensure_ripped(job, title_id, staging_root, report)
+            ripped_paths[title_id] = await self._ensure_ripped(
+                job, title_id, staging_root, report)
+
+        # Phase 2 — OCR each title's main track (no disc needed now).
+        job.state = JobState.IDENTIFYING
+        rips: dict[int, str] = {}
+        for title_id in job.selected_title_ids:
             sub_dir = staging_root / "sub" / f"t{title_id:03d}"
             cp = job.checkpoints.setdefault(title_id, {})
             sub_jobs = self._reuse_subs(cp)
             if sub_jobs is None:
-                extracted = await self._extract_subs(ripped, sub_dir, report)
+                extracted = await self._extract_subs(ripped_paths[title_id], sub_dir, report)
                 sub_jobs = extracted or []
                 if extracted is not None:
                     cp["subs"] = [
