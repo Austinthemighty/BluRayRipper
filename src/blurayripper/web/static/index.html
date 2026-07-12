@@ -52,6 +52,18 @@
   input, select { background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:6px; padding:5px 8px; font-size:13px; }
   .row { display:flex; gap:8px; align-items:center; margin:6px 0; flex-wrap:wrap; }
   .muted { color:#8b949e; }
+  /* Mobile: stack the two columns, wrap the header, bigger touch targets. */
+  @media (max-width: 760px) {
+    .wrap { grid-template-columns: 1fr; padding: 10px; gap: 10px; }
+    header { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
+    header h1 { font-size: 20px; }
+    #redoall { margin-left: 0 !important; }
+    #stats, #bulkbar:not(:empty) { padding: 8px 10px; }
+    .job { padding: 10px; }
+    .log { max-height: 84px; }
+    button, button.sec { padding: 9px 14px; font-size: 14px; }  /* easier taps */
+    .thumb { height: 38px; }
+  }
   /* Top summary strip: at-a-glance counts across all jobs. */
   #stats { display:flex; flex-wrap:wrap; gap:8px; padding:10px 16px; border-bottom:1px solid #21262d; }
   .stat { display:flex; align-items:center; gap:6px; font-size:13px; color:#8b949e;
@@ -302,9 +314,15 @@ function renderJobs(snap) {
   renderWorkers(snap.workers || []);
   if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); renderJobs._sig = ''; renderJobs._known = new Set(); renderBulkBar(0); return; }
   const ph = document.getElementById('placeholder'); if (ph) ph.remove();
-  const jobs = [...snap.jobs].filter(j => !jobFilter || catOf(j.state)===jobFilter)
-                             .sort((a,b) => jobRank(a)-jobRank(b) || a.id-b.id);
-  renderBulkBar(jobs.length);
+  const allJobs = [...snap.jobs].filter(j => !jobFilter || catOf(j.state)===jobFilter)
+                                .sort((a,b) => jobRank(a)-jobRank(b) || a.id-b.id);
+  renderBulkBar(allJobs.length);
+  // Cap how many cards we render — 150+ heavy cards (logs, live SSE, thumbnails)
+  // crash phones. The sort puts active/needs-you jobs first, so the cap only
+  // hides the queued/done tail; use the filters to reach a specific one.
+  const MAX_CARDS = 50;
+  const jobs = allJobs.slice(0, MAX_CARDS);
+  const overflow = allJobs.length - jobs.length;
   const seen = new Set();
   for (const j of jobs) {
     seen.add(j.id);
@@ -359,6 +377,14 @@ function renderJobs(snap) {
     const card = document.getElementById('job-'+j.id);
     if (card) host.appendChild(card);
   }
+  const oldFoot = document.getElementById('overflow-note'); if (oldFoot) oldFoot.remove();
+  if (overflow > 0){
+    const foot = document.createElement('div');
+    foot.id = 'overflow-note'; foot.className = 'muted';
+    foot.style.cssText = 'padding:12px 2px;font-size:13px;';
+    foot.textContent = `… and ${overflow} more not shown. Tap a stat above to filter (e.g. Failed), or narrow the queue.`;
+    host.appendChild(foot);
+  }
   // Flash + scroll to any newly-appeared job so an added/auto-opened disc is
   // obvious — they land in the Queued group and are otherwise easy to miss.
   // (Skipped on the first render so a page load doesn't flash everything.)
@@ -381,7 +407,7 @@ function renderedStateClear(){ for(const k of Object.keys(renderedState)) delete
 function cardHtml(j){
   return `<div class="top">
       <div style="display:flex;gap:8px;align-items:center;min-width:0;">
-        <img class="thumb" src="/api/jobs/${j.id}/artwork?t=${j.state}" onerror="this.remove()" alt="">
+        <img class="thumb" loading="lazy" src="/api/jobs/${j.id}/artwork?t=${j.state}" onerror="this.remove()" alt="">
         <div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><b>${j.disc_name || j.source}</b> <span class="muted">#${j.id}</span></div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-shrink:0;">
