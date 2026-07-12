@@ -72,6 +72,9 @@ cleanup_stale_tools = true
 # How many jobs may prep (rip + subtitles + grain) at once. Caps the recovery
 # stampede when a restart resumes many in-flight jobs. Keep low (1-3).
 prep_concurrency = 2
+# Auto re-queue a failed job this many times (exponential backoff) before
+# leaving it FAILED for a manual Retry. 0 = never.
+auto_retry_max = 2
 
 [queue]
 # Encode "budget" for the `queue` command. A UHD (2160p) encode costs 2 units,

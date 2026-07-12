@@ -259,6 +259,9 @@ class Settings:
     # How many jobs may prep (rip+subs+grain) concurrently. Caps the recovery
     # stampede when a restart resumes many in-flight jobs at once.
     prep_concurrency: int = 2
+    # Automatically re-queue a failed job up to this many times (exponential
+    # backoff) before leaving it FAILED for a manual retry. 0 = never.
+    auto_retry_max: int = 2
     min_length_seconds: int = 120
     web_host: str = "127.0.0.1"  # set to 0.0.0.0 to allow LAN access (no auth!)
     web_port: int = 8723
@@ -425,6 +428,7 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         extract_cover_art=bool(disc_cfg.get("extract_cover_art", True)),
         cleanup_stale_tools=bool(serve_cfg.get("cleanup_stale_tools", True)),
         prep_concurrency=int(serve_cfg.get("prep_concurrency", 2)),
+        auto_retry_max=int(serve_cfg.get("auto_retry_max", 2)),
         min_length_seconds=int(scan_cfg.get("min_length_seconds", 120)),
         web_host=web_cfg.get("host", "127.0.0.1"),
         web_port=int(web_cfg.get("port", 8723)),
