@@ -182,6 +182,22 @@ async def test_auto_retry_gives_up_after_max(manager, monkeypatch):
     assert manager.snapshot()["jobs"][0]["state"] == "failed"
 
 
+def test_drives_cache_survives_restart(tmp_path, monkeypatch):
+    """The last-known drive list is persisted, so a fresh JobManager (restart)
+    shows it immediately instead of a blank panel / blocking scan."""
+    from blurayripper.persistence import MemoryStore
+    from blurayripper.tools.makemkv import Drive
+
+    settings = load_settings()
+    monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    m1 = JobManager(settings, store=MemoryStore())
+    m1._drives_cache = [Drive(0, "ASUS BW-16D1HT", "E:", "SOME_MOVIE")]
+    m1._save_drives_cache()
+
+    m2 = JobManager(settings, store=MemoryStore())  # simulate a restart
+    assert [(d.index, d.device, d.disc_name) for d in m2.drives()] == [(0, "E:", "SOME_MOVIE")]
+
+
 async def test_full_gate_flow(manager):
     wj = manager.add_disc("disc:0")
     await _settle()

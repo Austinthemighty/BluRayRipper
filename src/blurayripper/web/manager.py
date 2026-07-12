@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -178,7 +179,12 @@ class JobManager:
         # recovers dozens of in-flight jobs doesn't stampede the box all at once.
         self._prep_sem = asyncio.Semaphore(max(1, settings.prep_concurrency))
         self._auto_retries: dict[int, int] = {}  # job id -> auto-retry count so far
-        self._drives_cache: list[Drive] = []
+        self._drives_cache_file = (
+            settings.storage.output_dir / ".blurayripper" / "drives_cache.json")
+        # Seed from the last persisted list so the panel isn't blank right after a
+        # restart (and the /api/drives endpoint never has to do a blocking scan
+        # that could hang on an unresponsive drive).
+        self._drives_cache: list[Drive] = self._load_drives_cache()
         self._last_disc: dict[int, str] = {}  # drive index -> last auto-opened disc name
         self._last_drive_error: str | None = None
 
@@ -330,6 +336,25 @@ class JobManager:
         """Cached drives (populated by the watcher); fast, no per-request scan."""
         return self._drives_cache
 
+    def _load_drives_cache(self) -> list[Drive]:
+        try:
+            data = json.loads(self._drives_cache_file.read_text(encoding="utf-8"))
+            return [Drive(index=d["index"], name=d.get("name", ""),
+                          device=d.get("device"), disc_name=d.get("disc_name"))
+                    for d in data]
+        except (OSError, ValueError, KeyError, TypeError):
+            return []
+
+    def _save_drives_cache(self) -> None:
+        try:
+            self._drives_cache_file.parent.mkdir(parents=True, exist_ok=True)
+            self._drives_cache_file.write_text(json.dumps(
+                [{"index": d.index, "name": d.name, "device": d.device,
+                  "disc_name": d.disc_name} for d in self._drives_cache]),
+                encoding="utf-8")
+        except OSError:
+            pass
+
     def start_drive_watch(self) -> None:
         self._spawn(self._watch_drives())
 
@@ -377,6 +402,7 @@ class JobManager:
             try:
                 self._drives_cache = await self.list_drives()
                 self._last_drive_error = None
+                self._save_drives_cache()  # survive restarts; keep the panel warm
                 if self.settings.auto_open:
                     self._auto_open(self._drives_cache)
             except Exception as exc:
