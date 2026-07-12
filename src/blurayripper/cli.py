@@ -616,6 +616,10 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
 
     asyncio.get_running_loop().set_exception_handler(_quiet_disconnects)
 
+    # Kill tool children with us (Windows) so a crash/power-off can't orphan them.
+    from .tools.winjob import enable_kill_on_close
+    enable_kill_on_close()
+
     # Reap tool processes orphaned by a prior crash/power-off before starting —
     # otherwise leftover SubtitleEdit/MakeMKV/HandBrake instances pile up across
     # restarts until they exhaust the system commit limit (out-of-memory errors).

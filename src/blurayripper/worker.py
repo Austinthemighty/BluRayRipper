@@ -117,6 +117,8 @@ class WorkerRunner:
         if not self.settings.database_url:
             raise RuntimeError("A worker needs a shared database. Set BLURAYRIPPER_DATABASE_URL.")
         self.store.init()
+        from .tools.winjob import enable_kill_on_close
+        enable_kill_on_close()  # kill our HandBrake/OCR children if the worker dies
         # Reap THIS worker's orphaned tools from a prior crash (HandBrake / OCR),
         # but never makemkvcon — that belongs to a co-located serve's live rip.
         if self.settings.cleanup_stale_tools:
