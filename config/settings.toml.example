@@ -47,6 +47,14 @@ low_priority = true                     # run encodes below normal OS priority s
 # progressive SD too.
 deinterlace = "auto"                    # "auto" | "on" | "off"
 deinterlace_max_height = 576            # NTSC 480 / PAL 576 — the DVD-era SD ceiling for "auto"
+# UHD via ffmpeg+libx265 to preserve HDR10 metadata (HandBrake mangles it). When
+# true, titles >= uhd_min_height encode with ffmpeg; everything else stays on
+# HandBrake. Needs ffmpeg installed; pair ffmpeg_audio="copy" with container="mkv".
+ffmpeg_uhd = false
+uhd_min_height = 2160
+ffmpeg_crf = 18                         # x265 quality (lower = better/bigger)
+ffmpeg_preset = "medium"                # x265 preset
+ffmpeg_audio = "copy"                   # "copy" (keep TrueHD/DTS-HD) or "aac"
 
 [languages]
 # ISO 639-2/B 3-letter codes (as MakeMKV/mkvmerge report them) to KEEP; all other

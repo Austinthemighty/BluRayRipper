@@ -726,20 +726,32 @@ class Pipeline:
         height = await self._probe_height(ripped_mkv, report)
         weight = encode_weight(height)
         deinterlace = self._should_deinterlace(height)
+        enc = self.settings.encode
+        use_ffmpeg = (enc.ffmpeg_uhd and self.ffmpeg.available
+                      and bool(height) and height >= enc.uhd_min_height)
         acquired = await scheduler.acquire(weight)
         try:
             job.state = JobState.ENCODING
             report.on_event(
                 f"Encoding title {title_id} ({height or '?'}p, weight {weight}, "
                 f"grain={'on' if tune_grain else 'off'}"
-                f"{', deinterlace (SD)' if deinterlace else ''}) -> {video_dest.name} ..."
+                f"{', deinterlace (SD)' if deinterlace else ''}"
+                f"{', ffmpeg/HDR' if use_ffmpeg else ''}) -> {video_dest.name} ..."
             )
             encoded = encode_dir / video_dest.name
-            await self.handbrake.encode(
-                ripped_mkv, encoded,
-                on_progress=lambda p: self._encode_progress(p, report),
-                tune_grain=tune_grain, deinterlace=deinterlace,
-            )
+            if use_ffmpeg:
+                # UHD: ffmpeg+libx265, preserving HDR10 metadata. (No decomb —
+                # UHD Blu-ray is progressive.)
+                await self.ffmpeg.encode(
+                    ripped_mkv, encoded,
+                    on_progress=lambda p: self._encode_progress(p, report),
+                    tune_grain=bool(tune_grain), low_priority=enc.low_priority)
+            else:
+                await self.handbrake.encode(
+                    ripped_mkv, encoded,
+                    on_progress=lambda p: self._encode_progress(p, report),
+                    tune_grain=tune_grain, deinterlace=deinterlace,
+                )
         finally:
             await scheduler.release(acquired)
         result.video_path = library.place(encoded, video_dest)
