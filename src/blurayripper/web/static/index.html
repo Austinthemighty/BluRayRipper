@@ -51,6 +51,17 @@
   input, select { background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:6px; padding:5px 8px; font-size:13px; }
   .row { display:flex; gap:8px; align-items:center; margin:6px 0; flex-wrap:wrap; }
   .muted { color:#8b949e; }
+  /* Top summary strip: at-a-glance counts across all jobs. */
+  #stats { display:flex; flex-wrap:wrap; gap:8px; padding:10px 16px; border-bottom:1px solid #21262d; }
+  .stat { display:flex; align-items:center; gap:6px; font-size:13px; color:#8b949e;
+    background:#161b22; border:1px solid #30363d; border-radius:999px; padding:4px 12px; }
+  .stat b { color:#e6edf3; font-variant-numeric:tabular-nums; }
+  .stat.zero { opacity:.4; }
+  .stat .dot { width:8px; height:8px; border-radius:50%; background:#8b949e; }
+  .stat.rip  .dot{background:#58a6ff;} .stat.subs .dot{background:#d29922;}
+  .stat.enc  .dot{background:#a371f7;} .stat.input .dot{background:#e3b341;}
+  .stat.queued .dot{background:#6e7681;} .stat.done .dot{background:#3fb950;}
+  .stat.fail .dot{background:#f85149;}
 </style>
 </head>
 <body>
@@ -61,6 +72,7 @@
   <button class="sec" id="redoall" style="margin-left:auto;" title="Re-OCR subtitles for every job that has names assigned (uses staged/cached subs; no re-encode).">Re-OCR all subtitles</button>
   <label class="cap"><input type="checkbox" id="autoconfirm"> Auto-confirm single matches</label>
 </header>
+<div id="stats"></div>
 <div class="wrap">
   <div>
     <div class="panel">
@@ -200,9 +212,36 @@ function jobRank(j){
   return 4;                                  // queued / ready
 }
 
+const SUB_STATES = ['extracting_subs','ocr_subs','identifying'];
+const ENC_STATES = ['encoding','placing','confirming'];
+function renderStats(jobs){
+  const host = document.getElementById('stats');
+  if (!host) return;
+  const c = {rip:0, subs:0, enc:0, input:0, queued:0, done:0, fail:0};
+  for (const j of jobs){
+    const s = j.state;
+    if (s==='failed') c.fail++;
+    else if (s==='done') c.done++;
+    else if (RIP_STATES.includes(s)) c.rip++;
+    else if (SUB_STATES.includes(s)) c.subs++;
+    else if (ENC_STATES.includes(s)) c.enc++;
+    else if (AWAITING.includes(s)) c.input++;
+    else if (s==='ready') c.queued++;
+  }
+  const defs = [
+    ['rip','Ripping',c.rip], ['subs','Subtitles',c.subs], ['enc','Encoding',c.enc],
+    ['input','Needs you',c.input], ['queued','Queued',c.queued],
+    ['done','Done',c.done], ['fail','Failed',c.fail],
+  ];
+  host.innerHTML = defs.map(([cls,label,n]) =>
+    `<span class="stat ${cls}${n?'':' zero'}"><span class="dot"></span>${label} <b>${n}</b></span>`
+  ).join('') + `<span class="stat" style="margin-left:auto;">Total <b>${jobs.length}</b></span>`;
+}
+
 function renderJobs(snap) {
   const host = document.getElementById('jobs');
   if (snap.version) { const v = document.getElementById('ver'); if (v) v.textContent = 'v' + snap.version; }
+  renderStats(snap.jobs || []);
   if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); renderJobs._sig = ''; renderJobs._known = new Set(); return; }
   const ph = document.getElementById('placeholder'); if (ph) ph.remove();
   const jobs = [...snap.jobs].sort((a,b) => jobRank(a)-jobRank(b) || a.id-b.id);
