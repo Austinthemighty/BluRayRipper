@@ -177,6 +177,7 @@ class JobManager:
         # Bounds how many jobs prep (rip+subs+grain) at once — so a restart that
         # recovers dozens of in-flight jobs doesn't stampede the box all at once.
         self._prep_sem = asyncio.Semaphore(max(1, settings.prep_concurrency))
+        self._auto_retries: dict[int, int] = {}  # job id -> auto-retry count so far
         self._drives_cache: list[Drive] = []
         self._last_disc: dict[int, str] = {}  # drive index -> last auto-opened disc name
         self._last_drive_error: str | None = None
@@ -891,8 +892,35 @@ class JobManager:
             else:
                 wj.state = JobState.FAILED
                 wj.error = f"{type(exc).__name__}: {exc}"
+                self._schedule_auto_retry(wj)
+        else:
+            self._auto_retries.pop(wj.id, None)  # success resets the retry budget
         self._persist(wj)
         self.bus.publish()
+
+    def _schedule_auto_retry(self, wj: WebJob) -> None:
+        """After a failure, re-queue the job up to auto_retry_max times with
+        exponential backoff (30s, 60s, 120s… capped 5m). Bounded so a genuinely
+        broken job doesn't loop forever."""
+        n = self._auto_retries.get(wj.id, 0)
+        if n >= self.settings.auto_retry_max:
+            if self.settings.auto_retry_max:
+                wj.log.append(f"Auto-retry exhausted ({n}) — hit Retry to try again.")
+            return
+        self._auto_retries[wj.id] = n + 1
+        delay = min(30 * (2 ** n), 300)
+        wj.log.append(
+            f"Auto-retry {n + 1}/{self.settings.auto_retry_max} in {delay}s…")
+        self._spawn(self._auto_retry_later(wj.id, delay))
+
+    async def _auto_retry_later(self, job_id: int, delay: float) -> None:
+        await asyncio.sleep(delay)
+        if self.closing or job_id not in self.jobs:
+            return
+        try:
+            self.retry(job_id)  # re-queues + spawns _run_job
+        except (ValueError, KeyError):
+            pass  # already retried/removed/no-longer-failed
 
     def _spawn(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)

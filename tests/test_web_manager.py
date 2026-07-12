@@ -128,6 +128,60 @@ async def test_prep_concurrency_throttles_recovery_stampede(manager, monkeypatch
     assert all(wj.state is JobState.DONE for wj in jobs)
 
 
+async def test_auto_retry_recovers_transient_failure(manager, monkeypatch, tmp_path):
+    """A job that fails once is auto-re-queued and succeeds on the retry."""
+    manager.settings.auto_retry_max = 2
+
+    async def instant(job_id, delay):  # skip the real backoff sleep
+        if job_id in manager.jobs:
+            manager.retry(job_id)
+    monkeypatch.setattr(manager, "_auto_retry_later", instant)
+
+    calls = {"n": 0}
+
+    async def flaky(job, scheduler, report, job_name=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        job.results = [TitleResult(title_id=0, video_path=tmp_path / "x.mkv")]
+        return job
+    monkeypatch.setattr(manager.pipeline, "execute", flaky)
+
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    manager.set_titles(wj.id, [0])
+    manager.set_mapping(wj.id, [EpisodeAssignment(0, MediaKind.MOVIE, "M", 2000)])
+    await _settle()
+
+    assert calls["n"] == 2                                    # ran again after failing
+    assert manager.snapshot()["jobs"][0]["state"] == "done"   # and succeeded
+
+
+async def test_auto_retry_gives_up_after_max(manager, monkeypatch):
+    manager.settings.auto_retry_max = 2
+
+    async def instant(job_id, delay):
+        if job_id in manager.jobs:
+            manager.retry(job_id)
+    monkeypatch.setattr(manager, "_auto_retry_later", instant)
+
+    calls = {"n": 0}
+
+    async def always_fail(job, scheduler, report, job_name=None):
+        calls["n"] += 1
+        raise RuntimeError("nope")
+    monkeypatch.setattr(manager.pipeline, "execute", always_fail)
+
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    manager.set_titles(wj.id, [0])
+    manager.set_mapping(wj.id, [EpisodeAssignment(0, MediaKind.MOVIE, "M", 2000)])
+    await _settle()
+
+    assert calls["n"] == 3                                    # initial + 2 auto-retries
+    assert manager.snapshot()["jobs"][0]["state"] == "failed"
+
+
 async def test_full_gate_flow(manager):
     wj = manager.add_disc("disc:0")
     await _settle()
