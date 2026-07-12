@@ -198,6 +198,14 @@ def test_drives_cache_survives_restart(tmp_path, monkeypatch):
     assert [(d.index, d.device, d.disc_name) for d in m2.drives()] == [(0, "E:", "SOME_MOVIE")]
 
 
+async def test_remove_many_by_state(manager):
+    for jid, st in [(201, JobState.FAILED), (202, JobState.FAILED), (203, JobState.DONE)]:
+        manager.jobs[jid] = WebJob(id=jid, source="disc:0", state=st)
+    n = await manager.remove_many(lambda wj: manager._live_state(wj).value == "failed")
+    assert n == 2
+    assert set(manager.jobs) == {203}
+
+
 async def test_full_gate_flow(manager):
     wj = manager.add_disc("disc:0")
     await _settle()

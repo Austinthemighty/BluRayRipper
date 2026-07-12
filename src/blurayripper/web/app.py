@@ -36,6 +36,10 @@ class AddDisc(BaseModel):
     source: str
 
 
+class RemoveByState(BaseModel):
+    states: list[str]
+
+
 class SetTitles(BaseModel):
     title_ids: list[int]
 
@@ -283,6 +287,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def remove_job(job_id: int):
         await manager.remove(job_id)
         return {"ok": True}
+
+    @app.post("/api/jobs/remove-by-state")
+    async def remove_by_state(body: RemoveByState):
+        wanted = set(body.states)
+        n = await manager.remove_many(
+            lambda wj: manager._live_state(wj).value in wanted)
+        return {"removed": n}
 
     @app.get("/api/tmdb/search")
     async def tmdb_search(kind: str, query: str):

@@ -742,6 +742,14 @@ class JobManager:
         self._persist(wj)
         self.bus.publish()
 
+    async def remove_many(self, predicate) -> int:
+        """Remove every job matching ``predicate(wj)``. Returns how many. Used by
+        the bulk 'clear failed / remove completed' actions."""
+        ids = [jid for jid, wj in list(self.jobs.items()) if predicate(wj)]
+        for jid in ids:
+            await self.remove(jid)
+        return len(ids)
+
     async def remove(self, job_id: int) -> None:
         """Remove any job from the queue. If it's running (or parked at the grain
         gate), cancel its task — which kills the active rip/encode subprocess —
