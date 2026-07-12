@@ -62,6 +62,10 @@
   .stat.enc  .dot{background:#a371f7;} .stat.input .dot{background:#e3b341;}
   .stat.queued .dot{background:#6e7681;} .stat.done .dot{background:#3fb950;}
   .stat.fail .dot{background:#f85149;}
+  .stat[data-cat]{cursor:pointer;} .stat[data-cat]:hover{border-color:#8b949e;}
+  .stat.active{border-color:#58a6ff; color:#e6edf3; box-shadow:0 0 0 1px #58a6ff;}
+  #bulkbar{display:flex; gap:8px; align-items:center;}
+  #bulkbar:not(:empty){padding:10px 16px; border-bottom:1px solid #21262d;}
 </style>
 </head>
 <body>
@@ -73,6 +77,7 @@
   <label class="cap"><input type="checkbox" id="autoconfirm"> Auto-confirm single matches</label>
 </header>
 <div id="stats"></div>
+<div id="bulkbar"></div>
 <div class="wrap">
   <div>
     <div class="panel">
@@ -214,37 +219,63 @@ function jobRank(j){
 
 const SUB_STATES = ['extracting_subs','ocr_subs','identifying'];
 const ENC_STATES = ['encoding','placing','confirming'];
+function catOf(s){
+  if (s==='failed') return 'fail';
+  if (s==='done') return 'done';
+  if (RIP_STATES.includes(s)) return 'rip';
+  if (SUB_STATES.includes(s)) return 'subs';
+  if (ENC_STATES.includes(s)) return 'enc';
+  if (AWAITING.includes(s)) return 'input';
+  if (s==='ready') return 'queued';
+  return null;
+}
+let jobFilter = null;  // active stat-chip filter (category key) or null = all
+const STAT_DEFS = [['rip','Ripping'],['subs','Subtitles'],['enc','Encoding'],
+  ['input','Needs you'],['queued','Queued'],['done','Done'],['fail','Failed']];
 function renderStats(jobs){
   const host = document.getElementById('stats');
   if (!host) return;
-  const c = {rip:0, subs:0, enc:0, input:0, queued:0, done:0, fail:0};
-  for (const j of jobs){
-    const s = j.state;
-    if (s==='failed') c.fail++;
-    else if (s==='done') c.done++;
-    else if (RIP_STATES.includes(s)) c.rip++;
-    else if (SUB_STATES.includes(s)) c.subs++;
-    else if (ENC_STATES.includes(s)) c.enc++;
-    else if (AWAITING.includes(s)) c.input++;
-    else if (s==='ready') c.queued++;
-  }
-  const defs = [
-    ['rip','Ripping',c.rip], ['subs','Subtitles',c.subs], ['enc','Encoding',c.enc],
-    ['input','Needs you',c.input], ['queued','Queued',c.queued],
-    ['done','Done',c.done], ['fail','Failed',c.fail],
-  ];
-  host.innerHTML = defs.map(([cls,label,n]) =>
-    `<span class="stat ${cls}${n?'':' zero'}"><span class="dot"></span>${label} <b>${n}</b></span>`
+  const c = {}; for (const [k] of STAT_DEFS) c[k]=0;
+  for (const j of jobs){ const k = catOf(j.state); if (k) c[k]++; }
+  host.innerHTML = STAT_DEFS.map(([cls,label]) =>
+    `<span class="stat ${cls}${c[cls]?'':' zero'}${jobFilter===cls?' active':''}" data-cat="${cls}"><span class="dot"></span>${label} <b>${c[cls]}</b></span>`
   ).join('') + `<span class="stat" style="margin-left:auto;">Total <b>${jobs.length}</b></span>`;
+  host.querySelectorAll('.stat[data-cat]').forEach(el => el.onclick = () => {
+    jobFilter = (jobFilter === el.dataset.cat) ? null : el.dataset.cat;
+    renderJobs._sig = '';                        // force a re-layout of the list
+    if (renderJobs._lastSnap) renderJobs(renderJobs._lastSnap);
+  });
+}
+
+// Bulk-remove bar shown when a terminal filter (done/failed) is active.
+function renderBulkBar(count){
+  const host = document.getElementById('bulkbar');
+  if (!host) return;
+  if ((jobFilter==='fail' || jobFilter==='done') && count){
+    const label = jobFilter==='fail' ? 'failed' : 'completed';
+    const states = jobFilter==='fail' ? ['failed'] : ['done'];
+    host.innerHTML = `<button class="sec" data-bulk>🗑 Remove all ${count} ${label}</button>
+      <span class="muted" data-msg style="font-size:12px;"></span>`;
+    host.querySelector('[data-bulk]').onclick = async () => {
+      if (!confirm(`Remove all ${count} ${label} jobs?`)) return;
+      host.querySelector('[data-msg]').textContent = 'Removing…';
+      try { const r = await api('POST','/api/jobs/remove-by-state',{states});
+            toast(`Removed ${r.removed} ${label} job(s)`); jobFilter=null; }
+      catch(e){ host.querySelector('[data-msg]').textContent='⚠ '+e.message; }
+    };
+  } else host.innerHTML = '';
 }
 
 function renderJobs(snap) {
+  renderJobs._lastSnap = snap;
   const host = document.getElementById('jobs');
   if (snap.version) { const v = document.getElementById('ver'); if (v) v.textContent = 'v' + snap.version; }
-  renderStats(snap.jobs || []);
-  if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); renderJobs._sig = ''; renderJobs._known = new Set(); return; }
+  renderStats(snap.jobs || []);           // counts always reflect ALL jobs
+  if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); renderJobs._sig = ''; renderJobs._known = new Set(); renderBulkBar(0); return; }
   const ph = document.getElementById('placeholder'); if (ph) ph.remove();
-  const jobs = [...snap.jobs].sort((a,b) => jobRank(a)-jobRank(b) || a.id-b.id);
+  const jobs = [...snap.jobs].filter(j => !jobFilter || catOf(j.state)===jobFilter)
+                             .sort((a,b) => jobRank(a)-jobRank(b) || a.id-b.id);
+  renderBulkBar(jobs.length);
   const seen = new Set();
   for (const j of jobs) {
     seen.add(j.id);
