@@ -187,6 +187,7 @@ class JobManager:
         self._drives_cache: list[Drive] = self._load_drives_cache()
         self._last_disc: dict[int, str] = {}  # drive index -> last auto-opened disc name
         self._last_drive_error: str | None = None
+        self._workers_cache: list = []  # WorkerInfo, refreshed by the store poll
 
     async def shutdown(self) -> None:
         """Stop cleanly: wake SSE streams, then cancel running job tasks (which
@@ -372,6 +373,10 @@ class JobManager:
     async def _refresh_from_store(self) -> None:
         while not self.closing:
             try:
+                self._workers_cache = self.store.list_workers()
+            except Exception:
+                pass
+            try:
                 records = {r.id: r for r in self.store.load_all()}
                 changed = False
                 for wj in list(self.jobs.values()):
@@ -451,7 +456,14 @@ class JobManager:
                     "kind_guess": None, "titles": [], "selected": [], "outputs": [],
                     "preview": None, "log": [],
                 })
-        return {"jobs": jobs, "version": get_version()}
+        stale = self.settings.cluster.stale_after_seconds
+        workers = [
+            {"id": w.worker_id, "version": w.version, "job_id": w.job_id,
+             "stage": w.stage, "age": round(w.seconds_since_seen),
+             "stale": w.seconds_since_seen > stale}
+            for w in self._workers_cache
+        ]
+        return {"jobs": jobs, "version": get_version(), "workers": workers}
 
     # --- commands -------------------------------------------------------
 

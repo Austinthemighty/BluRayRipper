@@ -66,6 +66,10 @@
   .stat.active{border-color:#58a6ff; color:#e6edf3; box-shadow:0 0 0 1px #58a6ff;}
   #bulkbar{display:flex; gap:8px; align-items:center;}
   #bulkbar:not(:empty){padding:10px 16px; border-bottom:1px solid #21262d;}
+  .worker{display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-bottom:1px solid #21262d;}
+  .worker:last-child{border-bottom:none;}
+  .worker .wname, .worker .wsub{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .worker .wsub{font-size:12px;}
 </style>
 </head>
 <body>
@@ -92,6 +96,10 @@
         <button onclick="addManual()">Add</button>
       </div>
       <div class="muted" style="font-size:12px;">disc:N · iso:/x.iso · file:/BDMV · a .mkv file · a folder of .mkv</div>
+    </div>
+    <div class="panel" id="workers-panel" style="margin-top:16px; display:none;">
+      <h2>Workers</h2>
+      <div id="workers"></div>
     </div>
   </div>
   <div class="panel">
@@ -266,11 +274,31 @@ function renderBulkBar(count){
   } else host.innerHTML = '';
 }
 
+function renderWorkers(workers){
+  const panel = document.getElementById('workers-panel');
+  const host = document.getElementById('workers');
+  if (!panel || !host) return;
+  if (!workers || !workers.length){ panel.style.display = 'none'; return; }
+  panel.style.display = '';
+  host.innerHTML = workers.map(w => {
+    const busy = w.job_id != null;
+    const dot = w.stale ? '#f85149' : (busy ? '#3fb950' : '#6e7681');
+    const state = w.stale ? 'stale — no heartbeat' : (busy ? 'job #'+w.job_id : 'idle');
+    return `<div class="worker"><span class="dot" style="background:${dot};margin-top:5px;"></span>
+      <div style="min-width:0;flex:1;">
+        <div class="wname"><b>${w.id}</b></div>
+        <div class="muted wsub">${state}${busy && w.stage ? ' · '+w.stage : ''}</div>
+        <div class="muted" style="font-size:11px;">v${w.version||'?'} · seen ${w.age}s ago</div>
+      </div></div>`;
+  }).join('');
+}
+
 function renderJobs(snap) {
   renderJobs._lastSnap = snap;
   const host = document.getElementById('jobs');
   if (snap.version) { const v = document.getElementById('ver'); if (v) v.textContent = 'v' + snap.version; }
   renderStats(snap.jobs || []);           // counts always reflect ALL jobs
+  renderWorkers(snap.workers || []);
   if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); renderJobs._sig = ''; renderJobs._known = new Set(); renderBulkBar(0); return; }
   const ph = document.getElementById('placeholder'); if (ph) ph.remove();
   const jobs = [...snap.jobs].filter(j => !jobFilter || catOf(j.state)===jobFilter)

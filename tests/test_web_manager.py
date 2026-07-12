@@ -206,6 +206,18 @@ async def test_remove_many_by_state(manager):
     assert set(manager.jobs) == {203}
 
 
+def test_snapshot_includes_workers(manager):
+    from blurayripper.persistence import WorkerInfo
+    manager._workers_cache = [
+        WorkerInfo("worker-A", "0.1.0+g1", 5, "Encode: working · 30 fps", 3.0),
+        WorkerInfo("worker-B", "0.1.0+g1", None, "idle", 500.0),
+    ]
+    snap = manager.snapshot()
+    w = {x["id"]: x for x in snap["workers"]}
+    assert w["worker-A"]["job_id"] == 5 and w["worker-A"]["stale"] is False
+    assert w["worker-B"]["job_id"] is None and w["worker-B"]["stale"] is True  # 500s > 180s
+
+
 async def test_full_gate_flow(manager):
     wj = manager.add_disc("disc:0")
     await _settle()
