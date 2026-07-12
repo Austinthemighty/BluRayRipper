@@ -256,6 +256,9 @@ class Settings:
     # At serve startup, kill leftover tool processes (SubtitleEdit/MakeMKV/
     # HandBrake) orphaned by a prior crash or power-off, before any jobs run.
     cleanup_stale_tools: bool = True
+    # How many jobs may prep (rip+subs+grain) concurrently. Caps the recovery
+    # stampede when a restart resumes many in-flight jobs at once.
+    prep_concurrency: int = 2
     min_length_seconds: int = 120
     web_host: str = "127.0.0.1"  # set to 0.0.0.0 to allow LAN access (no auth!)
     web_port: int = 8723
@@ -421,6 +424,7 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         drive_poll_seconds=int(disc_cfg.get("poll_seconds", 15)),
         extract_cover_art=bool(disc_cfg.get("extract_cover_art", True)),
         cleanup_stale_tools=bool(serve_cfg.get("cleanup_stale_tools", True)),
+        prep_concurrency=int(serve_cfg.get("prep_concurrency", 2)),
         min_length_seconds=int(scan_cfg.get("min_length_seconds", 120)),
         web_host=web_cfg.get("host", "127.0.0.1"),
         web_port=int(web_cfg.get("port", 8723)),

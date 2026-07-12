@@ -174,6 +174,9 @@ class JobManager:
         self.closing = False
         self._ids = itertools.count(1)
         self._tasks: set[asyncio.Task] = set()
+        # Bounds how many jobs prep (rip+subs+grain) at once — so a restart that
+        # recovers dozens of in-flight jobs doesn't stampede the box all at once.
+        self._prep_sem = asyncio.Semaphore(max(1, settings.prep_concurrency))
         self._drives_cache: list[Drive] = []
         self._last_disc: dict[int, str] = {}  # drive index -> last auto-opened disc name
         self._last_drive_error: str | None = None
@@ -828,7 +831,9 @@ class JobManager:
             if wj.auto_identify and not wj.assignments:
                 # Rip + OCR + subtitle-match against the disc's candidate episodes.
                 # Parks at AWAITING_MATCH if any title is uncertain.
-                if not await self._auto_identify(wj, reporter):
+                async with self._prep_sem:
+                    ok = await self._auto_identify(wj, reporter)
+                if not ok:
                     self._persist(wj)
                     self.bus.publish()
                     return
@@ -840,13 +845,17 @@ class JobManager:
                 # or enqueue for a worker to do the heavy (UHD) encode.
                 staging_root = self.settings.storage.staging_dir / f"job_{wj.id}"
                 include_subs = not self.settings.cluster.worker_does_subs
-                await self.pipeline.prep_phase(job, staging_root, reporter, include_subs=include_subs)
-                self.pipeline._persist_mapping(job, reporter)
-                limit = self.settings.cluster.local_encode_max_height
-                heights = (
-                    await self.pipeline.title_heights(job, staging_root, reporter)
-                    if limit else []
-                )
+                # Throttle the prep phase (not the encode) so a recovery stampede
+                # doesn't run dozens of rips/OCRs at once.
+                async with self._prep_sem:
+                    await self.pipeline.prep_phase(
+                        job, staging_root, reporter, include_subs=include_subs)
+                    self.pipeline._persist_mapping(job, reporter)
+                    limit = self.settings.cluster.local_encode_max_height
+                    heights = (
+                        await self.pipeline.title_heights(job, staging_root, reporter)
+                        if limit else []
+                    )
                 encode_here = bool(limit) and bool(heights) and all(0 < h <= limit for h in heights)
                 if not encode_here:
                     job.state = JobState.READY
@@ -866,7 +875,8 @@ class JobManager:
                 self._persist(wj)
                 self.bus.publish()
                 return
-            await self.pipeline.execute(job, self.scheduler, reporter, job_name=f"job_{wj.id}")
+            async with self._prep_sem:  # single-box: bound concurrent jobs
+                await self.pipeline.execute(job, self.scheduler, reporter, job_name=f"job_{wj.id}")
             wj.state = JobState.DONE
             wj.progress = 1.0
             wj.outputs = [str(r.video_path) for r in job.results if r.video_path]
