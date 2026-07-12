@@ -625,3 +625,21 @@ def test_should_deinterlace_auto_targets_sd(manager):
     assert pipe._should_deinterlace(480) is False
     pipe.settings.encode.deinterlace = "on"
     assert pipe._should_deinterlace(1080) is True
+
+
+def test_active_jobs_flags_only_in_flight_work(manager):
+    # A mix of running, parked, and finished jobs.
+    states = [
+        (301, JobState.ENCODING),        # active
+        (302, JobState.RIPPING),         # active
+        (303, JobState.OCR_SUBS),        # active
+        (304, JobState.AWAITING_GRAIN),  # parked -> safe to restart
+        (305, JobState.QUEUED),          # not started -> safe
+        (306, JobState.DONE),            # finished -> safe
+        (307, JobState.FAILED),          # finished -> safe
+    ]
+    for jid, st in states:
+        manager.jobs[jid] = WebJob(id=jid, source="disc:0", state=st)
+    active = manager.active_jobs()
+    assert {a["id"] for a in active} == {301, 302, 303}
+    assert all("state" in a and "name" in a for a in active)

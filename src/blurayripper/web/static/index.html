@@ -159,6 +159,7 @@
       <button onclick="saveSettings()">Save</button>
       <button class="sec" onclick="closeSettings()">Close</button>
       <span id="settings-msg" class="muted"></span>
+      <button class="sec" onclick="restartServer(false)" style="margin-left:auto;" title="Restart the server to apply saved settings. Warns if a rip/encode/OCR is running.">↻ Restart server</button>
     </div>
   </div>
 </div>
@@ -935,6 +936,36 @@ document.getElementById('opensettings').onclick = openSettings;
 document.getElementById('settings-modal').addEventListener('click', (e) => {
   if(e.target.id === 'settings-modal') closeSettings();   // click backdrop to close
 });
+
+async function restartServer(force){
+  const msg = document.getElementById('settings-msg');
+  if(!force && !confirm('Restart the BluRayRipper server now?\n\nThis applies saved settings. The page will reconnect automatically.')) return;
+  msg.style.color = '#8b949e'; msg.textContent = 'Requesting restart…';
+  let r;
+  try {
+    r = await fetch('/api/server/restart', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({force: !!force})});
+  } catch(e){ msg.style.color = '#f85149'; msg.textContent = 'Error: ' + e.message; return; }
+  if(r.status === 409){   // jobs running — offer to force
+    const det = (await r.json().catch(()=>({}))).detail || {};
+    const list = (det.active || []).map(a => `#${a.id} ${a.name} (${a.state})`).join('\n');
+    if(confirm(`${det.message || 'Jobs are running.'}\n\n${list}\n\nRestart anyway and interrupt them?`)){
+      return restartServer(true);
+    }
+    msg.style.color = '#8b949e'; msg.textContent = 'Restart cancelled.';
+    return;
+  }
+  if(!r.ok){ msg.style.color = '#f85149'; msg.textContent = 'Restart failed: HTTP ' + r.status; return; }
+  msg.style.color = '#e3b341'; msg.textContent = 'Restarting… waiting for the server to come back.';
+  let tries = 0;
+  const poll = setInterval(async () => {
+    tries++;
+    try {
+      const ok = await fetch('/api/jobs', {cache:'no-store'});
+      if(ok.ok){ clearInterval(poll); msg.style.color = '#3fb950'; msg.textContent = 'Back up — reloading.'; setTimeout(() => location.reload(), 700); return; }
+    } catch(e){ /* still down */ }
+    if(tries > 60){ clearInterval(poll); msg.style.color = '#f85149'; msg.textContent = "Didn't come back within 90s — check the server console."; }
+  }, 1500);
+}
 
 const ev = new EventSource('/api/events');
 ev.onmessage = (m) => { try { renderJobs(JSON.parse(m.data)); } catch (e) { /* ignore a partial/empty frame */ } };

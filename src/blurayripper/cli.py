@@ -765,6 +765,9 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         timeout_graceful_shutdown=5,  # don't wait forever on the SSE stream
     )
     server = uvicorn.Server(config)
+    # Let the web UI's "Restart server" button reach this server (graceful
+    # shutdown frees the port) and flag a restart we honor after serve() returns.
+    app.state.uvicorn_server = server
 
     # uvicorn waits for active connections (the SSE stream) to finish before it
     # runs the lifespan shutdown that sets manager.closing — a deadlock that hangs
@@ -783,6 +786,24 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         await server.serve()
     finally:
         watcher.cancel()
+
+    # A web-triggered restart: uvicorn has now shut down gracefully and released
+    # the port, so replace this process with a fresh `serve` that picks up the
+    # latest code and settings (config/settings.local.json). os.execv keeps the
+    # same console/PID on POSIX; on Windows Python emulates it (this process
+    # exits, a new one starts — which, via the Job Object, also reaps any tool
+    # children, exactly the "restart kills in-flight work" case the UI warns about).
+    if getattr(app.state, "restart_requested", False):
+        import os
+
+        console.print("[bold yellow]Restarting BluRayRipper…[/bold yellow]")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        try:
+            os.execv(sys.executable, [sys.executable, "-m", "blurayripper", *sys.argv[1:]])
+        except OSError as exc:
+            console.print(f"[red]Restart (re-exec) failed: {exc}[/red]")
+            return 1
     return 0
 
 

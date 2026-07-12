@@ -41,6 +41,10 @@ class RemoveByState(BaseModel):
     states: list[str]
 
 
+class RestartServer(BaseModel):
+    force: bool = False
+
+
 class SetTitles(BaseModel):
     title_ids: list[int]
 
@@ -325,6 +329,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         n = await manager.remove_many(
             lambda wj: manager._live_state(wj).value in wanted)
         return {"removed": n}
+
+    @app.post("/api/server/restart")
+    async def restart_server(body: RestartServer):
+        srv = getattr(app.state, "uvicorn_server", None)
+        if srv is None:
+            raise HTTPException(
+                status_code=501,
+                detail="Restart isn't available (server not launched via `serve`).")
+        active = manager.active_jobs()
+        if active and not body.force:
+            # 409 with the list so the UI can warn and offer to force.
+            raise HTTPException(status_code=409, detail={
+                "message": f"{len(active)} job(s) are still running — "
+                           "restarting will interrupt them.",
+                "active": active,
+            })
+        app.state.restart_requested = True
+
+        async def _shutdown_soon():
+            await asyncio.sleep(0.4)   # let this response flush first
+            srv.should_exit = True     # graceful shutdown frees the port; serve() re-execs
+
+        asyncio.ensure_future(_shutdown_soon())
+        return {"ok": True, "restarting": True}
 
     @app.get("/api/settings")
     async def get_settings():

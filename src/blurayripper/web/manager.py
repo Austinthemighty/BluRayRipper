@@ -468,6 +468,26 @@ class JobManager:
         ]
         return {"jobs": jobs, "version": get_version(), "workers": workers}
 
+    # States where a restart would interrupt real, in-flight work (a rip, encode,
+    # OCR, or file placement) — used to warn before a web-triggered restart.
+    _ACTIVE_STATES = frozenset({
+        JobState.SCANNING, JobState.IDENTIFYING, JobState.RIPPING, JobState.CONFIRMING,
+        JobState.ENCODING, JobState.EXTRACTING_SUBS, JobState.OCR_SUBS, JobState.PLACING,
+    })
+
+    def active_jobs(self) -> list[dict]:
+        """Jobs currently doing interruptible work (rip/encode/subs/placing).
+
+        Note: encodes that run on separate `worker` machines are unaffected by
+        restarting this serve process, so this only flags work owned locally.
+        """
+        out = []
+        for wj in self.jobs.values():
+            state = self._live_state(wj)
+            if state in self._ACTIVE_STATES:
+                out.append({"id": wj.id, "name": self._name_of(wj), "state": state.value})
+        return out
+
     # --- commands -------------------------------------------------------
 
     def add_source(self, source: str) -> list[int]:
