@@ -95,3 +95,14 @@ def test_disc_root_from_windows_drive():
 
 def test_disc_root_none_for_iso():
     assert coverart.disc_root(DiscInfo(source="iso:/x.iso")) is None
+
+
+def test_image_size_bytes():
+    p = _jpeg(1280, 720)
+    assert coverart.image_size_bytes(p) == (1280, 720)
+
+
+def test_extract_art_from_iso_degrades_without_pycdlib(tmp_path):
+    # pycdlib not installed (or bad path) -> empty DiscArt, never raises.
+    art = coverart.extract_art_from_iso(tmp_path / "nope.iso", tmp_path / "out")
+    assert art.poster is None and art.fanart is None

@@ -116,40 +116,52 @@ def image_size(path: Path) -> tuple[int, int] | None:
     it can't be determined."""
     try:
         with path.open("rb") as f:
-            head = f.read(24)
-            if head[:8] == b"\x89PNG\r\n\x1a\n" and len(head) >= 24:
-                w, h = struct.unpack(">II", head[16:24])
-                return int(w), int(h)
-            if head[:6] in (b"GIF87a", b"GIF89a"):
-                w, h = struct.unpack("<HH", head[6:10])
-                return int(w), int(h)
-            if head[:2] == b"\xff\xd8":  # JPEG — scan for the SOF marker
-                f.seek(2)
-                while True:
-                    b = f.read(1)
-                    if not b:
-                        return None
-                    if b != b"\xff":
-                        continue
+            return _image_size_stream(f)
+    except OSError:
+        return None
+
+
+def image_size_bytes(data: bytes) -> tuple[int, int] | None:
+    import io
+    return _image_size_stream(io.BytesIO(data))
+
+
+def _image_size_stream(f) -> tuple[int, int] | None:
+    try:
+        head = f.read(24)
+        if head[:8] == b"\x89PNG\r\n\x1a\n" and len(head) >= 24:
+            w, h = struct.unpack(">II", head[16:24])
+            return int(w), int(h)
+        if head[:6] in (b"GIF87a", b"GIF89a"):
+            w, h = struct.unpack("<HH", head[6:10])
+            return int(w), int(h)
+        if head[:2] == b"\xff\xd8":  # JPEG — scan for the SOF marker
+            f.seek(2)
+            while True:
+                b = f.read(1)
+                if not b:
+                    return None
+                if b != b"\xff":
+                    continue
+                marker = f.read(1)
+                while marker == b"\xff":
                     marker = f.read(1)
-                    while marker == b"\xff":
-                        marker = f.read(1)
-                    if not marker:
+                if not marker:
+                    return None
+                m = marker[0]
+                if m in (0xD8, 0xD9) or 0xD0 <= m <= 0xD7:
+                    continue  # standalone markers carry no length
+                ln = f.read(2)
+                if len(ln) < 2:
+                    return None
+                seg = struct.unpack(">H", ln)[0]
+                if 0xC0 <= m <= 0xCF and m not in (0xC4, 0xC8, 0xCC):  # SOFn
+                    data = f.read(5)
+                    if len(data) < 5:
                         return None
-                    m = marker[0]
-                    if m in (0xD8, 0xD9) or 0xD0 <= m <= 0xD7:
-                        continue  # standalone markers carry no length
-                    ln = f.read(2)
-                    if len(ln) < 2:
-                        return None
-                    seg = struct.unpack(">H", ln)[0]
-                    if 0xC0 <= m <= 0xCF and m not in (0xC4, 0xC8, 0xCC):  # SOFn
-                        data = f.read(5)
-                        if len(data) < 5:
-                            return None
-                        h, w = struct.unpack(">HH", data[1:5])
-                        return int(w), int(h)
-                    f.seek(seg - 2, 1)
+                    h, w = struct.unpack(">HH", data[1:5])
+                    return int(w), int(h)
+                f.seek(seg - 2, 1)
     except (OSError, struct.error):
         return None
     return None
@@ -182,6 +194,86 @@ def _copy_as(src: Path, dest_dir: Path, stem: str) -> Path:
     dest = dest_dir / (stem + src.suffix.lower())  # keep real ext (.png vs .jpg)
     shutil.copy2(src, dest)
     return dest
+
+
+def _iso_images(iso_path: Path) -> list[tuple[str, bytes]]:
+    """(name, bytes) for every cover image inside an ISO — best-effort via the
+    optional ``pycdlib``. Returns [] if pycdlib isn't installed or the ISO can't
+    be read (so callers degrade to no-art rather than failing)."""
+    try:
+        import pycdlib  # optional: pip install -e ".[iso]"
+    except ImportError:
+        return []
+    import io
+
+    out: list[tuple[str, bytes]] = []
+    iso = pycdlib.PyCdlib()
+    try:
+        iso.open(str(iso_path))
+    except Exception:
+        return []
+    try:
+        # Blu-ray art lives on the UDF side; DVD JACKET_P may be on either.
+        for kind, dirs in (("udf", ["/BDMV/META/DL", "/JACKET_P"]),
+                           ("iso", ["/JACKET_P"])):
+            for d in dirs:
+                try:
+                    children = list(iso.list_children(**{f"{kind}_path": d}))
+                except Exception:
+                    continue
+                for child in children:
+                    try:
+                        if child.is_dir():
+                            continue
+                        ident = child.file_identifier().decode("utf-8", "replace")
+                    except Exception:
+                        continue
+                    name = ident.split(";")[0]  # strip ISO9660 ";1" version
+                    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+                    if ext not in ("jpg", "jpeg", "png"):
+                        continue
+                    buf = io.BytesIO()
+                    try:
+                        iso.get_file_from_iso_fp(
+                            buf, **{f"{kind}_path": d.rstrip("/") + "/" + ident})
+                    except Exception:
+                        continue
+                    if buf.getvalue():
+                        out.append((name, buf.getvalue()))
+    finally:
+        try:
+            iso.close()
+        except Exception:
+            pass
+    return out
+
+
+def _write_bytes(item: tuple[str, bytes], dest_dir: Path, stem: str) -> Path:
+    name, data = item
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / (stem + (Path(name).suffix.lower() or ".jpg"))
+    dest.write_bytes(data)
+    return dest
+
+
+def extract_art_from_iso(iso_path: Path, dest_dir: Path, *, poster: bool = True,
+                         fanart: bool = True) -> DiscArt:
+    """Cover art from inside an ISO (best-effort; needs pycdlib). Same
+    poster/fanart split as extract_art."""
+    portraits: list[tuple[str, bytes]] = []
+    landscapes: list[tuple[str, bytes]] = []
+    for name, data in _iso_images(Path(iso_path)):
+        size = image_size_bytes(data)
+        (portraits if (size and size[1] >= size[0] and size[0] > 0)
+         else landscapes).append((name, data))
+    portraits.sort(key=lambda x: len(x[1]), reverse=True)
+    landscapes.sort(key=lambda x: len(x[1]), reverse=True)
+    art = DiscArt()
+    if poster and portraits:
+        art.poster = _write_bytes(portraits[0], dest_dir, "poster")
+    if fanart and landscapes:
+        art.fanart = _write_bytes(landscapes[0], dest_dir, "fanart")
+    return art
 
 
 def extract_art(root: Path, dest_dir: Path, *, poster: bool = True,

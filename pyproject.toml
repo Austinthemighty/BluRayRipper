@@ -26,6 +26,10 @@ web = [
 postgres = [
     "psycopg[binary]>=3.1",
 ]
+# Read cover art from inside .iso sources (optional).
+iso = [
+    "pycdlib>=1.14",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

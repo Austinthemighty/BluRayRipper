@@ -935,9 +935,11 @@ class Pipeline:
         the disc after the last rip)."""
         if not self.settings.extract_cover_art or job.disc is None:
             return
+        src = job.disc.source or ""
+        iso = src[len("iso:"):] if src.startswith("iso:") else None
         root = coverart.disc_root(job.disc)
-        if root is None:
-            return
+        if root is None and iso is None:
+            return  # unsupported source (e.g. a Linux optical device path)
         folders = {
             self._poster_folder(a)
             for tid in job.selected_title_ids
@@ -950,9 +952,14 @@ class Pipeline:
             if have_poster and have_fanart:
                 continue  # already placed (resume / other disc of a set)
             try:
-                art = await asyncio.to_thread(
-                    coverart.extract_art, root, folder,
-                    poster=not have_poster, fanart=not have_fanart)
+                if iso is not None:
+                    art = await asyncio.to_thread(
+                        coverart.extract_art_from_iso, iso, folder,
+                        poster=not have_poster, fanart=not have_fanart)
+                else:
+                    art = await asyncio.to_thread(
+                        coverart.extract_art, root, folder,
+                        poster=not have_poster, fanart=not have_fanart)
                 placed = [p.name for p in (art.poster, art.fanart) if p]
                 if placed:
                     report.on_event(f"Saved disc art → {folder.name}/{', '.join(placed)}")
