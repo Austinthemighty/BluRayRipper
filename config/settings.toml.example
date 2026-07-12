@@ -126,7 +126,8 @@ worker_does_subs = false
 
 [metadata]
 # provider is currently always TMDB (set the key as TMDB_API_KEY in secrets.env).
-language = "en-US"                       # metadata language/region for TMDB lookups
+language = "en-US"
+write_nfo = true   # write a Kodi/Plex .nfo sidecar next to each output video                       # metadata language/region for TMDB lookups
 
 [web]
 # UI bind address. "127.0.0.1" = this machine only (safest). "0.0.0.0" = reachable

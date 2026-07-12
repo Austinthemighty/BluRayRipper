@@ -22,7 +22,7 @@ from typing import Protocol
 from .config import Settings
 from .models import DiscInfo, EpisodeAssignment, MediaKind
 from .scheduler import EncodeScheduler, encode_weight
-from .services import coverart, library, naming, os_upload
+from .services import coverart, library, naming, nfo, os_upload
 from .services.mapping_store import MappingStore
 from .services.subtitles import looks_like_sdh
 from .version import get_version
@@ -744,6 +744,11 @@ class Pipeline:
             await scheduler.release(acquired)
         result.video_path = library.place(encoded, video_dest)
         cp["placed"] = True
+        if self.settings.write_nfo:
+            try:
+                nfo.write_nfo(result.video_path, assignment)
+            except OSError as exc:
+                report.on_event(f"NFO sidecar skipped ({type(exc).__name__}: {exc}).")
         _checkpoint(report)
         report.on_event(f"Placed video: {result.video_path}")
         job.state = JobState.PLACING

@@ -271,6 +271,7 @@ class Settings:
     database_url: str | None = None  # Postgres URL for crash recovery; None = in-memory
     tmdb_api_key: str | None = None
     metadata_language: str = "en-US"
+    write_nfo: bool = True  # write a Kodi/Plex .nfo sidecar next to each output
     opensubtitles_api_key: str | None = None
     opensubtitles_username: str | None = None
     opensubtitles_password: str | None = None
@@ -439,6 +440,7 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         database_url=database_url,
         tmdb_api_key=secrets.get("TMDB_API_KEY") or None,
         metadata_language=meta_cfg.get("language", "en-US"),
+        write_nfo=bool(meta_cfg.get("write_nfo", True)),
         opensubtitles_api_key=secrets.get("OPENSUBTITLES_API_KEY") or None,
         opensubtitles_username=secrets.get("OPENSUBTITLES_USERNAME") or None,
         opensubtitles_password=secrets.get("OPENSUBTITLES_PASSWORD") or None,
