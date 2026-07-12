@@ -27,6 +27,16 @@ from .models import DiscInfo, EpisodeAssignment, MediaKind, Stream, StreamType, 
 # --- serializable record ------------------------------------------------
 
 @dataclass
+class WorkerInfo:
+    """A worker's last-reported presence (for the UI's workers panel)."""
+    worker_id: str
+    version: str | None
+    job_id: int | None
+    stage: str | None
+    seconds_since_seen: float
+
+
+@dataclass
 class JobRecord:
     """A JSON-native snapshot of a job, durable across restarts."""
 
@@ -170,6 +180,14 @@ class Store(ABC):
     def max_id(self) -> int:
         return max((r.id for r in self.load_all()), default=0)
 
+    def record_worker(self, worker_id: str, version: str | None,
+                      job_id: int | None, stage: str | None) -> None:
+        """Upsert a worker's presence/heartbeat. No-op for non-durable stores."""
+
+    def list_workers(self) -> list[WorkerInfo]:
+        """Workers seen recently (for the UI). Empty for non-durable stores."""
+        return []
+
     @property
     def durable(self) -> bool:
         return True
@@ -226,6 +244,13 @@ CREATE TABLE IF NOT EXISTS jobs (
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS state TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_by TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS heartbeat TIMESTAMPTZ;
+CREATE TABLE IF NOT EXISTS workers (
+    worker_id TEXT PRIMARY KEY,
+    version   TEXT,
+    job_id    BIGINT,
+    stage     TEXT,
+    last_seen TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 
@@ -311,6 +336,29 @@ class PostgresStore(Store):
     def release(self, job_id: int) -> None:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute("UPDATE jobs SET claimed_by = NULL WHERE id = %s", (job_id,))
+
+    def record_worker(self, worker_id: str, version: str | None,
+                      job_id: int | None, stage: str | None) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO workers (worker_id, version, job_id, stage, last_seen) "
+                "VALUES (%s, %s, %s, %s, now()) ON CONFLICT (worker_id) DO UPDATE SET "
+                "version = EXCLUDED.version, job_id = EXCLUDED.job_id, "
+                "stage = EXCLUDED.stage, last_seen = now()",
+                (worker_id, version, job_id, stage),
+            )
+
+    def list_workers(self) -> list[WorkerInfo]:
+        with self._connect() as conn, conn.cursor() as cur:
+            # Only workers seen in the last 10 minutes; drop long-gone ones.
+            cur.execute(
+                "DELETE FROM workers WHERE last_seen < now() - interval '1 hour'")
+            cur.execute(
+                "SELECT worker_id, version, job_id, stage, "
+                "EXTRACT(EPOCH FROM (now() - last_seen)) FROM workers "
+                "WHERE last_seen > now() - interval '10 minutes' ORDER BY worker_id")
+            rows = cur.fetchall()
+        return [WorkerInfo(w, v, j, s, float(age or 0)) for (w, v, j, s, age) in rows]
 
 
 def make_store(database_url: str | None) -> Store:

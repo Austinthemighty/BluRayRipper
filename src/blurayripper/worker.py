@@ -129,7 +129,8 @@ class WorkerRunner:
             if killed:
                 print(f"Cleaned up stale tool processes: {', '.join(killed)}", flush=True)
         from .version import get_version
-        print(f"Worker {self.worker_id} ready (v{get_version()}) — polling for jobs…", flush=True)
+        self._version = get_version()
+        print(f"Worker {self.worker_id} ready (v{self._version}) — polling for jobs…", flush=True)
         last_error = None
         while not self._stop:
             try:
@@ -146,9 +147,16 @@ class WorkerRunner:
                 await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
                 continue
             if rec is None:
+                self._register(None, "idle")  # heartbeat presence while idle
                 await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
                 continue
             await self._process(rec)
+
+    def _register(self, job_id, stage: str) -> None:
+        """Report this worker's presence to the store (for the UI's panel)."""
+        with contextlib.suppress(Exception):
+            self.store.record_worker(
+                self.worker_id, getattr(self, "_version", None), job_id, stage)
 
     async def _process(self, rec: JobRecord) -> None:
         job = job_from_record(rec)
@@ -176,3 +184,4 @@ class WorkerRunner:
         while True:
             await asyncio.sleep(self.settings.cluster.heartbeat_seconds)
             reporter.touch()
+            self._register(reporter._job_id, reporter.stage or "working")
