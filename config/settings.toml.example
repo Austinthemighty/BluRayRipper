@@ -79,6 +79,9 @@ tracks = "all"
 # orphaned by a prior crash/power-off, before any jobs run. Prevents orphans
 # piling up across restarts until they exhaust the commit limit (out-of-memory).
 cleanup_stale_tools = true
+# How many jobs may prep (rip + subtitles + grain) at once. Caps the "recovery
+# stampede" when a restart resumes many in-flight jobs — keep it low (1-3).
+prep_concurrency = 2
 
 [scan]
 min_length_seconds = 120                # ignore titles shorter than this (drops menus/trailers)

@@ -6,8 +6,8 @@ import pytest
 
 from blurayripper.config import load_settings
 from blurayripper.models import DiscInfo, EpisodeAssignment, MediaKind, Title
-from blurayripper.pipeline import Job, JobState
-from blurayripper.web.manager import JobManager
+from blurayripper.pipeline import Job, JobState, TitleResult
+from blurayripper.web.manager import JobManager, WebJob
 
 
 def _fake_disc():
@@ -94,6 +94,38 @@ async def test_retry_clears_failed_live_state(manager, monkeypatch, tmp_path):
         manager.retry(wj.id)
     await _settle()
     assert manager.snapshot()["jobs"][0]["state"] == "done"  # retry re-ran and succeeded
+
+
+async def test_prep_concurrency_throttles_recovery_stampede(manager, monkeypatch, tmp_path):
+    """With prep_concurrency=1, jobs prep one at a time — so a restart that
+    resumes many at once can't stampede the box."""
+    manager._prep_sem = asyncio.Semaphore(1)
+    active = 0
+    peak = 0
+
+    async def fake_execute(job, scheduler, report, job_name=None):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        job.results = [TitleResult(title_id=0, video_path=tmp_path / "x.mkv")]
+        return job
+
+    monkeypatch.setattr(manager.pipeline, "execute", fake_execute)
+
+    jobs = []
+    for jid in (101, 102, 103):
+        wj = WebJob(id=jid, source="disc:0", state=JobState.READY)
+        wj._pipeline_job = Job(source="disc:0")
+        wj.selected_title_ids = [0]
+        wj.assignments = {0: EpisodeAssignment(0, MediaKind.MOVIE, f"M{jid}", 2000)}
+        manager.jobs[jid] = wj
+        jobs.append(wj)
+
+    await asyncio.gather(*(manager._run_job(wj) for wj in jobs))
+    assert peak == 1                                  # never two prepping at once
+    assert all(wj.state is JobState.DONE for wj in jobs)
 
 
 async def test_full_gate_flow(manager):
