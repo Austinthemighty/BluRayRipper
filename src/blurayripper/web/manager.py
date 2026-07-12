@@ -31,6 +31,7 @@ from ..pipeline import Job, JobState, Pipeline, _resolve_path
 from ..scheduler import EncodeScheduler
 from ..services import library
 from ..services.drive_names import DriveNames
+from ..services.notify import notify
 from ..services.opensubtitles import OpenSubtitlesClient, gather_references
 from ..services.sub_match import identify
 from ..tools import discinfo
@@ -145,6 +146,8 @@ class _Reporter:
         wj._grain_future = asyncio.get_event_loop().create_future()
         self._m._persist(wj)
         self._m.bus.publish()
+        self._m._notify(f"🎚 Grain choice: {self._m._name_of(wj)}",
+                        f"Job #{wj.id} — pick grain on/off in the UI.")
         chosen = await wj._grain_future
         # Gate resolved — hand the live state back to the pipeline. Without this,
         # wj.state stays AWAITING_GRAIN (a parked state), so _live_state keeps
@@ -663,6 +666,8 @@ class JobManager:
             return True
         wj.state = JobState.AWAITING_MATCH
         reporter.on_event("Subtitle match needs confirmation — review in the UI.")
+        self._notify(f"📺 Confirm episodes: {self._name_of(wj)}",
+                     f"Job #{wj.id} — subtitle match needs your confirmation.")
         return False
 
     # Re-OCR is background maintenance — refuse it while a job is actively being
@@ -815,6 +820,8 @@ class JobManager:
                     wj.state = JobState.AWAITING_TITLES
                 self._persist(wj)
                 self.bus.publish()
+                self._notify(f"🟡 Needs your input: {self._name_of(wj)}",
+                             f"Job #{wj.id} scanned — {'confirm the name' if wj.state is JobState.AWAITING_MAPPING else 'pick titles'} in the UI.")
         except Exception as exc:
             wj.state = JobState.FAILED
             wj.error = f"{type(exc).__name__}: {exc}"
@@ -952,6 +959,8 @@ class JobManager:
         if n >= self.settings.auto_retry_max:
             if self.settings.auto_retry_max:
                 wj.log.append(f"Auto-retry exhausted ({n}) — hit Retry to try again.")
+            self._notify(f"❌ Failed: {self._name_of(wj)}",
+                         f"Job #{wj.id} failed: {wj.error}", priority="high")
             return
         self._auto_retries[wj.id] = n + 1
         delay = min(30 * (2 ** n), 300)
@@ -973,6 +982,14 @@ class JobManager:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
+
+    def _notify(self, title: str, message: str, priority: str | None = None) -> None:
+        """Fire-and-forget push (if a notify_url is configured)."""
+        if self.settings.notify_url:
+            self._spawn(notify(self.settings.notify_url, title, message, priority))
+
+    def _name_of(self, wj: WebJob) -> str:
+        return (wj.disc.disc_name if wj.disc else None) or wj.source
 
     _PARKED = (
         JobState.DONE, JobState.FAILED, JobState.AWAITING_TITLES,

@@ -75,6 +75,9 @@ prep_concurrency = 2
 # Auto re-queue a failed job this many times (exponential backoff) before
 # leaving it FAILED for a manual Retry. 0 = never.
 auto_retry_max = 2
+# Push a notification (ntfy-style plain-text POST) when a job needs input or
+# fails. Blank = off. Put it in secrets.env if the URL carries a token.
+notify_url = ""   # e.g. "https://ntfy.sh/my-blurayripper". env: BLURAYRIPPER_NOTIFY_URL
 
 [queue]
 # Encode "budget" for the `queue` command. A UHD (2160p) encode costs 2 units,
