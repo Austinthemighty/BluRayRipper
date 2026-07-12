@@ -139,6 +139,16 @@ class MkvTools:
         result = await asyncio.wait_for(process.run(cmd), timeout=120)
         return parse_video_height("\n".join(result.stdout_lines))
 
+    async def mux_dovi(self, video_hevc: Path, audio_src: Path, out: Path) -> Path:
+        """Mux a raw (DV-injected) HEVC video with the audio (+ chapters) from the
+        original rip into an MKV. mkvmerge is DV-aware, so it signals the profile
+        8.1 track correctly for Plex."""
+        out.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [self._settings.tools.require("mkvmerge"), "-o", str(out),
+               str(video_hevc), "--no-video", "--no-subtitles", str(audio_src)]
+        await asyncio.wait_for(process.run(cmd), timeout=3600)
+        return out
+
     async def video_dims(self, mkv_path: Path) -> tuple[int | None, float | None]:
         """(height, fps) from a single mkvmerge probe."""
         cmd = [self._settings.tools.require("mkvmerge"), "-J", str(mkv_path)]

@@ -23,7 +23,8 @@ mkvextract = ""              # env: BLURAYRIPPER_MKVEXTRACT
 # and set subtitleedit_runner = "mono".
 subtitleedit = ""            # env: BLURAYRIPPER_SUBTITLEEDIT
 subtitleedit_runner = ""     # e.g. "mono" on macOS/Linux; blank runs directly. env: BLURAYRIPPER_SUBTITLEEDIT_RUNNER
-ffmpeg = ""                  # optional — used for grain-preview clips/stills. env: BLURAYRIPPER_FFMPEG
+ffmpeg = ""                  # optional — grain previews + UHD/HDR encoding. env: BLURAYRIPPER_FFMPEG
+dovitool = ""                # optional — dovi_tool, for Dolby Vision UHD. env: BLURAYRIPPER_DOVITOOL
 
 [storage]
 # Staging root: per-job intermediates (rips, extracted .sup, OCR cache, grain
@@ -55,6 +56,10 @@ uhd_min_height = 2160
 ffmpeg_crf = 18                         # x265 quality (lower = better/bigger)
 ffmpeg_preset = "medium"                # x265 preset
 ffmpeg_audio = "copy"                   # "copy" (keep TrueHD/DTS-HD) or "aac"
+# Preserve Dolby Vision on UHD (dovi_tool: extract RPU -> re-encode -> inject ->
+# remux to profile 8.1). Needs dovitool + mkvmerge + lots of temp space. Falls
+# back to HDR10 if unavailable.
+dovi = false
 
 [languages]
 # ISO 639-2/B 3-letter codes (as MakeMKV/mkvmerge report them) to KEEP; all other

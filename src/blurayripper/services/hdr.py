@@ -25,10 +25,15 @@ class HdrInfo:
     colormatrix: str | None = None    # e.g. "bt2020nc"
     master_display: str | None = None  # x265 "G(..)B(..)R(..)WP(..)L(max,min)"
     max_cll: str | None = None        # x265 "maxcll,maxfall"
+    dv_profile: int | None = None     # Dolby Vision profile (5/7/8) if present
 
     @property
     def is_hdr(self) -> bool:
         return self.transfer in _HDR_TRANSFERS
+
+    @property
+    def is_dolby_vision(self) -> bool:
+        return self.dv_profile is not None
 
 
 def _num(frac) -> int | None:
@@ -47,6 +52,14 @@ def parse_hdr(probe: dict) -> HdrInfo:
         transfer=vs.get("color_transfer"),
         colormatrix=vs.get("color_space"),
     )
+    # Dolby Vision config lives on the video stream's side data.
+    for sd in (vs.get("side_data_list") or []):
+        if sd.get("side_data_type") == "DOVI configuration record":
+            try:
+                info.dv_profile = int(sd.get("dv_profile"))
+            except (TypeError, ValueError):
+                pass
+
     frames = probe.get("frames") or []
     side = (frames[0].get("side_data_list") if frames else None) or []
 

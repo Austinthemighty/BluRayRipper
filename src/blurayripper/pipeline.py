@@ -28,6 +28,7 @@ from .services.subtitles import looks_like_sdh
 from .version import get_version
 from .tools import discinfo
 from .tools.eject import eject
+from .tools.dovitool import DoviTool
 from .tools.ffmpeg import FFmpeg
 from .tools.handbrake import EncodeProgress, HandBrake
 from .tools.makemkv import MakeMKV
@@ -121,6 +122,7 @@ class Pipeline:
         self.mkvtools = MkvTools(settings)
         self.subtitleedit = SubtitleEdit(settings)
         self.ffmpeg = FFmpeg(settings)
+        self.dovitool = DoviTool(settings)
         self.mapping_store = MappingStore(settings.storage.output_dir / ".blurayripper" / "mappings.db")
         # Throttle concurrent subtitle extraction so a big batch (or a recovery
         # resume of many jobs) doesn't fire dozens of multi-GB NAS reads at once.
@@ -706,6 +708,59 @@ class Pipeline:
         _checkpoint(report)
         return result
 
+    async def _encode_uhd(self, src: Path, dst: Path, tune_grain: bool,
+                          encode_dir: Path, report) -> None:
+        """UHD encode via ffmpeg: Dolby Vision (RPU round-trip) when enabled and
+        detected, else plain HDR10 passthrough. Any DV failure falls back to
+        HDR10 so a job never dies on the DV path."""
+        enc = self.settings.encode
+        hdr, duration = await self.ffmpeg.probe_video(src)
+        want_dv = (enc.dovi and hdr.is_dolby_vision
+                   and self.dovitool.available and bool(self.settings.tools.mkvmerge))
+        if want_dv:
+            try:
+                await self._encode_dovi(src, dst, hdr, duration, tune_grain, encode_dir, report)
+                return
+            except Exception as exc:
+                report.on_event(
+                    f"Dolby Vision path failed ({type(exc).__name__}: {exc}); "
+                    "falling back to HDR10.")
+        elif enc.dovi and hdr.is_dolby_vision:
+            report.on_event("Dolby Vision disc but dovi_tool/mkvmerge unavailable — HDR10 only.")
+        await self.ffmpeg.encode(
+            src, dst, on_progress=lambda p: self._encode_progress(p, report),
+            tune_grain=tune_grain, low_priority=enc.low_priority)
+
+    async def _encode_dovi(self, src: Path, dst: Path, hdr, duration: float,
+                           tune_grain: bool, encode_dir: Path, report) -> None:
+        """Extract the DV RPU, re-encode video, inject the RPU, remux with audio.
+        Uses big intermediate raw-HEVC files (cleaned up in a finally)."""
+        tmp = encode_dir / "dovi"
+        tmp.mkdir(parents=True, exist_ok=True)
+        src_hevc, rpu = tmp / "src.hevc", tmp / "rpu.bin"
+        enc_hevc, dv_hevc = tmp / "enc.hevc", tmp / "enc_dv.hevc"
+        try:
+            report.on_event(f"Dolby Vision (profile {hdr.dv_profile}) — extracting RPU…")
+            await self.ffmpeg.extract_hevc(src, src_hevc)
+            await self.dovitool.extract_rpu(src_hevc, rpu, hdr.dv_profile)
+            src_hevc.unlink(missing_ok=True)  # free space before the re-encode
+            report.on_event("Re-encoding video (x265, HDR10 base)…")
+            await self.ffmpeg.encode_hevc(
+                src, enc_hevc, hdr=hdr, duration=duration,
+                on_progress=lambda p: self._encode_progress(p, report),
+                tune_grain=tune_grain, low_priority=self.settings.encode.low_priority)
+            report.on_event("Injecting Dolby Vision RPU…")
+            await self.dovitool.inject_rpu(enc_hevc, rpu, dv_hevc)
+            enc_hevc.unlink(missing_ok=True)
+            report.on_event("Muxing DV + audio to MKV…")
+            await self.mkvtools.mux_dovi(dv_hevc, src, dst)
+        finally:
+            for f in (src_hevc, rpu, enc_hevc, dv_hevc):
+                try:
+                    f.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
     async def _encode_title(
         self, job: Job, title_id: int, assignment: EpisodeAssignment, staging_root: Path,
         ripped_mkv: Path, scheduler: EncodeScheduler, report,
@@ -740,12 +795,10 @@ class Pipeline:
             )
             encoded = encode_dir / video_dest.name
             if use_ffmpeg:
-                # UHD: ffmpeg+libx265, preserving HDR10 metadata. (No decomb —
-                # UHD Blu-ray is progressive.)
-                await self.ffmpeg.encode(
-                    ripped_mkv, encoded,
-                    on_progress=lambda p: self._encode_progress(p, report),
-                    tune_grain=bool(tune_grain), low_priority=enc.low_priority)
+                # UHD: ffmpeg+libx265, preserving HDR10 (and Dolby Vision if
+                # enabled). No decomb — UHD Blu-ray is progressive.
+                await self._encode_uhd(ripped_mkv, encoded, bool(tune_grain),
+                                       encode_dir, report)
             else:
                 await self.handbrake.encode(
                     ripped_mkv, encoded,
