@@ -26,6 +26,39 @@ def _parse_time(value: str) -> float:
         return 0.0
 
 
+def _progress_handler(duration: float, on_progress):
+    """Return an on_line handler that turns ffmpeg -progress output into
+    EncodeProgress callbacks (same shape the HandBrake path emits)."""
+    st = {"fps": None, "speed": None, "t": 0.0}
+
+    async def handle(line: str) -> None:
+        if "=" not in line:
+            return
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if k == "out_time":
+            st["t"] = _parse_time(v)
+        elif k == "fps":
+            try:
+                st["fps"] = float(v)
+            except ValueError:
+                pass
+        elif k == "speed":
+            try:
+                st["speed"] = float(v.rstrip("x"))
+            except ValueError:
+                pass
+        elif k == "progress" and on_progress is not None:
+            frac = min(0.999, st["t"] / duration) if duration else None
+            eta = (int((duration - st["t"]) / st["speed"])
+                   if (duration and st["speed"]) else None)
+            on_progress(EncodeProgress(
+                state="done" if v == "end" else "working",
+                fraction=1.0 if v == "end" else frac,
+                eta_seconds=eta, fps=st["fps"]))
+    return handle
+
+
 class FFmpeg:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -112,35 +145,54 @@ class FFmpeg:
         cmd = self.build_encode_command(
             src, dst, hdr=hdr, crf=enc.ffmpeg_crf, preset=enc.ffmpeg_preset,
             audio_mode=enc.ffmpeg_audio, tune_grain=tune_grain)
-        st = {"fps": None, "speed": None, "t": 0.0}
-
-        async def handle(line: str) -> None:
-            if "=" not in line:
-                return
-            k, v = line.split("=", 1)
-            k, v = k.strip(), v.strip()
-            if k == "out_time":
-                st["t"] = _parse_time(v)
-            elif k == "fps":
-                try:
-                    st["fps"] = float(v)
-                except ValueError:
-                    pass
-            elif k == "speed":
-                try:
-                    st["speed"] = float(v.rstrip("x"))
-                except ValueError:
-                    pass
-            elif k == "progress" and on_progress is not None:
-                frac = min(0.999, st["t"] / duration) if duration else None
-                eta = (int((duration - st["t"]) / st["speed"])
-                       if (duration and st["speed"]) else None)
-                on_progress(EncodeProgress(
-                    state="done" if v == "end" else "working",
-                    fraction=1.0 if v == "end" else frac,
-                    eta_seconds=eta, fps=st["fps"]))
-
-        await process.run(cmd, on_line=handle, low_priority=low_priority)
+        await process.run(cmd, on_line=_progress_handler(duration, on_progress),
+                          low_priority=low_priority)
         if not dst.exists() or dst.stat().st_size == 0:
             raise RuntimeError(f"ffmpeg produced no output at {dst}")
         return dst
+
+    async def extract_hevc(self, src: Path, out: Path) -> Path:
+        """Copy the source video track to a raw Annex-B HEVC file (for dovi_tool)."""
+        out.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [self._settings.tools.require("ffmpeg"), "-y", "-i", str(src),
+               "-map", "0:v:0", "-c:v", "copy", "-f", "hevc", str(out)]
+        await process.run(cmd)
+        return out
+
+    def build_hevc_encode_command(
+        self, src: Path, dst: Path, *, hdr: hdr_mod.HdrInfo, crf: int, preset: str,
+        tune_grain: bool,
+    ) -> list[str]:
+        """Video-only libx265 encode to a raw HEVC stream (for the DV pipeline)."""
+        extra = ["tune=grain"] if tune_grain else None
+        cmd = [
+            self._settings.tools.require("ffmpeg"), "-y", "-i", str(src),
+            "-map", "0:v:0", "-an", "-sn",
+            "-c:v", "libx265", "-preset", preset, "-crf", str(crf),
+            "-pix_fmt", "yuv420p10le",
+        ]
+        if hdr.colorprim:
+            cmd += ["-color_primaries", hdr.colorprim]
+        if hdr.transfer:
+            cmd += ["-color_trc", hdr.transfer]
+        if hdr.colormatrix:
+            cmd += ["-colorspace", hdr.colormatrix]
+        cmd += ["-x265-params", hdr_mod.x265_params(hdr, extra)]
+        cmd += ["-f", "hevc", "-progress", "pipe:1", "-nostats", str(dst)]
+        return cmd
+
+    async def encode_hevc(
+        self, src: Path, out: Path, *, hdr: hdr_mod.HdrInfo, duration: float = 0.0,
+        on_progress=None, tune_grain: bool = False, low_priority: bool = True,
+    ) -> Path:
+        """Re-encode video-only to raw HEVC (base for DV RPU injection)."""
+        out.parent.mkdir(parents=True, exist_ok=True)
+        enc = self._settings.encode
+        cmd = self.build_hevc_encode_command(
+            src, out, hdr=hdr, crf=enc.ffmpeg_crf, preset=enc.ffmpeg_preset,
+            tune_grain=tune_grain)
+        await process.run(cmd, on_line=_progress_handler(duration, on_progress),
+                          low_priority=low_priority)
+        if not out.exists() or out.stat().st_size == 0:
+            raise RuntimeError(f"ffmpeg produced no HEVC output at {out}")
+        return out

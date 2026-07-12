@@ -86,6 +86,7 @@ _TOOL_PATH_NAMES: dict[str, list[str]] = {
     "mkvextract": ["mkvextract"],
     "subtitleedit": ["seconv", "SubtitleEdit"],
     "ffmpeg": ["ffmpeg"],
+    "dovitool": ["dovi_tool"],
 }
 
 
@@ -125,6 +126,7 @@ class ToolPaths:
     subtitleedit: str | None = None
     subtitleedit_runner: str | None = None
     ffmpeg: str | None = None
+    dovitool: str | None = None  # dovi_tool, for Dolby Vision UHD re-encodes
 
     def require(self, tool_key: str) -> str:
         value = getattr(self, tool_key, None)
@@ -191,6 +193,10 @@ class EncodeSettings:
     ffmpeg_crf: int = 18            # x265 quality (lower = better/bigger); ~18 for UHD
     ffmpeg_preset: str = "medium"  # x265 preset
     ffmpeg_audio: str = "copy"     # "copy" (keep originals, incl. TrueHD/DTS-HD) or "aac"
+    # Preserve Dolby Vision on UHD via dovi_tool (extract RPU -> re-encode ->
+    # inject -> remux to profile 8.1). Needs dovitool + mkvmerge + lots of temp
+    # space. Falls back to HDR10 if unavailable. Requires ffmpeg_uhd.
+    dovi: bool = False
 
 
 @dataclass
@@ -354,6 +360,8 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         subtitleedit_runner=_override(
             "BLURAYRIPPER_SUBTITLEEDIT_RUNNER", tools_cfg.get("subtitleedit_runner")),
         ffmpeg=autodetect_tool("ffmpeg", _override("BLURAYRIPPER_FFMPEG", tools_cfg.get("ffmpeg"))),
+        dovitool=autodetect_tool(
+            "dovitool", _override("BLURAYRIPPER_DOVITOOL", tools_cfg.get("dovitool"))),
     )
 
     storage_cfg = data.get("storage", {})
@@ -382,6 +390,7 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         ffmpeg_crf=int(encode_cfg.get("ffmpeg_crf", 18)),
         ffmpeg_preset=str(encode_cfg.get("ffmpeg_preset", "medium")),
         ffmpeg_audio=str(encode_cfg.get("ffmpeg_audio", "copy")),
+        dovi=bool(encode_cfg.get("dovi", False)),
     )
 
     lang_cfg = data.get("languages", {})

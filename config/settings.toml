@@ -14,7 +14,8 @@ mkvextract = ""
 # subtitleedit pointing at SubtitleEdit.exe and set subtitleedit_runner = "mono".
 subtitleedit = ""
 subtitleedit_runner = ""   # e.g. "mono" on Linux/macOS; blank to run directly
-ffmpeg = ""                # optional — only used for the grain-preview stills
+ffmpeg = ""                # optional — grain previews + UHD/HDR encoding
+dovitool = ""              # optional — dovi_tool, for Dolby Vision UHD
 
 [storage]
 # Temp/staging root: per-job intermediates live here and are cleaned up after.
@@ -48,6 +49,9 @@ uhd_min_height = 2160
 ffmpeg_crf = 18
 ffmpeg_preset = "medium"
 ffmpeg_audio = "copy"
+# Preserve Dolby Vision on UHD (needs dovitool + mkvmerge + temp space; falls
+# back to HDR10 if unavailable).
+dovi = false
 
 [languages]
 # ISO 639-2/B 3-letter codes (as MakeMKV/mkvmerge report them) to KEEP.
