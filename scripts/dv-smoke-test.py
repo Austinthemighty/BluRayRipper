@@ -33,7 +33,9 @@ class _Report:
 
     def on_progress(self, stage, frac):
         if frac is not None:
-            print(f"     {stage}  {frac * 100:5.1f}%", end="\r", flush=True)
+            # ljust pads the line so a shorter redraw (e.g. ETA shrinks) fully
+            # overwrites the previous one instead of leaving stray trailing chars.
+            print(f"     {stage}  {frac * 100:5.1f}%".ljust(72), end="\r", flush=True)
 
     def checkpoint(self):
         pass
