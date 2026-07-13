@@ -18,7 +18,11 @@
   header { padding: 14px 20px; background: #161b22; border-bottom: 1px solid #30363d; display:flex; align-items:center; gap:12px;}
   header h1 { font-size: 18px; margin: 0; }
   header .cap { color:#8b949e; font-size:12px; }
-  .wrap { display: grid; grid-template-columns: 300px 1fr; gap: 16px; padding: 16px 20px; }
+  .wrap { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 16px; padding: 16px 20px; }
+  /* minmax(0,…) + min-width:0 let the columns shrink below their content's
+     intrinsic width, so a nowrap job title ellipsizes instead of forcing the
+     whole page wider than the screen (horizontal-scroll / clipped controls). */
+  .wrap > * { min-width: 0; }
   .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: #8b949e; margin: 0 0 10px; }
   button { background: #238636; color: #fff; border: 0; border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
@@ -56,20 +60,26 @@
   table { width:100%; border-collapse: collapse; margin-top:8px; font-size:13px; }
   th, td { text-align:left; padding:4px 6px; border-bottom:1px solid #21262d; }
   .log { font-family: ui-monospace, monospace; font-size:11px; color:#8b949e; max-height:120px; overflow:auto; margin-top:8px; white-space:pre-wrap; }
-  input, select { background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:6px; padding:5px 8px; font-size:13px; }
+  input, select { background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:6px; padding:5px 8px; font-size:13px; min-width:0; max-width:100%; }
   .row { display:flex; gap:8px; align-items:center; margin:6px 0; flex-wrap:wrap; }
   .muted { color:#8b949e; }
   /* Mobile: stack the two columns, wrap the header, bigger touch targets. */
   @media (max-width: 760px) {
-    .wrap { grid-template-columns: 1fr; padding: 10px; gap: 10px; }
+    .wrap { grid-template-columns: minmax(0, 1fr); padding: 10px; gap: 10px; }
+    /* Queue first — on a phone you're monitoring; Drives/Add are one scroll down. */
+    .wrap > .panel { order: -1; }
     header { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
     header h1 { font-size: 20px; }
     #redoall { margin-left: 0 !important; }
     #stats, #bulkbar:not(:empty) { padding: 8px 10px; }
+    .panel { padding: 12px; }
     .job { padding: 10px; }
-    .log { max-height: 84px; }
+    .job .top { gap: 6px; }
+    .log { max-height: 78px; font-size: 10px; line-height: 1.45; }
     button, button.sec { padding: 9px 14px; font-size: 14px; }  /* easier taps */
     .thumb { height: 38px; }
+    /* Header actions: full-width, evenly split so they're easy to tap. */
+    header #redoall, header #refreshart, header #opensettings { flex: 1 1 40%; }
   }
   /* Top summary strip: at-a-glance counts across all jobs. */
   #stats { display:flex; flex-wrap:wrap; gap:8px; padding:10px 16px; border-bottom:1px solid #21262d; }
