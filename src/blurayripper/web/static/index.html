@@ -184,6 +184,7 @@
     <div class="sfoot">
       <button onclick="saveSettings()">Save</button>
       <button class="sec" onclick="closeSettings()">Close</button>
+      <button class="sec" onclick="testNotify()" title="Send a test push to the configured notify URL and report whether it was accepted.">🔔 Test notification</button>
       <span id="settings-msg" class="muted"></span>
       <button class="sec" onclick="restartServer(false)" style="margin-left:auto;" title="Restart the server to apply saved settings. Warns if a rip/encode/OCR is running.">↻ Restart server</button>
     </div>
@@ -1029,6 +1030,23 @@ async function renderOsQuota(){
   }
   if (rem === 0) txt += q.reset_time ? ` — resets ${q.reset_time}.` : ' — resets daily; retry then or map manually.';
   el.textContent = txt;
+}
+async function testNotify(){
+  const msg = document.getElementById('settings-msg');
+  msg.style.color = '#8b949e'; msg.textContent = 'Sending test notification…';
+  let r;
+  try { r = await api('POST','/api/notify/test'); }
+  catch(e){ msg.style.color = '#f85149'; msg.textContent = 'Error: ' + e.message; return; }
+  if (r.configured === false){
+    msg.style.color = '#e3b341';
+    msg.textContent = 'No notify URL set (Serve → Notify webhook URL, or BLURAYRIPPER_NOTIFY_URL).';
+  } else if (r.ok){
+    msg.style.color = '#3fb950';
+    msg.textContent = 'Sent ✓ — accepted by ' + r.url + '. Check your device.';
+  } else {
+    msg.style.color = '#f85149';
+    msg.textContent = 'Rejected by ' + r.url + ' — wrong URL/topic? (ntfy uses https://ntfy.sh/<topic>).';
+  }
 }
 function closeSettings(){ document.getElementById('settings-modal').classList.remove('open'); }
 async function saveSettings(){
