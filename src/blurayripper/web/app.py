@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from ..config import Settings, load_settings
 from ..settings_store import save_overlay, settings_ui_payload
 from ..models import EpisodeAssignment, MediaKind
+from ..services import naming
 from ..services.metadata import MetadataError, TMDBClient
 from ..tools.eject import close_tray, eject
 from .manager import JobManager
@@ -378,9 +379,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def tmdb_search(kind: str, query: str):
         if not tmdb.configured:
             raise HTTPException(status_code=400, detail="TMDB API key not configured.")
-        # Disc names often carry a trailing "(YYYY)" — TMDB matches the bare
-        # title better, so pull the year out and use it as the year filter.
-        cleaned, year = _clean_query(query)
+        # Disc names carry noise TMDB can't match — a trailing "(YYYY)" and, for
+        # TV, "Season N Disc N". Strip it to the bare title (+year filter).
+        cleaned, year, _season = naming.clean_tmdb_query(query, kind)
         try:
             if kind == "movie":
                 res = await tmdb.search_movie(cleaned, year=year)
@@ -430,16 +431,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return StreamingResponse(stream(), media_type="text/event-stream")
 
     return app
-
-
-def _clean_query(query: str) -> tuple[str, int | None]:
-    """Strip a trailing '(YYYY)' from a search query and return (title, year)."""
-    import re
-
-    m = re.search(r"\((\d{4})\)\s*$", query)
-    year = int(m.group(1)) if m else None
-    cleaned = re.sub(r"\s*\(\d{4}\)\s*$", "", query).strip()
-    return (cleaned or query.strip()), year
 
 
 def _sse(payload: dict) -> str:

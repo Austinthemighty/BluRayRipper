@@ -49,6 +49,52 @@ def subtitle_lang_suffix(iso_639_2b: str) -> str:
     return _ISO_639_2B_TO_1.get(code, code)
 
 
+def clean_tmdb_query(query: str, kind: str = "movie") -> tuple[str, int | None, int | None]:
+    """Turn a disc name into a searchable (title, year, season) for TMDB.
+
+    Disc names carry authoring noise TMDB can't match, e.g.
+    ``"Silicon Valley Season 2 Disc 1"`` -> title ``"Silicon Valley"``, season 2.
+    Peels a trailing ``(YYYY)`` as the year, the season number if present, then
+    strips trailing "Season N" / "Disc N" descriptors.
+
+    "Volume/Vol" is only stripped for TV — real movie titles use it (*Kill Bill:
+    Vol. 1*, *Guardians of the Galaxy Vol. 3*), so movies keep it.
+    """
+    q = (query or "").strip()
+
+    # Year: a parenthesized (YYYY) anywhere (disc names sometimes put it before
+    # "Season N", e.g. "Breaking Bad (2008) Season 4 Disc 2").
+    m = re.search(r"\((\d{4})\)", q)
+    year = int(m.group(1)) if m else None
+    q = re.sub(r"\s*\(\d{4}\)\s*", " ", q).strip()
+
+    season: int | None = None
+    if kind == "tv":
+        sm = re.search(r"\b(?:season|s)\s*0*(\d{1,2})\b", q, flags=re.IGNORECASE)
+        if sm:
+            season = int(sm.group(1))
+
+    # Peel trailing authoring descriptors: "Season 2", "Disc 1", "S01", "D2".
+    # "Volume/Vol" and the Sxx/Dxx short forms are TV-only — real movie titles use
+    # them (*Kill Bill: Vol. 1*, *Guardians of the Galaxy Vol. 3*).
+    words = "season|seasons|disc|disk"
+    if kind == "tv":
+        words += r"|volume|vol\.?|s0*\d+|d0*\d+"
+    tail = re.compile(rf"[\s:_.\-]*\b(?:{words})\b\s*\d*\s*$", re.IGNORECASE)
+    prev = None
+    while prev != q:  # repeat for stacked descriptors ("Season 2 Disc 1")
+        prev = q
+        q = tail.sub("", q).strip()
+
+    if kind == "tv":  # set-level descriptors TMDB doesn't want
+        q = re.sub(r"[\s:_.\-]*\b(?:the\s+)?complete\s+series\b\s*$", "", q,
+                   flags=re.IGNORECASE).strip()
+        q = re.sub(r"[\s:_.\-]*\bcollection\b\s*$", "", q, flags=re.IGNORECASE).strip()
+
+    q = re.sub(r"\s{2,}", " ", q).strip()
+    return (q or query.strip()), year, season
+
+
 def _title_with_year(title: str, year: int | None) -> str:
     base = sanitize(title)
     return f"{base} ({year})" if year else base
