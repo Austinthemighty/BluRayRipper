@@ -468,23 +468,21 @@ class JobManager:
         ]
         return {"jobs": jobs, "version": get_version(), "workers": workers}
 
-    # States where a restart would interrupt real, in-flight work (a rip, encode,
-    # OCR, or file placement) — used to warn before a web-triggered restart.
-    _ACTIVE_STATES = frozenset({
-        JobState.SCANNING, JobState.IDENTIFYING, JobState.RIPPING, JobState.CONFIRMING,
-        JobState.ENCODING, JobState.EXTRACTING_SUBS, JobState.OCR_SUBS, JobState.PLACING,
-    })
-
     def active_jobs(self) -> list[dict]:
-        """Jobs currently doing interruptible work (rip/encode/subs/placing).
+        """Jobs THIS process is actively working on right now, i.e. holding a live
+        local task (a rip/encode/OCR/placing coroutine still running here).
 
-        Note: encodes that run on separate `worker` machines are unaffected by
-        restarting this serve process, so this only flags work owned locally.
+        Keyed off the live task, NOT the job state, on purpose: a job whose encode
+        was delegated to a `worker` machine, or one left in a stale ENCODING/RIPPING
+        state by a prior power-off, still *reads* as active but has no running task
+        here — restarting this process wouldn't interrupt it, so it must not block
+        the restart. A parked job waiting at a gate has a finished task too.
         """
         out = []
         for wj in self.jobs.values():
-            state = self._live_state(wj)
-            if state in self._ACTIVE_STATES:
+            task = getattr(wj, "_task", None)
+            if task is not None and not task.done():
+                state = self._live_state(wj)
                 out.append({"id": wj.id, "name": self._name_of(wj), "state": state.value})
         return out
 
