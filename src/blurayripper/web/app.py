@@ -28,6 +28,7 @@ from ..settings_store import save_settings, settings_ui_payload
 from ..models import EpisodeAssignment, MediaKind
 from ..services import naming
 from ..services.metadata import MetadataError, TMDBClient
+from ..services.notify import notify as send_notify
 from ..services.opensubtitles import OpenSubtitlesError
 from ..tools.eject import close_tray, eject
 from .manager import JobManager
@@ -363,6 +364,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         asyncio.ensure_future(_shutdown_soon())
         return {"ok": True, "restarting": True}
+
+    @app.post("/api/notify/test")
+    async def notify_test():
+        url = settings.notify_url
+        if not url:
+            return {"configured": False}
+        ok = await send_notify(
+            url, "🔔 BluRayRipper test",
+            "Test notification — if you see this, notifications are working.", "3")
+        return {"configured": True, "ok": ok, "url": url}
 
     @app.get("/api/opensubtitles/quota")
     async def opensubtitles_quota():
