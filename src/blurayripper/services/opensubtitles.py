@@ -188,6 +188,28 @@ class OpenSubtitlesClient:
         except httpx.HTTPStatusError as exc:
             raise self._classify_http_error(exc) from exc
 
+    async def user_info(self) -> dict:
+        """Fetch the account's download-quota info from /infos/user.
+
+        Reads the daily quota: allowed_downloads, downloads_count,
+        remaining_downloads, level, vip. Needs a username+password (a bearer
+        token) — the Api-Key alone can't read /infos/user."""
+        if not self._api_key:
+            raise OpenSubtitlesError("OpenSubtitles API key not configured.", fatal=True)
+        async with httpx.AsyncClient(timeout=20) as client:
+            await self._login(client)
+            if not self._token:
+                raise OpenSubtitlesError(
+                    "Reading the quota needs OPENSUBTITLES_USERNAME and "
+                    "OPENSUBTITLES_PASSWORD in secrets.env (the API key alone can't).",
+                    fatal=True)
+            try:
+                resp = await client.get(f"{_BASE}/infos/user", headers=self._headers())
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise self._classify_http_error(exc) from exc
+            return resp.json().get("data", {}) or {}
+
     @staticmethod
     def _classify_http_error(exc: "httpx.HTTPStatusError") -> "OpenSubtitlesError":
         code = exc.response.status_code

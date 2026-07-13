@@ -178,6 +178,7 @@
         <select id="settings-scope" onchange="openSettings(this.value)"><option value="global">Global (server + all workers)</option></select>
       </div>
       <div class="muted" id="settings-scope-note" style="font-size:12px;"></div>
+      <div id="settings-osquota" style="font-size:12px;margin-top:4px;"></div>
     </div>
     <div id="settings-body"><span class="muted">Loading…</span></div>
     <div class="sfoot">
@@ -958,6 +959,7 @@ async function openSettings(scope){
     sel.innerHTML = opts.join('');
     sel.value = 'global';
   }
+  renderOsQuota();
   const note = document.getElementById('settings-scope-note');
   if (worker) {
     note.innerHTML = `Overrides for <b>${esc(scope)}</b> — applied on its <b>next job</b> (no restart). ` +
@@ -1007,6 +1009,19 @@ async function openSettings(scope){
     }
     body.appendChild(gd);
   }
+}
+async function renderOsQuota(){
+  const el = document.getElementById('settings-osquota');
+  el.textContent = 'OpenSubtitles: checking quota…'; el.style.color = '#8b949e';
+  let q;
+  try { q = await api('GET','/api/opensubtitles/quota'); }
+  catch(e){ el.textContent = ''; return; }
+  if (!q || q.configured === false){ el.textContent = 'OpenSubtitles: no API key configured.'; return; }
+  if (q.error){ el.style.color = '#e3b341'; el.textContent = 'OpenSubtitles quota: ' + q.error; return; }
+  const rem = q.remaining, allowed = q.allowed;
+  el.style.color = (rem === 0) ? '#f85149' : (rem != null && rem <= 5 ? '#e3b341' : '#3fb950');
+  el.textContent = `OpenSubtitles: ${rem == null ? '?' : rem} of ${allowed == null ? '?' : allowed} downloads left today`
+    + (q.vip ? ' (VIP)' : '') + (rem === 0 ? ' — TV auto-identify will fail until it resets.' : '');
 }
 function closeSettings(){ document.getElementById('settings-modal').classList.remove('open'); }
 async function saveSettings(){

@@ -28,6 +28,7 @@ from ..settings_store import save_settings, settings_ui_payload
 from ..models import EpisodeAssignment, MediaKind
 from ..services import naming
 from ..services.metadata import MetadataError, TMDBClient
+from ..services.opensubtitles import OpenSubtitlesError
 from ..tools.eject import close_tray, eject
 from .manager import JobManager
 
@@ -362,6 +363,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         asyncio.ensure_future(_shutdown_soon())
         return {"ok": True, "restarting": True}
+
+    @app.get("/api/opensubtitles/quota")
+    async def opensubtitles_quota():
+        if not manager.osub.configured:
+            return {"configured": False}
+        try:
+            info = await manager.osub.user_info()
+        except OpenSubtitlesError as exc:
+            return {"configured": True, "error": str(exc)}
+        except Exception as exc:  # network/HTTP
+            return {"configured": True, "error": f"{type(exc).__name__}: {exc}"}
+        return {
+            "configured": True,
+            "remaining": info.get("remaining_downloads"),
+            "allowed": info.get("allowed_downloads"),
+            "used": info.get("downloads_count"),
+            "level": info.get("level"),
+            "vip": info.get("vip"),
+        }
 
     @app.get("/api/settings")
     async def get_settings(scope: str = "global"):
