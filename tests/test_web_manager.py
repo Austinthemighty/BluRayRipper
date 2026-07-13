@@ -627,19 +627,39 @@ def test_should_deinterlace_auto_targets_sd(manager):
     assert pipe._should_deinterlace(1080) is True
 
 
-def test_active_jobs_flags_only_in_flight_work(manager):
-    # A mix of running, parked, and finished jobs.
-    states = [
-        (301, JobState.ENCODING),        # active
-        (302, JobState.RIPPING),         # active
-        (303, JobState.OCR_SUBS),        # active
-        (304, JobState.AWAITING_GRAIN),  # parked -> safe to restart
-        (305, JobState.QUEUED),          # not started -> safe
-        (306, JobState.DONE),            # finished -> safe
-        (307, JobState.FAILED),          # finished -> safe
-    ]
-    for jid, st in states:
-        manager.jobs[jid] = WebJob(id=jid, source="disc:0", state=st)
-    active = manager.active_jobs()
-    assert {a["id"] for a in active} == {301, 302, 303}
-    assert all("state" in a and "name" in a for a in active)
+async def test_active_jobs_flags_only_live_local_tasks(manager):
+    """active_jobs keys off a live local task, not the state — so a worker-owned
+    or stale-ENCODING job (no running task here) does NOT block a restart."""
+    async def _forever():
+        await asyncio.sleep(3600)
+
+    async def _noop():
+        return
+
+    live = []
+    # Jobs THIS process is actively running (live task) -> flagged.
+    for jid, st in [(301, JobState.ENCODING), (302, JobState.RIPPING)]:
+        wj = WebJob(id=jid, source="disc:0", state=st)
+        wj._task = asyncio.ensure_future(_forever())
+        live.append(wj._task)
+        manager.jobs[jid] = wj
+
+    # ENCODING state but its local task already finished (delegated to a worker,
+    # or orphaned by a prior crash) -> NOT flagged.
+    finished = asyncio.ensure_future(_noop())
+    await finished
+    wj_deleg = WebJob(id=303, source="disc:0", state=JobState.ENCODING)
+    wj_deleg._task = finished
+    manager.jobs[303] = wj_deleg
+
+    # Parked at a gate with no task, and a plain queued job -> NOT flagged.
+    manager.jobs[304] = WebJob(id=304, source="disc:0", state=JobState.AWAITING_GRAIN)
+    manager.jobs[305] = WebJob(id=305, source="disc:0", state=JobState.QUEUED)
+
+    try:
+        active = manager.active_jobs()
+        assert {a["id"] for a in active} == {301, 302}
+        assert all("state" in a and "name" in a for a in active)
+    finally:
+        for t in live:
+            t.cancel()
