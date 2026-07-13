@@ -330,6 +330,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             lambda wj: manager._live_state(wj).value in wanted)
         return {"removed": n}
 
+    @app.post("/api/jobs/refresh-artwork")
+    async def refresh_artwork_all():
+        return {"jobs": await manager.refresh_all_artwork()}
+
+    @app.post("/api/jobs/{job_id}/refresh-artwork")
+    async def refresh_artwork(job_id: int):
+        return {"ok": True, "placed": await manager.refresh_artwork(job_id)}
+
     @app.post("/api/server/restart")
     async def restart_server(body: RestartServer):
         srv = getattr(app.state, "uvicorn_server", None)
