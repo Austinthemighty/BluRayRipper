@@ -45,3 +45,53 @@ def test_settings_load_opensubtitles_from_env(monkeypatch):
     s = load_settings()
     assert s.opensubtitles_api_key == "abc123"
     assert s.opensubtitles_username == "me"
+
+
+def _http_error(code):
+    import httpx
+    req = httpx.Request("POST", "https://api.opensubtitles.com/api/v1/download")
+    return httpx.HTTPStatusError(str(code), request=req, response=httpx.Response(code, request=req))
+
+
+def test_classify_http_error_flags_quota_and_auth_as_fatal():
+    q = OpenSubtitlesClient._classify_http_error(_http_error(406))
+    assert q.fatal and "quota" in str(q).lower()
+    r = OpenSubtitlesClient._classify_http_error(_http_error(429))
+    assert r.fatal and "quota" in str(r).lower()
+    a = OpenSubtitlesClient._classify_http_error(_http_error(401))
+    assert a.fatal and "api_key" in str(a).lower().replace(" ", "_") or "key" in str(a).lower()
+    other = OpenSubtitlesClient._classify_http_error(_http_error(500))
+    assert not other.fatal
+
+
+async def test_gather_references_surfaces_fatal_and_stops_early():
+    import pytest
+    from blurayripper.services.opensubtitles import gather_references, OpenSubtitlesError
+
+    class Quota:
+        calls = 0
+        async def fetch_episode_srt(self, *a):
+            Quota.calls += 1
+            raise OpenSubtitlesError("quota", fatal=True)
+    q = Quota()
+    with pytest.raises(OpenSubtitlesError) as ei:
+        await gather_references(q, 1043, 1, [6, 7, 8], "en")
+    assert ei.value.fatal and q.calls == 1  # fatal -> stop after the first episode
+
+
+async def test_gather_references_empty_when_no_subs_no_error():
+    from blurayripper.services.opensubtitles import gather_references
+
+    class Miss:
+        async def fetch_episode_srt(self, *a):
+            return None
+    assert await gather_references(Miss(), 1043, 1, [6, 7, 8], "en") == {}
+
+
+async def test_gather_references_returns_partial_hits():
+    from blurayripper.services.opensubtitles import gather_references
+
+    class Partial:
+        async def fetch_episode_srt(self, tmdb, season, ep, lang):
+            return "SRT" if ep == 7 else None
+    assert await gather_references(Partial(), 1043, 1, [6, 7, 8], "en") == {7: "SRT"}
