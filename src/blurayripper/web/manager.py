@@ -990,10 +990,31 @@ class JobManager:
         self._persist(wj)
         self.bus.publish()
 
+    def _source_disc_missing(self, wj: WebJob) -> bool:
+        """True if the job rips from a disc:N whose drive currently has no disc,
+        so retrying is pointless until it's reinserted. Uses the OS-aware drive
+        cache (a disc the OS sees but makemkvcon's probe missed counts as present)."""
+        src = wj.source or ""
+        if not src.startswith("disc:"):
+            return False
+        try:
+            idx = int(src.split(":", 1)[1])
+        except ValueError:
+            return False
+        for d in self._drives_cache:
+            if d.index == idx:
+                return not (d.disc_name and d.disc_name.strip())
+        return False  # drive not in the (maybe unpopulated) cache — don't assume absent
+
     def _schedule_auto_retry(self, wj: WebJob) -> None:
         """After a failure, re-queue the job up to auto_retry_max times with
         exponential backoff (30s, 60s, 120s… capped 5m). Bounded so a genuinely
         broken job doesn't loop forever."""
+        if self._source_disc_missing(wj):
+            wj.log.append("The disc isn't in the drive — reinsert it, then click Retry.")
+            self._notify(f"💿 Insert disc: {self._name_of(wj)}",
+                         f"Job #{wj.id} is waiting for its disc to be reinserted.")
+            return  # don't burn retries against an empty drive
         n = self._auto_retries.get(wj.id, 0)
         if n >= self.settings.auto_retry_max:
             if self.settings.auto_retry_max:

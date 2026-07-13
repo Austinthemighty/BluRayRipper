@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,36 @@ class Drive:
     name: str            # drive model
     device: str | None   # OS device, e.g. "F:" or "/dev/sr0"
     disc_name: str | None  # loaded disc label, if any
+    os_detected: bool = False  # disc name came from the OS, not makemkvcon's probe
+
+
+def os_disc_label(device: str | None) -> str | None:
+    """The OS's volume label for an optical drive letter (Windows only), or None.
+
+    makemkvcon's quick drive enumeration sometimes reports NO disc for a disc the
+    OS has mounted (so it's visible in File Explorer). Reading the Windows volume
+    label recovers the disc name in that case. Best-effort; never raises."""
+    if not sys.platform.startswith("win") or not device:
+        return None
+    letter = device.strip().rstrip("\\/").rstrip(":")
+    if len(letter) != 1 or not letter.isalpha():
+        return None
+    try:
+        import ctypes
+
+        k = ctypes.windll.kernel32
+        prev = k.SetErrorMode(0x0001)  # SEM_FAILCRITICALERRORS: suppress "no disk" popup
+        try:
+            buf = ctypes.create_unicode_buffer(261)
+            ok = k.GetVolumeInformationW(
+                ctypes.c_wchar_p(f"{letter}:\\"), buf, 260, None, None, None, None, 0)
+        finally:
+            k.SetErrorMode(prev)
+        if not ok:
+            return None
+        return buf.value.strip() or None
+    except Exception:
+        return None
 
 
 def parse_drives(lines: list[str]) -> list[Drive]:
@@ -226,7 +257,16 @@ class MakeMKV:
         """
         cmd = [self._bin, "-r", "--cache=1", "info", "disc:99999"]
         result = await asyncio.wait_for(process.run(cmd, check=False), timeout=timeout)
-        return parse_drives(result.stdout_lines)
+        drives = parse_drives(result.stdout_lines)
+        # Recover a disc the OS has mounted but makemkvcon's quick probe missed
+        # (shows in File Explorer but came back with an empty disc name).
+        for d in drives:
+            if not d.disc_name and d.device:
+                label = os_disc_label(d.device)
+                if label:
+                    d.disc_name = label
+                    d.os_detected = True
+        return drives
 
     async def scan(
         self, source: str, *, on_message: Callable[[str], None] | None = None
