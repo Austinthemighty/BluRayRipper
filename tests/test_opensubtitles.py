@@ -95,3 +95,48 @@ async def test_gather_references_returns_partial_hits():
         async def fetch_episode_srt(self, tmdb, season, ep, lang):
             return "SRT" if ep == 7 else None
     assert await gather_references(Partial(), 1043, 1, [6, 7, 8], "en") == {7: "SRT"}
+
+
+class _Resp:
+    def __init__(self, status, js=None, text=""):
+        self.status_code = status; self._js = js or {}; self.text = text
+    def json(self): return self._js
+
+
+class _Client:
+    def __init__(self, resp): self.resp = resp
+    async def post(self, *a, **k): return self.resp
+
+
+async def test_login_missing_creds_tells_you_to_restart():
+    import pytest
+    from blurayripper.services.opensubtitles import OpenSubtitlesClient, OpenSubtitlesError
+    c = OpenSubtitlesClient("key")  # no username/password
+    with pytest.raises(OpenSubtitlesError) as ei:
+        await c._login(_Client(_Resp(200)), required=True)
+    assert "RESTART" in str(ei.value) and ei.value.fatal
+
+
+async def test_login_failure_surfaces_http_reason():
+    import pytest
+    from blurayripper.services.opensubtitles import OpenSubtitlesClient, OpenSubtitlesError
+    c = OpenSubtitlesClient("key", "user", "pw")
+    with pytest.raises(OpenSubtitlesError) as ei:
+        await c._login(_Client(_Resp(401, {"message": "wrong password"})), required=True)
+    assert "HTTP 401" in str(ei.value) and "wrong password" in str(ei.value)
+
+
+async def test_login_best_effort_never_raises():
+    from blurayripper.services.opensubtitles import OpenSubtitlesClient
+    # required=False (the search/download path): a failed login must not raise —
+    # the Api-Key alone still works for downloads.
+    c = OpenSubtitlesClient("key", "user", "pw")
+    await c._login(_Client(_Resp(403)))   # no exception
+    assert c._token is None
+
+
+async def test_login_stores_token_on_success():
+    from blurayripper.services.opensubtitles import OpenSubtitlesClient
+    c = OpenSubtitlesClient("key", "user", "pw")
+    await c._login(_Client(_Resp(200, {"token": "abc"})), required=True)
+    assert c._token == "abc"

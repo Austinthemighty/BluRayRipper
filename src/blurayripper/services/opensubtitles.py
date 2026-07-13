@@ -117,8 +117,20 @@ class OpenSubtitlesClient:
             h["Authorization"] = f"Bearer {self._token}"
         return h
 
-    async def _login(self, client: httpx.AsyncClient) -> None:
-        if self._token or not (self._username and self._password):
+    async def _login(self, client: httpx.AsyncClient, *, required: bool = False) -> None:
+        """Exchange username+password for a bearer token (raises the API quota and
+        enables /infos/user). Best-effort by default — a failed login still leaves
+        the Api-Key working for search/download. Pass required=True (e.g. for
+        /infos/user) to surface WHY it failed instead of silently continuing."""
+        if self._token:
+            return
+        if not (self._username and self._password):
+            if required:
+                raise OpenSubtitlesError(
+                    "OPENSUBTITLES_USERNAME / OPENSUBTITLES_PASSWORD are not set in "
+                    "the running server. Add both to config/secrets.env and RESTART "
+                    "(a value added while the server is running isn't picked up).",
+                    fatal=True)
             return
         resp = await client.post(
             f"{_BASE}/login",
@@ -127,6 +139,18 @@ class OpenSubtitlesClient:
         )
         if resp.status_code == 200:
             self._token = resp.json().get("token")
+            return
+        if required:
+            detail = ""
+            try:
+                detail = resp.json().get("message") or ""
+            except Exception:
+                detail = (resp.text or "")[:200]
+            raise OpenSubtitlesError(
+                f"OpenSubtitles login failed (HTTP {resp.status_code})"
+                + (f": {detail}" if detail else "")
+                + " — check OPENSUBTITLES_USERNAME/PASSWORD and the API key.",
+                fatal=True)
 
     async def fetch_episode_srt(
         self,
@@ -197,12 +221,7 @@ class OpenSubtitlesClient:
         if not self._api_key:
             raise OpenSubtitlesError("OpenSubtitles API key not configured.", fatal=True)
         async with httpx.AsyncClient(timeout=20) as client:
-            await self._login(client)
-            if not self._token:
-                raise OpenSubtitlesError(
-                    "Reading the quota needs OPENSUBTITLES_USERNAME and "
-                    "OPENSUBTITLES_PASSWORD in secrets.env (the API key alone can't).",
-                    fatal=True)
+            await self._login(client, required=True)  # raises a specific reason on failure
             try:
                 resp = await client.get(f"{_BASE}/infos/user", headers=self._headers())
                 resp.raise_for_status()
