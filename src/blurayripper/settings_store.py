@@ -127,6 +127,28 @@ _FIELDS: dict[tuple[str, str], Field] = {
     (f.section, f.key): f for _title, group in SCHEMA for f in group
 }
 
+# Fields that make sense to override PER WORKER (encode quality/speed, the
+# concurrency knobs, which jobs a worker takes, and its tool paths). Server-only
+# knobs (web host/port, drive polling, disc auto-open, notify, database) are not
+# here — they don't apply to an encode worker.
+_WORKER_KEYS: set[tuple[str, str]] = {
+    ("tools", "handbrakecli"), ("tools", "mkvmerge"), ("tools", "mkvextract"),
+    ("tools", "subtitleedit"), ("tools", "subtitleedit_runner"),
+    ("tools", "ffmpeg"), ("tools", "dovitool"),
+    ("encode", "container"), ("encode", "preset_name"), ("encode", "tune_grain"),
+    ("encode", "low_priority"), ("encode", "deinterlace"), ("encode", "deinterlace_max_height"),
+    ("encode", "ffmpeg_uhd"), ("encode", "uhd_min_height"), ("encode", "ffmpeg_crf"),
+    ("encode", "ffmpeg_preset"), ("encode", "ffmpeg_audio"), ("encode", "dovi"),
+    ("subtitles", "ocr_concurrency"), ("subtitles", "extract_concurrency"),
+    ("subtitles", "ocr_timeout_seconds"),
+    ("queue", "encode_capacity"),
+    ("cluster", "local_encode_max_height"), ("cluster", "worker_does_subs"),
+}
+
+
+def _is_worker_field(f: Field) -> bool:
+    return (f.section, f.key) in _WORKER_KEYS
+
 
 def _overlay_path(cfg_dir: Path) -> Path:
     return cfg_dir / OVERLAY_NAME
@@ -204,26 +226,88 @@ def save_overlay(cfg_dir: Path, updates: dict) -> dict:
     return overlay
 
 
-def settings_ui_payload(cfg_dir: Path) -> dict:
-    """Grouped, typed field list + current values for the settings form."""
+def _is_worker_scope(scope: str | None) -> bool:
+    return bool(scope) and scope not in ("global", "server")
+
+
+def save_settings(cfg_dir: Path, updates: dict, scope: str = "global", store=None) -> dict:
+    """Dispatch a settings save by scope.
+
+    scope "global" -> settings.local.json (server + defaults for all workers).
+    scope <worker_id> -> the shared store, as a SPARSE overlay: only fields that
+    DIFFER from the global base are kept, so a worker override stays minimal and
+    unset fields keep following the global config.
+    """
+    if not _is_worker_scope(scope):
+        return save_overlay(cfg_dir, updates)
+    if store is None or not getattr(store, "durable", False):
+        raise ValueError("Per-worker settings need a shared Postgres store "
+                         "(set BLURAYRIPPER_DATABASE_URL and run `blurayripper db-init`).")
+    base = _configured(cfg_dir)
+    overlay: dict = {}
+    for section, kv in (updates or {}).items():
+        if not isinstance(kv, dict):
+            continue
+        for key, raw in kv.items():
+            spec = _FIELDS.get((section, key))
+            if spec is None or not _is_worker_field(spec):
+                continue
+            value = _coerce(spec, raw)
+            base_val = base.get(section, {}).get(key, spec.default)
+            if value != base_val:  # only real overrides are stored
+                overlay.setdefault(section, {})[key] = value
+    store.set_worker_settings(scope, overlay)
+    return overlay
+
+
+def settings_ui_payload(cfg_dir: Path, scope: str = "global", store=None) -> dict:
+    """Grouped, typed field list + current values for the settings form.
+
+    scope "global" shows all fields (server config). A worker id shows only the
+    worker-applicable fields, with each field's current effective value and
+    whether it is overridden for that worker.
+    """
     data = _configured(cfg_dir)
-    secrets = _load_secrets(cfg_dir)
+    worker_scope = _is_worker_scope(scope)
+    overlay = store.get_worker_settings(scope) if (worker_scope and store) else {}
+    secrets = {} if worker_scope else _load_secrets(cfg_dir)
     groups = []
     for title, fields in SCHEMA:
         out = []
         for f in fields:
-            value = data.get(f.section, {}).get(f.key, f.default)
-            env_value = secrets.get(f.env) if f.env else None
-            out.append({
-                "section": f.section,
-                "key": f.key,
-                "type": f.type,
-                "label": f.label,
-                "help": f.help,
-                "choices": list(f.choices),
-                "value": value,
-                "env": f.env,
-                "env_value": env_value or None,
-            })
-        groups.append({"title": title, "fields": out})
-    return {"groups": groups, "overlay_file": str(_overlay_path(cfg_dir))}
+            if worker_scope and not _is_worker_field(f):
+                continue
+            base = data.get(f.section, {}).get(f.key, f.default)
+            entry = {
+                "section": f.section, "key": f.key, "type": f.type,
+                "label": f.label, "help": f.help, "choices": list(f.choices),
+            }
+            if worker_scope:
+                overridden = f.section in overlay and f.key in overlay[f.section]
+                entry["value"] = overlay[f.section][f.key] if overridden else base
+                entry["overridden"] = overridden
+                entry["base"] = base
+                entry["env"] = entry["env_value"] = None
+            else:
+                env_value = secrets.get(f.env) if f.env else None
+                entry["value"] = base
+                entry["env"] = f.env
+                entry["env_value"] = env_value or None
+            out.append(entry)
+        if out:
+            groups.append({"title": title, "fields": out})
+
+    payload = {"groups": groups, "scope": "worker" if worker_scope else "global"}
+    if not worker_scope:
+        payload["overlay_file"] = str(_overlay_path(cfg_dir))
+        workers: set[str] = set()
+        durable = bool(store and getattr(store, "durable", False))
+        if store:
+            try:
+                workers |= {w.worker_id for w in store.list_workers()}
+                workers |= set(store.all_worker_settings().keys())
+            except Exception:
+                pass
+        payload["workers"] = sorted(workers)
+        payload["durable"] = durable
+    return payload

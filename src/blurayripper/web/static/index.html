@@ -122,6 +122,8 @@
   .sfield > label{font-size:13px;}
   .sfield .fhelp{grid-column:2; font-size:12px; color:#8b949e;}
   .sfield.shadow{opacity:.7;}
+  .sfield.overridden{background:rgba(88,166,255,.07); border-radius:6px;}
+  .ovdot{color:#58a6ff; font-size:10px; vertical-align:1px;}
   .sfield input[type=text], .sfield input[type=number], .sfield select{width:100%;}
   .sfoot{position:sticky; bottom:0; background:#161b22; padding:12px 0 2px; border-top:1px solid #21262d; margin-top:12px;
     display:flex; gap:10px; align-items:center;}
@@ -171,7 +173,11 @@
   <div class="sheet">
     <div class="shead">
       <h2>Settings</h2>
-      <div class="muted" style="font-size:12px;">Saved to <code>config/settings.local.json</code> (survives updates). Applied on the next server restart. The database connection is set in <code>config/secrets.env</code>.</div>
+      <div class="row" style="margin:6px 0 2px;">
+        <label class="muted" style="font-size:12px;">Scope</label>
+        <select id="settings-scope" onchange="openSettings(this.value)"><option value="global">Global (server + all workers)</option></select>
+      </div>
+      <div class="muted" id="settings-scope-note" style="font-size:12px;"></div>
     </div>
     <div id="settings-body"><span class="muted">Loading…</span></div>
     <div class="sfoot">
@@ -929,22 +935,51 @@ document.getElementById('refreshart').onclick = async (e) => {
 };
 // ---- Settings modal ----
 const esc = (s) => String(s == null ? '' : s).replace(/"/g,'&quot;').replace(/</g,'&lt;');
-async function openSettings(){
+let settingsScope = 'global';
+async function openSettings(scope){
+  scope = (typeof scope === 'string' && scope) ? scope : 'global';
+  settingsScope = scope;
   const modal = document.getElementById('settings-modal');
   const body = document.getElementById('settings-body');
   document.getElementById('settings-msg').textContent = '';
   body.innerHTML = '<span class="muted">Loading…</span>';
   modal.classList.add('open');
   let data;
-  try { data = await api('GET','/api/settings'); }
+  try { data = await api('GET','/api/settings?scope=' + encodeURIComponent(scope)); }
   catch(e){ body.innerHTML = `<span style="color:#f85149;">Failed to load: ${esc(e.message)}</span>`; return; }
+  const worker = data.scope === 'worker';
+
+  // Populate the scope dropdown (only the global payload lists the workers).
+  const sel = document.getElementById('settings-scope');
+  sel.value = scope;
+  if (!worker) {
+    const opts = ['<option value="global">Global (server + all workers)</option>'];
+    for (const w of (data.workers || [])) opts.push(`<option value="${esc(w)}">Worker: ${esc(w)}</option>`);
+    sel.innerHTML = opts.join('');
+    sel.value = 'global';
+  }
+  const note = document.getElementById('settings-scope-note');
+  if (worker) {
+    note.innerHTML = `Overrides for <b>${esc(scope)}</b> — applied on its <b>next job</b> (no restart). ` +
+      `Fields left at the global value aren't overridden. Highlighted = overridden.`;
+  } else if (data.durable === false && (data.workers||[]).length === 0) {
+    note.innerHTML = `Saved to <code>config/settings.local.json</code>; applied on restart. ` +
+      `Per-worker overrides need Postgres (currently unavailable), so no workers are listed.`;
+  } else {
+    note.innerHTML = `Saved to <code>config/settings.local.json</code>; applied on the next server restart. ` +
+      `Pick a worker above to override settings for just that machine. DB connection lives in <code>secrets.env</code>.`;
+  }
+  // The Restart button only makes sense for the server (global) scope.
+  const rb = document.querySelector('#settings-modal [onclick^="restartServer"]');
+  if (rb) rb.style.display = worker ? 'none' : '';
+
   body.innerHTML = '';
   for(const g of data.groups){
     const gd = document.createElement('div'); gd.className = 'sgroup';
     gd.innerHTML = `<h3>${esc(g.title)}</h3>`;
     for(const f of g.fields){
       const id = `set_${f.section}_${f.key}`;
-      const shadowed = f.env_value != null;
+      const shadowed = f.env_value != null;   // only in global scope
       const dis = shadowed ? 'disabled' : '';
       let ctrl;
       if(f.type === 'bool'){
@@ -960,13 +995,14 @@ async function openSettings(){
         ctrl = `<input type="text" id="${id}" value="${esc(shadowed ? f.env_value : raw)}" ${dis}>`;
       }
       const row = document.createElement('div');
-      row.className = 'sfield' + (shadowed ? ' shadow' : '');
+      row.className = 'sfield' + (shadowed ? ' shadow' : '') + (f.overridden ? ' overridden' : '');
       row.dataset.section = f.section; row.dataset.key = f.key; row.dataset.type = f.type;
       row.dataset.shadow = shadowed ? '1' : '';
-      let note = f.help || '';
-      if(shadowed) note = `Set in secrets.env (${f.env}) — that overrides this. ` + note;
-      row.innerHTML = `<label for="${id}">${esc(f.label)}</label><div>${ctrl}</div>` +
-        (note ? `<div class="fhelp">${esc(note)}</div>` : '');
+      let note2 = f.help || '';
+      if(shadowed) note2 = `Set in secrets.env (${f.env}) — that overrides this. ` + note2;
+      else if(worker) note2 = `Global: ${f.type==='bool' ? (f.base?'on':'off') : (f.base===''||f.base==null?'(blank)':f.base)}. ` + note2;
+      row.innerHTML = `<label for="${id}">${esc(f.label)}${f.overridden ? ' <span class="ovdot" title="Overridden for this worker">●</span>' : ''}</label><div>${ctrl}</div>` +
+        (note2 ? `<div class="fhelp">${esc(note2)}</div>` : '');
       gd.appendChild(row);
     }
     body.appendChild(gd);
@@ -985,12 +1021,15 @@ async function saveSettings(){
   const msg = document.getElementById('settings-msg');
   msg.style.color = '#8b949e'; msg.textContent = 'Saving…';
   try {
-    await api('POST','/api/settings', updates);
+    const r = await api('POST','/api/settings?scope=' + encodeURIComponent(settingsScope), updates);
     msg.style.color = '#3fb950';
-    msg.textContent = 'Saved. Restart the server to apply.';
+    msg.textContent = (r && r.applies === 'next job')
+      ? 'Saved — the worker applies it on its next job.'
+      : 'Saved. Restart the server to apply.';
+    if (settingsScope !== 'global') openSettings(settingsScope);  // refresh override highlights
   } catch(e){ msg.style.color = '#f85149'; msg.textContent = 'Error: ' + e.message; }
 }
-document.getElementById('opensettings').onclick = openSettings;
+document.getElementById('opensettings').onclick = () => openSettings('global');
 document.getElementById('settings-modal').addEventListener('click', (e) => {
   if(e.target.id === 'settings-modal') closeSettings();   // click backdrop to close
 });
