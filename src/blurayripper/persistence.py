@@ -188,6 +188,18 @@ class Store(ABC):
         """Workers seen recently (for the UI). Empty for non-durable stores."""
         return []
 
+    def get_worker_settings(self, worker_id: str) -> dict:
+        """The central per-worker settings overlay for one worker ({} if none)."""
+        return {}
+
+    def set_worker_settings(self, worker_id: str, overlay: dict) -> None:
+        """Store (or clear, if empty) a worker's settings overlay. No-op if
+        non-durable — per-worker config needs a shared store to reach the worker."""
+
+    def all_worker_settings(self) -> dict[str, dict]:
+        """{worker_id: overlay} for every worker that has an override configured."""
+        return {}
+
     @property
     def durable(self) -> bool:
         return True
@@ -197,9 +209,25 @@ class MemoryStore(Store):
     def __init__(self) -> None:
         self._rows: dict[int, dict] = {}
         self._claimed: set[int] = set()
+        self._wsettings: dict[str, dict] = {}
 
     def init(self) -> None:
         pass
+
+    def get_worker_settings(self, worker_id: str) -> dict:
+        import copy
+        return copy.deepcopy(self._wsettings.get(worker_id, {}))
+
+    def set_worker_settings(self, worker_id: str, overlay: dict) -> None:
+        if overlay:
+            import copy
+            self._wsettings[worker_id] = copy.deepcopy(overlay)
+        else:
+            self._wsettings.pop(worker_id, None)
+
+    def all_worker_settings(self) -> dict[str, dict]:
+        import copy
+        return copy.deepcopy(self._wsettings)
 
     def save(self, record: JobRecord) -> None:
         self._rows[record.id] = record.to_json()
@@ -250,6 +278,11 @@ CREATE TABLE IF NOT EXISTS workers (
     job_id    BIGINT,
     stage     TEXT,
     last_seen TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS worker_settings (
+    worker_id  TEXT PRIMARY KEY,
+    overlay    JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
 
@@ -347,6 +380,33 @@ class PostgresStore(Store):
                 "stage = EXCLUDED.stage, last_seen = now()",
                 (worker_id, version, job_id, stage),
             )
+
+    def get_worker_settings(self, worker_id: str) -> dict:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT overlay FROM worker_settings WHERE worker_id = %s", (worker_id,))
+            row = cur.fetchone()
+        if not row:
+            return {}
+        return row[0] if isinstance(row[0], dict) else json.loads(row[0])
+
+    def set_worker_settings(self, worker_id: str, overlay: dict) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            if not overlay:
+                cur.execute("DELETE FROM worker_settings WHERE worker_id = %s", (worker_id,))
+                return
+            from psycopg.types.json import Jsonb
+            cur.execute(
+                "INSERT INTO worker_settings (worker_id, overlay) VALUES (%s, %s) "
+                "ON CONFLICT (worker_id) DO UPDATE SET overlay = EXCLUDED.overlay, "
+                "updated_at = now()",
+                (worker_id, Jsonb(overlay)),
+            )
+
+    def all_worker_settings(self) -> dict[str, dict]:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT worker_id, overlay FROM worker_settings")
+            rows = cur.fetchall()
+        return {wid: (ov if isinstance(ov, dict) else json.loads(ov)) for wid, ov in rows}
 
     def list_workers(self) -> list[WorkerInfo]:
         with self._connect() as conn, conn.cursor() as cur:

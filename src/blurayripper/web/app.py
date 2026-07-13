@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel
 
 from ..config import Settings, load_settings
-from ..settings_store import save_overlay, settings_ui_payload
+from ..settings_store import save_settings, settings_ui_payload
 from ..models import EpisodeAssignment, MediaKind
 from ..services import naming
 from ..services.metadata import MetadataError, TMDBClient
@@ -364,16 +364,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": True, "restarting": True}
 
     @app.get("/api/settings")
-    async def get_settings():
-        return settings_ui_payload(settings.config_dir)
+    async def get_settings(scope: str = "global"):
+        return settings_ui_payload(settings.config_dir, scope, manager.store)
 
     @app.post("/api/settings")
-    async def post_settings(updates: dict = Body(...)):
+    async def post_settings(updates: dict = Body(...), scope: str = "global"):
         try:
-            save_overlay(settings.config_dir, updates)
+            save_settings(settings.config_dir, updates, scope, manager.store)
         except (ValueError, OSError) as exc:
             raise HTTPException(status_code=400, detail=str(exc))
-        return {"ok": True, "restart_required": True}
+        is_worker = scope not in ("global", "server")
+        return {
+            "ok": True,
+            "scope": scope,
+            # The server applies on restart; a worker picks up its override when
+            # it starts its next job (no restart needed).
+            "restart_required": not is_worker,
+            "applies": "next job" if is_worker else "restart",
+        }
 
     @app.get("/api/tmdb/search")
     async def tmdb_search(kind: str, query: str):

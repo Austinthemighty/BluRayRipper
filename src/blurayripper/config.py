@@ -323,8 +323,13 @@ def _resolve_path(value: str, base: Path) -> Path:
     return p if p.is_absolute() else (base / p)
 
 
-def load_settings(config_dir: Path | None = None) -> Settings:
-    """Load and resolve all settings, auto-detecting tool paths."""
+def load_settings(config_dir: Path | None = None, extra_overlay: dict | None = None) -> Settings:
+    """Load and resolve all settings, auto-detecting tool paths.
+
+    ``extra_overlay`` is an optional {section: {key: value}} dict merged on TOP of
+    settings.local.json (but still below secrets.env). Workers use it to apply
+    their central per-worker override pulled from the shared store.
+    """
     cfg_dir = (config_dir or DEFAULT_CONFIG_DIR).resolve()
     settings_file = cfg_dir / "settings.toml"
     data: dict = {}
@@ -332,20 +337,24 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         with settings_file.open("rb") as fh:
             data = tomllib.load(fh)
 
+    def _merge(overlay: dict | None) -> None:
+        for section, values in (overlay or {}).items():
+            if isinstance(values, dict):
+                data.setdefault(section, {}).update(values)
+
     # Merge the web-edited overlay (config/settings.local.json, gitignored) over
-    # the tracked TOML. It sits ABOVE settings.toml but BELOW secrets.env/env
-    # (loaded next), so secrets — the database URL especially — stay in charge.
+    # the tracked TOML, then any per-worker overlay. Both sit ABOVE settings.toml
+    # but BELOW secrets.env/env (loaded next), so secrets — the database URL
+    # especially — stay in charge.
     overlay_file = cfg_dir / "settings.local.json"
     if overlay_file.exists():
         import json
 
         try:
-            overlay = json.loads(overlay_file.read_text(encoding="utf-8"))
+            _merge(json.loads(overlay_file.read_text(encoding="utf-8")))
         except (json.JSONDecodeError, OSError):
-            overlay = {}
-        for section, values in (overlay or {}).items():
-            if isinstance(values, dict):
-                data.setdefault(section, {}).update(values)
+            pass
+    _merge(extra_overlay)
 
     # Load gitignored env overrides first so they win over the tracked TOML.
     secrets = _load_secrets(cfg_dir)

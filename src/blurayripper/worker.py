@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import socket
 
-from .config import Settings
+from .config import Settings, load_settings
 from .persistence import (
     JobRecord,
     Store,
@@ -132,6 +133,7 @@ class WorkerRunner:
                 print(f"Cleaned up stale tool processes: {', '.join(killed)}", flush=True)
         from .version import get_version
         self._version = get_version()
+        self._apply_worker_settings()  # central per-worker override, if any
         print(f"Worker {self.worker_id} ready (v{self._version}) — polling for jobs…", flush=True)
         last_error = None
         while not self._stop:
@@ -149,10 +151,31 @@ class WorkerRunner:
                 await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
                 continue
             if rec is None:
-                self._register(None, "idle")  # heartbeat presence while idle
+                self._apply_worker_settings()  # pick up a central config change while idle
+                self._register(None, "idle")   # heartbeat presence while idle
                 await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
                 continue
+            self._apply_worker_settings()       # apply latest override before this job
             await self._process(rec)
+
+    def _apply_worker_settings(self) -> None:
+        """Pull this worker's central override from the store; if it changed,
+        reload settings and rebuild the pipeline so the NEXT job uses it (never
+        mid-encode). Safe on a DB blip — keeps the current settings."""
+        try:
+            overlay = self.store.get_worker_settings(self.worker_id)
+        except Exception:
+            return
+        sig = json.dumps(overlay, sort_keys=True)
+        if sig == getattr(self, "_wsettings_sig", None):
+            return
+        self._wsettings_sig = sig
+        self.settings = load_settings(self.settings.config_dir, extra_overlay=overlay or None)
+        self.pipeline = Pipeline(self.settings)
+        self.scheduler = EncodeScheduler(self.settings.queue.encode_capacity)
+        if overlay:
+            summary = ", ".join(f"{s}.{k}={v}" for s, kv in overlay.items() for k, v in kv.items())
+            print(f"Applied per-worker settings: {summary}", flush=True)
 
     def _register(self, job_id, stage: str) -> None:
         """Report this worker's presence to the store (for the UI's panel)."""
