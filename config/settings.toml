@@ -121,6 +121,10 @@ upload_export_dir = ""       # e.g. "./subtitle_uploads". env: BLURAYRIPPER_SUB_
 provider = "tmdb"
 language = "en-US"
 write_nfo = true   # write a Kodi/Plex .nfo sidecar next to each output video
+# Download the real poster + backdrop from TMDB and write them as poster.jpg /
+# fanart.jpg (overriding disc cover art, which is often generic menu graphics).
+# Needs TMDB_API_KEY. Set false to keep the disc's own art instead.
+fetch_artwork = true
 
 [web]
 # Web UI bind address. "127.0.0.1" = this machine only (default, safest).

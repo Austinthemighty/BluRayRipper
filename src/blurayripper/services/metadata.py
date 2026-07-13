@@ -8,10 +8,18 @@ must be entered fully by hand.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 
 _BASE = "https://api.themoviedb.org/3"
+# TMDB image CDN + the sizes we pull (portrait poster, landscape backdrop).
+_POSTER_URL = "https://image.tmdb.org/t/p/w780"
+_BACKDROP_URL = "https://image.tmdb.org/t/p/w1280"
+
+
+def _img(base: str, path: str | None) -> str | None:
+    return f"{base}{path}" if path else None
 
 
 @dataclass
@@ -20,6 +28,8 @@ class MovieCandidate:
     title: str
     year: int | None
     overview: str
+    poster_path: str | None = None
+    backdrop_path: str | None = None
 
 
 @dataclass
@@ -28,6 +38,8 @@ class ShowCandidate:
     name: str
     year: int | None
     overview: str
+    poster_path: str | None = None
+    backdrop_path: str | None = None
 
 
 @dataclass
@@ -43,6 +55,22 @@ def _year_from(date: str | None) -> int | None:
     if date and len(date) >= 4 and date[:4].isdigit():
         return int(date[:4])
     return None
+
+
+def _pick_art(candidates, title, year, name_attr):
+    """Choose the candidate whose title (+year) best matches, preferring an exact
+    title+year hit, then falling back to TMDB's own relevance order (first result)."""
+    if not candidates:
+        return (None, None)
+    want = (title or "").strip().lower()
+
+    def score(c):
+        exact_title = getattr(c, name_attr, "").strip().lower() == want
+        exact_year = year is not None and c.year == year
+        return (exact_title and exact_year, exact_title, exact_year)
+
+    best = max(candidates, key=score)
+    return (_img(_POSTER_URL, best.poster_path), _img(_BACKDROP_URL, best.backdrop_path))
 
 
 class MetadataError(RuntimeError):
@@ -80,6 +108,8 @@ class TMDBClient:
                 title=r.get("title") or r.get("original_title") or "",
                 year=_year_from(r.get("release_date")),
                 overview=r.get("overview", ""),
+                poster_path=r.get("poster_path"),
+                backdrop_path=r.get("backdrop_path"),
             )
             for r in data.get("results", [])
         ]
@@ -92,9 +122,30 @@ class TMDBClient:
                 name=r.get("name") or r.get("original_name") or "",
                 year=_year_from(r.get("first_air_date")),
                 overview=r.get("overview", ""),
+                poster_path=r.get("poster_path"),
+                backdrop_path=r.get("backdrop_path"),
             )
             for r in data.get("results", [])
         ]
+
+    async def movie_artwork(self, title: str, year: int | None) -> tuple[str | None, str | None]:
+        """(poster_url, backdrop_url) for the best movie match, or (None, None)."""
+        return _pick_art(await self.search_movie(title, year), title, year, "title")
+
+    async def tv_artwork(self, title: str, year: int | None) -> tuple[str | None, str | None]:
+        """(poster_url, backdrop_url) for the best show match, or (None, None)."""
+        return _pick_art(await self.search_tv(title), title, year, "name")
+
+    async def save_image(self, url: str, dest: Path) -> bool:
+        """Download an image URL to `dest` (creating parent dirs). No API key
+        needed for the image CDN. Returns True on success."""
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            dest = Path(dest)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(resp.content)
+        return True
 
     async def get_season(self, tv_id: int, season_number: int) -> list[Episode]:
         data = await self._get(f"/tv/{tv_id}/season/{season_number}", {})

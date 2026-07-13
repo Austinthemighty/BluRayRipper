@@ -24,6 +24,7 @@ from .models import DiscInfo, EpisodeAssignment, MediaKind
 from .scheduler import EncodeScheduler, encode_weight
 from .services import coverart, library, naming, nfo, os_upload
 from .services.mapping_store import MappingStore
+from .services.metadata import TMDBClient
 from .services.subtitles import looks_like_sdh
 from .version import get_version
 from .tools import discinfo
@@ -123,6 +124,7 @@ class Pipeline:
         self.subtitleedit = SubtitleEdit(settings)
         self.ffmpeg = FFmpeg(settings)
         self.dovitool = DoviTool(settings)
+        self.tmdb = TMDBClient(settings.tmdb_api_key, settings.metadata_language)
         self.mapping_store = MappingStore(settings.storage.output_dir / ".blurayripper" / "mappings.db")
         # Throttle concurrent subtitle extraction so a big batch (or a recovery
         # resume of many jobs) doesn't fire dozens of multi-GB NAS reads at once.
@@ -203,6 +205,7 @@ class Pipeline:
     ) -> None:
         assert job.disc is not None
         await self._place_cover_art(job, report)  # before any rip/eject
+        await self._place_tmdb_art(job, report)   # real poster/backdrop overrides disc art
         for title_id in job.selected_title_ids:
             assignment = job.assignments.get(title_id)
             if assignment is None:
@@ -223,8 +226,10 @@ class Pipeline:
         the rip box's serve doesn't kill that long NAS-bound work); the rip box
         then only rips and resolves grain."""
         assert job.disc is not None
-        # 0) Grab the disc's cover art while the disc is still in the drive.
+        # 0) Grab the disc's cover art while the disc is still in the drive,
+        #    then override it with the real TMDB poster/backdrop when we have a key.
         await self._place_cover_art(job, report)
+        await self._place_tmdb_art(job, report)
         # 1) Rip per title (sequential — one drive).
         todo: list[tuple[int, EpisodeAssignment, Path, Path]] = []
         for title_id in job.selected_title_ids:
@@ -1030,6 +1035,40 @@ class Pipeline:
                     report.on_event(f"Saved disc art → {folder.name}/{', '.join(placed)}")
             except Exception as exc:
                 report.on_event(f"Cover art skipped ({type(exc).__name__}: {exc}).")
+
+    async def _place_tmdb_art(self, job: Job, report) -> None:
+        """Fetch the real poster + backdrop from TMDB and write them as
+        poster.jpg / fanart.jpg, overriding disc art.
+
+        Disc cover art is often generic menu/studio graphics (and can repeat
+        across discs), so when a TMDB key is present its poster is authoritative.
+        Best-effort and idempotent; needs only the title + year, so it works for
+        disc-less file:/ sources too."""
+        if not self.settings.fetch_tmdb_artwork or not self.tmdb.configured:
+            return
+        seen: set[Path] = set()
+        for tid in job.selected_title_ids:
+            a = job.assignments.get(tid)
+            if a is None:
+                continue
+            folder = self._poster_folder(a)
+            if folder in seen:
+                continue
+            seen.add(folder)
+            try:
+                if a.kind is MediaKind.TV:
+                    poster_url, fanart_url = await self.tmdb.tv_artwork(a.show_or_movie_title, a.year)
+                else:
+                    poster_url, fanart_url = await self.tmdb.movie_artwork(a.show_or_movie_title, a.year)
+                wrote = []
+                if poster_url and await self.tmdb.save_image(poster_url, folder / "poster.jpg"):
+                    wrote.append("poster.jpg")
+                if fanart_url and await self.tmdb.save_image(fanart_url, folder / "fanart.jpg"):
+                    wrote.append("fanart.jpg")
+                if wrote:
+                    report.on_event(f"TMDB artwork → {folder.name}/{', '.join(wrote)}")
+            except Exception as exc:
+                report.on_event(f"TMDB artwork skipped ({type(exc).__name__}: {exc}).")
 
     def _video_path_for(self, a: EpisodeAssignment) -> Path:
         container = self.settings.encode.container
