@@ -90,6 +90,13 @@
   .worker:last-child{border-bottom:none;}
   .worker .wname, .worker .wsub{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   .worker .wsub{font-size:12px;}
+  /* Queue pagination bar */
+  .pager{display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:2px 0 12px; font-size:13px; color:#8b949e;}
+  .pager:empty{display:none;}
+  .pager select{padding:4px 6px;}
+  .pager .pbtn{background:#30363d; color:#e6edf3; border:0; border-radius:6px; padding:5px 10px; cursor:pointer; font-size:13px;}
+  .pager .pbtn:disabled{opacity:.4; cursor:default;}
+  .pager .pinfo{margin-left:auto; font-variant-numeric:tabular-nums;}
   /* Settings modal */
   #settings-modal{position:fixed; inset:0; background:rgba(1,4,9,.7); z-index:3000; display:none;
     align-items:flex-start; justify-content:center; overflow:auto; padding:24px;}
@@ -145,6 +152,7 @@
   </div>
   <div class="panel">
     <h2>Queue</h2>
+    <div id="pager" class="pager"></div>
     <div id="jobs"><span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span></div>
   </div>
 </div>
@@ -168,6 +176,8 @@
 <script>
 let TMDB_OK = true;
 let ARTV = 0;               // bumped on a manual artwork refresh to bust thumb caches
+let pageSize = localStorage.getItem('brr_pagesize') || '50';  // '25'|'50'|'100'|'200'|'all'
+let curPage = 0;            // current queue page (0-based)
 const renderedState = {};   // jobId -> last state we built a card for
 
 async function api(method, url, body) {
@@ -308,6 +318,7 @@ function renderStats(jobs){
   ).join('') + `<span class="stat" style="margin-left:auto;">Total <b>${jobs.length}</b></span>`;
   host.querySelectorAll('.stat[data-cat]').forEach(el => el.onclick = () => {
     jobFilter = (jobFilter === el.dataset.cat) ? null : el.dataset.cat;
+    curPage = 0;                                 // filtered set changed — back to page 1
     renderJobs._sig = '';                        // force a re-layout of the list
     if (renderJobs._lastSnap) renderJobs(renderJobs._lastSnap);
   });
@@ -351,23 +362,51 @@ function renderWorkers(workers){
   }).join('');
 }
 
+function renderPager(total, per, totalPages){
+  const el = document.getElementById('pager');
+  if (!el) return;
+  const from = total ? curPage * per + 1 : 0;
+  const to = Math.min(total, (curPage + 1) * per);
+  const opts = ['25','50','100','200','all'].map(v =>
+    `<option value="${v}"${v === String(pageSize) ? ' selected' : ''}>${v === 'all' ? 'All' : v}</option>`).join('');
+  const nav = totalPages > 1
+    ? `<button class="pbtn" data-prev${curPage <= 0 ? ' disabled' : ''}>‹ Prev</button>` +
+      `<span>Page ${curPage + 1} / ${totalPages}</span>` +
+      `<button class="pbtn" data-next${curPage >= totalPages - 1 ? ' disabled' : ''}>Next ›</button>`
+    : '';
+  const html = `<label>Per page <select data-size>${opts}</select></label>${nav}` +
+    `<span class="pinfo">${total ? `${from}–${to} of ${total}` : '0'} job${total === 1 ? '' : 's'}</span>`;
+  if (el._sig === html) return;   // don't rebuild each SSE tick (would drop an open dropdown)
+  el._sig = html;
+  el.innerHTML = html;
+  const go = () => { renderJobs._sig = ''; if (renderJobs._lastSnap) renderJobs(renderJobs._lastSnap); };
+  el.querySelector('[data-size]').onchange = (e) => {
+    pageSize = e.target.value; localStorage.setItem('brr_pagesize', pageSize); curPage = 0; go();
+  };
+  const prev = el.querySelector('[data-prev]'); if (prev) prev.onclick = () => { curPage = Math.max(0, curPage - 1); go(); };
+  const next = el.querySelector('[data-next]'); if (next) next.onclick = () => { curPage = curPage + 1; go(); window.scrollTo({top:0, behavior:'smooth'}); };
+}
+
 function renderJobs(snap) {
   renderJobs._lastSnap = snap;
   const host = document.getElementById('jobs');
   if (snap.version) { const v = document.getElementById('ver'); if (v) v.textContent = 'v' + snap.version; }
   renderStats(snap.jobs || []);           // counts always reflect ALL jobs
   renderWorkers(snap.workers || []);
-  if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); renderJobs._sig = ''; renderJobs._known = new Set(); renderBulkBar(0); return; }
+  if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); renderJobs._sig = ''; renderJobs._known = new Set(); renderBulkBar(0); const pg = document.getElementById('pager'); if (pg){ pg.innerHTML=''; pg._sig=''; } return; }
   const ph = document.getElementById('placeholder'); if (ph) ph.remove();
   const allJobs = [...snap.jobs].filter(j => !jobFilter || catOf(j.state)===jobFilter)
                                 .sort((a,b) => jobRank(a)-jobRank(b) || a.id-b.id);
   renderBulkBar(allJobs.length);
-  // Cap how many cards we render — 150+ heavy cards (logs, live SSE, thumbnails)
-  // crash phones. The sort puts active/needs-you jobs first, so the cap only
-  // hides the queued/done tail; use the filters to reach a specific one.
-  const MAX_CARDS = 50;
-  const jobs = allJobs.slice(0, MAX_CARDS);
-  const overflow = allJobs.length - jobs.length;
+  // Paginate — rendering 150+ heavy cards (logs, live SSE, thumbnails) at once
+  // crashes phones. The sort puts active/needs-you jobs first, so page 1 is the
+  // one that matters; use the per-page selector or filters to reach the rest.
+  const total = allJobs.length;
+  const per = pageSize === 'all' ? Math.max(total, 1) : (parseInt(pageSize) || 50);
+  const totalPages = Math.max(1, Math.ceil(total / per));
+  curPage = Math.min(Math.max(0, curPage), totalPages - 1);
+  const jobs = allJobs.slice(curPage * per, curPage * per + per);
+  renderPager(total, per, totalPages);
   const seen = new Set();
   for (const j of jobs) {
     seen.add(j.id);
@@ -421,14 +460,6 @@ function renderJobs(snap) {
     }
     const card = document.getElementById('job-'+j.id);
     if (card) host.appendChild(card);
-  }
-  const oldFoot = document.getElementById('overflow-note'); if (oldFoot) oldFoot.remove();
-  if (overflow > 0){
-    const foot = document.createElement('div');
-    foot.id = 'overflow-note'; foot.className = 'muted';
-    foot.style.cssText = 'padding:12px 2px;font-size:13px;';
-    foot.textContent = `… and ${overflow} more not shown. Tap a stat above to filter (e.g. Failed), or narrow the queue.`;
-    host.appendChild(foot);
   }
   // Flash + scroll to any newly-appeared job so an added/auto-opened disc is
   // obvious — they land in the Queued group and are otherwise easy to miss.
