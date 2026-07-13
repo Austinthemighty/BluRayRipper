@@ -623,6 +623,33 @@ class Pipeline:
         return await self._process_after_rip(
             job, title_id, assignment, staging_root, ripped_mkv, scheduler, report)
 
+    async def _verify_rip_duration(self, job: Job, title_id: int, ripped_mkv: Path, report) -> None:
+        """Reject a rip whose runtime is much shorter than the disc title — the
+        signature of a truncated rip (bad sectors) that MakeMKV still exited 0 on.
+        Best-effort: skips silently if the tolerance is off, the expected duration
+        is unknown, or the probe fails (never blocks on the check itself)."""
+        tol_pct = self.settings.rip_duration_tolerance_pct
+        if tol_pct <= 0:
+            return
+        title = job.disc.title(title_id) if job.disc else None
+        expected = title.duration_seconds if title else 0
+        if expected <= 0:
+            return  # scan didn't report a duration — nothing to compare against
+        try:
+            actual = (await self.mkvtools.probe(ripped_mkv)).duration_seconds
+        except Exception as exc:
+            report.on_event(f"Rip duration check skipped ({type(exc).__name__}: {exc}).")
+            return
+        if actual <= 0:
+            return
+        floor = expected * (100 - tol_pct) // 100
+        if actual < floor:
+            raise RuntimeError(
+                f"Rip of title {title_id} is {actual}s but the disc title is "
+                f"{expected}s ({actual * 100 // expected}%) — looks truncated "
+                f"(disc read error?). Not keeping it; will re-rip.")
+        report.on_event(f"Rip verified: {actual}s vs disc {expected}s.")
+
     async def _ensure_ripped(self, job: Job, title_id: int, staging_root: Path, report) -> Path:
         """Rip the title, or reuse a prior run's ripped file. Ejects after the
         last rip. Returns the ripped .mkv path."""
@@ -650,6 +677,10 @@ class Pipeline:
             if not ripped:
                 raise RuntimeError(f"MakeMKV produced no output for title {title_id}.")
             ripped_mkv = ripped[0]
+            # Guard against a truncated rip that MakeMKV still exited 0 on (disc
+            # read errors): only checkpoint once the output's runtime matches the
+            # disc title. A short file raises here, so it isn't reused — it re-rips.
+            await self._verify_rip_duration(job, title_id, ripped_mkv, report)
             cp["ripped_path"] = _rel_path(staging_dir, ripped_mkv)
             did_rip = True
             _checkpoint(report)

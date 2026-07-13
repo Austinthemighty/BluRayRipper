@@ -267,6 +267,10 @@ class Settings:
     # Copy the disc's own cover art (BDMV/META or DVD JACKET_P) to the output
     # folder as poster.jpg for Plex. Read before ripping (disc still in the drive).
     extract_cover_art: bool = True
+    # After a rip, reject the output if it runs shorter than the disc title by
+    # more than this percent — MakeMKV can exit 0 on a truncated rip when the disc
+    # has read errors. The short file is NOT checkpointed, so it re-rips. 0 = off.
+    rip_duration_tolerance_pct: int = 3
     # At serve startup, kill leftover tool processes (SubtitleEdit/MakeMKV/
     # HandBrake) orphaned by a prior crash or power-off, before any jobs run.
     cleanup_stale_tools: bool = True
@@ -479,6 +483,7 @@ def load_settings(config_dir: Path | None = None, extra_overlay: dict | None = N
         auto_open=bool(disc_cfg.get("auto_open", True)),
         drive_poll_seconds=int(disc_cfg.get("poll_seconds", 15)),
         extract_cover_art=bool(disc_cfg.get("extract_cover_art", True)),
+        rip_duration_tolerance_pct=int(disc_cfg.get("rip_duration_tolerance_pct", 3)),
         cleanup_stale_tools=bool(serve_cfg.get("cleanup_stale_tools", True)),
         prep_concurrency=int(serve_cfg.get("prep_concurrency", 2)),
         auto_retry_max=int(serve_cfg.get("auto_retry_max", 2)),
