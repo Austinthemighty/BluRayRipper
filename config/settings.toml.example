@@ -118,6 +118,10 @@ poll_seconds = 15                       # how often the drive watcher checks for
 # Copy the disc's own cover art (Blu-ray BDMV/META or DVD JACKET_P) to the movie
 # folder as poster.jpg for Plex, read before ripping (disc still in the drive).
 extract_cover_art = true
+# After a rip, reject the output if it runs shorter than the disc title by more
+# than this percent — MakeMKV can exit 0 on a truncated rip when a disc has read
+# errors. A rejected rip isn't checkpointed, so it re-rips. 0 disables the check.
+rip_duration_tolerance_pct = 3
 
 [queue]
 # Encode "budget" for concurrent encodes. A UHD (2160p) encode costs 2 units,

@@ -101,6 +101,9 @@ SCHEMA: list[tuple[str, list[Field]]] = [
         Field("disc", "auto_open", "bool", "Auto-scan on insert", True),
         Field("disc", "poll_seconds", "int", "Drive poll (s)", 15),
         Field("disc", "extract_cover_art", "bool", "Extract disc cover art", True),
+        Field("disc", "rip_duration_tolerance_pct", "int", "Rip duration tolerance (%)", 3,
+              "Re-rip if the output runs shorter than the disc title by more than this "
+              "(catches truncated rips from disc read errors). 0 = off."),
     ]),
     ("Serve", [
         Field("serve", "cleanup_stale_tools", "bool", "Clean up stale tools at startup", True),
