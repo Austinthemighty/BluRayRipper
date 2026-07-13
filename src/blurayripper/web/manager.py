@@ -676,8 +676,10 @@ class JobManager:
         )
         if not refs:
             raise RuntimeError(
-                "Could not fetch any reference subtitles from OpenSubtitles for "
-                "these episodes — check the show/season and your API key.")
+                "OpenSubtitles returned no subtitles for these episodes "
+                f"(show {wj.show_title!r} S{wj.season} E{wj.candidate_episodes}). "
+                "The show/season may be mismatched, or these episodes aren't on "
+                "OpenSubtitles — fix the show or map episodes manually.")
         matches = identify(rips, refs)
         wj.match_candidates = [
             {"title_id": m.title_id, "episode": m.episode, "score": round(m.score, 3),

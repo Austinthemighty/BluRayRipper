@@ -19,22 +19,38 @@ _UA = "BluRayRipper/1.0"
 
 
 class OpenSubtitlesError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, fatal: bool = False) -> None:
+        super().__init__(message)
+        # A "fatal" error (bad key / exhausted quota) fails EVERY episode the same
+        # way, so there's no point trying the rest — surface it and stop.
+        self.fatal = fatal
 
 
 async def gather_references(
     client, show_tmdb_id: int, season: int, episodes: list[int], language: str = "en"
 ) -> dict[int, str]:
-    """Fetch reference SRT text for each candidate episode. Missing/failed
-    episodes are simply omitted (matching degrades gracefully without them)."""
+    """Fetch reference SRT text for each candidate episode.
+
+    A per-episode miss (no subs for that episode) is omitted so matching degrades
+    gracefully. But if NOTHING could be fetched, raise the real reason (quota /
+    bad key / no results) instead of returning an empty dict that hides why."""
     refs: dict[int, str] = {}
+    last_error: Exception | None = None
     for ep in episodes:
         try:
             text = await client.fetch_episode_srt(show_tmdb_id, season, ep, language)
-        except Exception:
+        except OpenSubtitlesError as exc:
+            last_error = exc
+            text = None
+            if exc.fatal:  # same failure for every episode — don't hammer the API
+                break
+        except Exception as exc:
+            last_error = exc
             text = None
         if text:
             refs[ep] = text
+    if not refs and last_error is not None:
+        raise OpenSubtitlesError(str(last_error), fatal=getattr(last_error, "fatal", False))
     return refs
 
 
@@ -131,33 +147,58 @@ class OpenSubtitlesClient:
         cache_path = self._cache_path(parent_tmdb_id, season, episode, language)
         if cache_path and cache_path.exists():
             return cache_path.read_text(encoding="utf-8", errors="replace")
-        async with httpx.AsyncClient(timeout=30) as client:
-            await self._login(client)
-            search = await client.get(
-                f"{_BASE}/subtitles",
-                headers=self._headers(),
-                params={
-                    "parent_tmdb_id": parent_tmdb_id,
-                    "season_number": season,
-                    "episode_number": episode,
-                    "languages": language,
-                    "order_by": "download_count",
-                },
-            )
-            search.raise_for_status()
-            file_id = best_file_id(search.json().get("data", []), language=language)
-            if file_id is None:
-                return None
-            dl = await client.post(
-                f"{_BASE}/download", headers=self._headers(), json={"file_id": file_id}
-            )
-            dl.raise_for_status()
-            link = dl.json().get("link")
-            if not link:
-                return None
-            srt = await client.get(link, headers={"User-Agent": _UA})
-            srt.raise_for_status()
-            if cache_path:
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                cache_path.write_text(srt.text, encoding="utf-8")
-            return srt.text
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                await self._login(client)
+                search = await client.get(
+                    f"{_BASE}/subtitles",
+                    headers=self._headers(),
+                    params={
+                        "parent_tmdb_id": parent_tmdb_id,
+                        "season_number": season,
+                        "episode_number": episode,
+                        "languages": language,
+                        "order_by": "download_count",
+                    },
+                )
+                search.raise_for_status()
+                file_id = best_file_id(search.json().get("data", []), language=language)
+                if file_id is None:
+                    return None  # no subs for this episode — not an error
+                dl = await client.post(
+                    f"{_BASE}/download", headers=self._headers(), json={"file_id": file_id}
+                )
+                dl.raise_for_status()
+                body = dl.json()
+                link = body.get("link")
+                if not link:
+                    # Over-quota can come back 200 with a message and no link.
+                    msg = (body.get("message") or "").lower()
+                    if "download" in msg or "quota" in msg:
+                        raise OpenSubtitlesError(
+                            f"OpenSubtitles download quota reached: {body.get('message')}",
+                            fatal=True)
+                    return None
+                srt = await client.get(link, headers={"User-Agent": _UA})
+                srt.raise_for_status()
+                if cache_path:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    cache_path.write_text(srt.text, encoding="utf-8")
+                return srt.text
+        except httpx.HTTPStatusError as exc:
+            raise self._classify_http_error(exc) from exc
+
+    @staticmethod
+    def _classify_http_error(exc: "httpx.HTTPStatusError") -> "OpenSubtitlesError":
+        code = exc.response.status_code
+        if code in (401, 403):
+            return OpenSubtitlesError(
+                f"OpenSubtitles rejected the request (HTTP {code}) — check "
+                "OPENSUBTITLES_API_KEY (and username/password) in secrets.env.",
+                fatal=True)
+        if code in (406, 429):
+            return OpenSubtitlesError(
+                f"OpenSubtitles daily download quota exhausted (HTTP {code}) — it "
+                "resets each day. The titles are ripped; retry later or map episodes "
+                "manually.", fatal=True)
+        return OpenSubtitlesError(f"OpenSubtitles request failed (HTTP {code}).")
