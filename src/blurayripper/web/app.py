@@ -368,20 +368,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def opensubtitles_quota():
         if not manager.osub.configured:
             return {"configured": False}
+        # Preferred: /infos/user (needs /login, which some API keys can't use).
         try:
             info = await manager.osub.user_info()
-        except OpenSubtitlesError as exc:
+            return {
+                "configured": True, "source": "account",
+                "remaining": info.get("remaining_downloads"),
+                "allowed": info.get("allowed_downloads"),
+                "used": info.get("downloads_count"),
+                "level": info.get("level"), "vip": info.get("vip"),
+            }
+        except Exception as exc:
+            # Fall back to what the last /download reported (API-key auth — always
+            # available to us). Populated after the first reference download.
+            last = manager.osub.last_known_quota()
+            if last is not None:
+                return {
+                    "configured": True, "source": "last-download",
+                    "remaining": last.get("remaining"),
+                    "reset_time": last.get("reset_time_utc") or last.get("reset_time"),
+                    "note": str(exc),
+                }
             return {"configured": True, "error": str(exc)}
-        except Exception as exc:  # network/HTTP
-            return {"configured": True, "error": f"{type(exc).__name__}: {exc}"}
-        return {
-            "configured": True,
-            "remaining": info.get("remaining_downloads"),
-            "allowed": info.get("allowed_downloads"),
-            "used": info.get("downloads_count"),
-            "level": info.get("level"),
-            "vip": info.get("vip"),
-        }
 
     @app.get("/api/settings")
     async def get_settings(scope: str = "global"):

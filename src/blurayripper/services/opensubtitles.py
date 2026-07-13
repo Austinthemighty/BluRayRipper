@@ -92,6 +92,7 @@ class OpenSubtitlesClient:
         self._username = username
         self._password = password
         self._token: str | None = None
+        self._last_quota: dict | None = None  # last quota snapshot from /download
         # Reference SRTs are cached to disk so re-running identification (or the
         # same episode appearing on another disc) never re-spends the daily
         # /download quota. Only the killer call — /download — is skipped on a hit.
@@ -194,11 +195,13 @@ class OpenSubtitlesClient:
                 )
                 dl.raise_for_status()
                 body = dl.json()
+                self._remember_quota(body)  # /download reports remaining + reset
                 link = body.get("link")
                 if not link:
                     # Over-quota can come back 200 with a message and no link.
                     msg = (body.get("message") or "").lower()
                     if "download" in msg or "quota" in msg:
+                        self._remember_quota(body, exhausted=True)
                         raise OpenSubtitlesError(
                             f"OpenSubtitles download quota reached: {body.get('message')}",
                             fatal=True)
@@ -210,7 +213,27 @@ class OpenSubtitlesClient:
                     cache_path.write_text(srt.text, encoding="utf-8")
                 return srt.text
         except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (406, 429):  # quota — capture the reset time
+                try:
+                    self._remember_quota(exc.response.json(), exhausted=True)
+                except Exception:
+                    self._last_quota = {"remaining": 0}
             raise self._classify_http_error(exc) from exc
+
+    def _remember_quota(self, body: dict, *, exhausted: bool = False) -> None:
+        """Record the download-quota fields OpenSubtitles returns on /download, so
+        the UI can show them without needing /login (which some API keys can't)."""
+        self._last_quota = {
+            "remaining": 0 if exhausted else body.get("remaining"),
+            "requests": body.get("requests"),
+            "reset_time": body.get("reset_time"),
+            "reset_time_utc": body.get("reset_time_utc"),
+        }
+
+    def last_known_quota(self) -> dict | None:
+        """The most recent quota snapshot captured from a /download response, or
+        None if no download has happened this run."""
+        return self._last_quota
 
     async def user_info(self) -> dict:
         """Fetch the account's download-quota info from /infos/user.

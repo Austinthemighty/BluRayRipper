@@ -1018,10 +1018,17 @@ async function renderOsQuota(){
   catch(e){ el.textContent = ''; return; }
   if (!q || q.configured === false){ el.textContent = 'OpenSubtitles: no API key configured.'; return; }
   if (q.error){ el.style.color = '#e3b341'; el.textContent = 'OpenSubtitles quota: ' + q.error; return; }
-  const rem = q.remaining, allowed = q.allowed;
+  const rem = q.remaining;
   el.style.color = (rem === 0) ? '#f85149' : (rem != null && rem <= 5 ? '#e3b341' : '#3fb950');
-  el.textContent = `OpenSubtitles: ${rem == null ? '?' : rem} of ${allowed == null ? '?' : allowed} downloads left today`
-    + (q.vip ? ' (VIP)' : '') + (rem === 0 ? ' — TV auto-identify will fail until it resets.' : '');
+  let txt;
+  if (q.source === 'account') {
+    txt = `OpenSubtitles: ${rem == null ? '?' : rem} of ${q.allowed == null ? '?' : q.allowed} downloads left today`
+      + (q.vip ? ' (VIP)' : '');
+  } else {  // captured from the last /download (login unavailable for this key)
+    txt = `OpenSubtitles: ${rem == null ? '?' : rem} downloads left (as of your last reference download)`;
+  }
+  if (rem === 0) txt += q.reset_time ? ` — resets ${q.reset_time}.` : ' — resets daily; retry then or map manually.';
+  el.textContent = txt;
 }
 function closeSettings(){ document.getElementById('settings-modal').classList.remove('open'); }
 async function saveSettings(){

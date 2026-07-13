@@ -140,3 +140,15 @@ async def test_login_stores_token_on_success():
     c = OpenSubtitlesClient("key", "user", "pw")
     await c._login(_Client(_Resp(200, {"token": "abc"})), required=True)
     assert c._token == "abc"
+
+
+def test_remember_quota_captures_download_response():
+    from blurayripper.services.opensubtitles import OpenSubtitlesClient
+    c = OpenSubtitlesClient("key")
+    assert c.last_known_quota() is None
+    c._remember_quota({"remaining": 87, "requests": 13, "reset_time_utc": "2026-07-14T04:10:00Z"})
+    assert c.last_known_quota()["remaining"] == 87
+    # over-quota records 0 remaining but keeps the reset time
+    c._remember_quota({"requests": 100, "reset_time_utc": "2026-07-14T04:10:00Z"}, exhausted=True)
+    q = c.last_known_quota()
+    assert q["remaining"] == 0 and q["reset_time_utc"] == "2026-07-14T04:10:00Z"
