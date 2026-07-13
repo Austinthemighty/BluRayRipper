@@ -145,8 +145,12 @@ worker_does_subs = false
 
 [metadata]
 # provider is currently always TMDB (set the key as TMDB_API_KEY in secrets.env).
-language = "en-US"
-write_nfo = true   # write a Kodi/Plex .nfo sidecar next to each output video                       # metadata language/region for TMDB lookups
+language = "en-US"                       # metadata language/region for TMDB lookups
+write_nfo = true                         # write a Kodi/Plex .nfo sidecar next to each output video
+# Download the real poster + backdrop from TMDB and write them as poster.jpg /
+# fanart.jpg, overriding disc cover art (often generic menu/studio graphics, and
+# can repeat across discs). Needs TMDB_API_KEY. false = keep the disc's own art.
+fetch_artwork = true
 
 [web]
 # UI bind address. "127.0.0.1" = this machine only (safest). "0.0.0.0" = reachable

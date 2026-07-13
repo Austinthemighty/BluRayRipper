@@ -114,6 +114,8 @@ SCHEMA: list[tuple[str, list[Field]]] = [
     ("Metadata", [
         Field("metadata", "language", "str", "Metadata language", "en-US"),
         Field("metadata", "write_nfo", "bool", "Write .nfo sidecars", True),
+        Field("metadata", "fetch_artwork", "bool", "Fetch poster/backdrop from TMDB", True,
+              "Downloads the real poster + backdrop, overriding disc art (needs a TMDB key)."),
     ]),
     ("Web", [
         Field("web", "host", "str", "Bind host", "127.0.0.1", "0.0.0.0 = reachable on the LAN (no login!)."),

@@ -286,6 +286,9 @@ class Settings:
     tmdb_api_key: str | None = None
     metadata_language: str = "en-US"
     write_nfo: bool = True  # write a Kodi/Plex .nfo sidecar next to each output
+    # Download the real poster + backdrop from TMDB and write them as poster.jpg /
+    # fanart.jpg, overriding disc art (which is often generic menu graphics).
+    fetch_tmdb_artwork: bool = True
     opensubtitles_api_key: str | None = None
     opensubtitles_username: str | None = None
     opensubtitles_password: str | None = None
@@ -478,6 +481,7 @@ def load_settings(config_dir: Path | None = None) -> Settings:
         tmdb_api_key=secrets.get("TMDB_API_KEY") or None,
         metadata_language=meta_cfg.get("language", "en-US"),
         write_nfo=bool(meta_cfg.get("write_nfo", True)),
+        fetch_tmdb_artwork=bool(meta_cfg.get("fetch_artwork", True)),
         opensubtitles_api_key=secrets.get("OPENSUBTITLES_API_KEY") or None,
         opensubtitles_username=secrets.get("OPENSUBTITLES_USERNAME") or None,
         opensubtitles_password=secrets.get("OPENSUBTITLES_PASSWORD") or None,
