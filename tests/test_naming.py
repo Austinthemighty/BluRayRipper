@@ -66,3 +66,27 @@ def test_subtitle_sidecar_forced_sdh_and_index_dont_collide():
 def test_subtitle_lang_suffix_fallback():
     assert naming.subtitle_lang_suffix("eng") == "en"
     assert naming.subtitle_lang_suffix("xyz") == "xyz"  # unknown -> passthrough
+
+
+def test_clean_tmdb_query_strips_tv_disc_noise():
+    from blurayripper.services.naming import clean_tmdb_query
+    assert clean_tmdb_query("Silicon Valley Season 2 Disc 1", "tv") == ("Silicon Valley", None, 2)
+    assert clean_tmdb_query("Game of Thrones S01 Disc 3", "tv") == ("Game of Thrones", None, 1)
+    assert clean_tmdb_query("Friends Season 10 Volume 2", "tv") == ("Friends", None, 10)
+    assert clean_tmdb_query("The Office Complete Series Disc 5", "tv") == ("The Office", None, None)
+    # Year anywhere in the string is pulled out, not just trailing.
+    assert clean_tmdb_query("Breaking Bad (2008) Season 4 Disc 2", "tv") == ("Breaking Bad", 2008, 4)
+    # A clean show name is left alone.
+    assert clean_tmdb_query("Silicon Valley", "tv") == ("Silicon Valley", None, None)
+
+
+def test_clean_tmdb_query_preserves_movie_titles():
+    from blurayripper.services.naming import clean_tmdb_query
+    # "Vol"/"Part" are real movie-title words — must NOT be stripped.
+    assert clean_tmdb_query("Guardians of the Galaxy Vol. 3", "movie") == (
+        "Guardians of the Galaxy Vol. 3", None, None)
+    assert clean_tmdb_query("Kill Bill: Vol. 1", "movie") == ("Kill Bill: Vol. 1", None, None)
+    assert clean_tmdb_query("Dune: Part Two (2024)", "movie") == ("Dune: Part Two", 2024, None)
+    assert clean_tmdb_query("WarGames (1983)", "movie") == ("WarGames", 1983, None)
+    # A trailing number that isn't a descriptor stays put.
+    assert clean_tmdb_query("Ocean's 11", "movie") == ("Ocean's 11", None, None)
