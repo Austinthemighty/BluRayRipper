@@ -663,3 +663,34 @@ async def test_active_jobs_flags_only_live_local_tasks(manager):
     finally:
         for t in live:
             t.cancel()
+
+
+def test_source_disc_missing_uses_drive_cache(manager):
+    from blurayripper.tools.makemkv import Drive
+    wj = WebJob(id=401, source="disc:0", state=JobState.FAILED)
+    # No disc in the drive -> missing
+    manager._drives_cache = [Drive(0, "ASUS", "E:", None)]
+    assert manager._source_disc_missing(wj) is True
+    # Disc present (even if only the OS saw it) -> not missing
+    manager._drives_cache = [Drive(0, "ASUS", "E:", "SILICON_VALLEY_S2_DISC1", os_detected=True)]
+    assert manager._source_disc_missing(wj) is False
+    # Non-disc sources (file:/iso:) never count as "disc missing"
+    assert manager._source_disc_missing(WebJob(id=402, source="file:/x.mkv")) is False
+
+
+async def test_auto_retry_skipped_when_disc_missing(manager):
+    from blurayripper.tools.makemkv import Drive
+    manager.settings.auto_retry_max = 2
+    wj = WebJob(id=403, source="disc:0", state=JobState.FAILED, error="rip failed")
+    manager.jobs[403] = wj
+    manager._drives_cache = [Drive(0, "ASUS", "E:", None)]   # empty drive
+    manager._schedule_auto_retry(wj)
+    assert manager._auto_retries.get(403, 0) == 0            # no retry scheduled
+    assert any("reinsert" in l.lower() for l in wj.log)
+
+    # With the disc present, a retry IS scheduled.
+    wj2 = WebJob(id=404, source="disc:0", state=JobState.FAILED, error="rip failed")
+    manager.jobs[404] = wj2
+    manager._drives_cache = [Drive(0, "ASUS", "E:", "DISC")]
+    manager._schedule_auto_retry(wj2)
+    assert manager._auto_retries.get(404, 0) == 1
