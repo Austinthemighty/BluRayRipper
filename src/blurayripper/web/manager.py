@@ -468,6 +468,25 @@ class JobManager:
         ]
         return {"jobs": jobs, "version": get_version(), "workers": workers}
 
+    async def refresh_artwork(self, job_id: int) -> int:
+        """Re-fetch TMDB poster/backdrop for one job, overwriting its folder art."""
+        wj = self.jobs.get(job_id)
+        if wj is None or not wj.assignments:
+            return 0
+        n = await self.pipeline.place_tmdb_art(list(wj.assignments.values()), _Reporter(self, wj))
+        self.bus.publish()
+        return n
+
+    async def refresh_all_artwork(self) -> int:
+        """Re-fetch TMDB art for every job that has a naming assignment."""
+        total = 0
+        for wj in list(self.jobs.values()):
+            if wj.assignments:
+                total += await self.pipeline.place_tmdb_art(
+                    list(wj.assignments.values()), _Reporter(self, wj))
+        self.bus.publish()
+        return total
+
     def active_jobs(self) -> list[dict]:
         """Jobs THIS process is actively working on right now, i.e. holding a live
         local task (a rip/encode/OCR/placing coroutine still running here).

@@ -1037,18 +1037,24 @@ class Pipeline:
                 report.on_event(f"Cover art skipped ({type(exc).__name__}: {exc}).")
 
     async def _place_tmdb_art(self, job: Job, report) -> None:
-        """Fetch the real poster + backdrop from TMDB and write them as
-        poster.jpg / fanart.jpg, overriding disc art.
+        """Prep-time hook: place TMDB art for the job's selected titles."""
+        assignments = [job.assignments[t] for t in job.selected_title_ids
+                       if t in job.assignments]
+        await self.place_tmdb_art(assignments, report)
 
-        Disc cover art is often generic menu/studio graphics (and can repeat
-        across discs), so when a TMDB key is present its poster is authoritative.
-        Best-effort and idempotent; needs only the title + year, so it works for
-        disc-less file:/ sources too."""
+    async def place_tmdb_art(self, assignments, report) -> int:
+        """Fetch the real poster + backdrop from TMDB and write them as
+        poster.jpg / fanart.jpg for each assignment's folder, OVERRIDING whatever
+        art is there (disc menu graphics, a stale/wrong poster from a prior tool,
+        etc.). Matches by title + year like naming, so it needs no disc and fixes
+        already-placed titles too. Returns how many folders got fresh art.
+
+        Best-effort: any single title's failure is logged and skipped."""
         if not self.settings.fetch_tmdb_artwork or not self.tmdb.configured:
-            return
+            return 0
+        placed = 0
         seen: set[Path] = set()
-        for tid in job.selected_title_ids:
-            a = job.assignments.get(tid)
+        for a in assignments:
             if a is None:
                 continue
             folder = self._poster_folder(a)
@@ -1062,13 +1068,29 @@ class Pipeline:
                     poster_url, fanart_url = await self.tmdb.movie_artwork(a.show_or_movie_title, a.year)
                 wrote = []
                 if poster_url and await self.tmdb.save_image(poster_url, folder / "poster.jpg"):
+                    self._drop_stale_art(folder, "poster")  # remove wrong-ext leftovers
                     wrote.append("poster.jpg")
                 if fanart_url and await self.tmdb.save_image(fanart_url, folder / "fanart.jpg"):
+                    self._drop_stale_art(folder, "fanart")
                     wrote.append("fanart.jpg")
                 if wrote:
+                    placed += 1
                     report.on_event(f"TMDB artwork → {folder.name}/{', '.join(wrote)}")
             except Exception as exc:
                 report.on_event(f"TMDB artwork skipped ({type(exc).__name__}: {exc}).")
+        return placed
+
+    @staticmethod
+    def _drop_stale_art(folder: Path, base: str) -> None:
+        """Remove same-name art in other extensions so the fresh .jpg is the only
+        one Plex / the UI can pick up (we always write .jpg)."""
+        for ext in (".jpeg", ".png"):
+            stale = folder / f"{base}{ext}"
+            if stale.exists():
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
 
     def _video_path_for(self, a: EpisodeAssignment) -> Path:
         container = self.settings.encode.container

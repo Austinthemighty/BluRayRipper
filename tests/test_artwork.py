@@ -1,4 +1,6 @@
 """TMDB artwork selection + placement (poster/fanart override of disc art)."""
+from pathlib import Path
+
 import pytest
 
 from blurayripper.models import EpisodeAssignment, MediaKind
@@ -88,3 +90,35 @@ async def test_place_tmdb_art_noop_without_key(tmp_path, monkeypatch):
         def on_progress(self, *a): pass
     await pipe._place_tmdb_art(job, R())
     assert not called   # short-circuits before any TMDB call
+
+
+async def test_place_tmdb_art_drops_stale_wrong_ext(tmp_path, monkeypatch):
+    """When it writes poster.jpg, a stale poster.png (wrong movie's art) is removed
+    so the correct .jpg is the only poster the UI/Plex can pick up."""
+    from blurayripper.config import load_settings
+    from blurayripper.pipeline import Pipeline
+    from blurayripper.models import EpisodeAssignment, MediaKind
+
+    settings = load_settings()
+    monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    monkeypatch.setattr(settings, "tmdb_api_key", "fake")
+    pipe = Pipeline(settings)
+
+    a = EpisodeAssignment(0, MediaKind.MOVIE, "WarGames", 1983)
+    folder = pipe._poster_folder(a)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "poster.png").write_bytes(b"WRONG-MOVIE-ART")   # pre-existing wrong art
+
+    async def fake_movie_artwork(t, y): return ("https://img/p.jpg", None)
+    async def fake_save(url, dest):
+        Path(dest).write_bytes(b"RIGHT"); return True
+    monkeypatch.setattr(pipe.tmdb, "movie_artwork", fake_movie_artwork)
+    monkeypatch.setattr(pipe.tmdb, "save_image", fake_save)
+
+    class R:
+        def on_event(self, m): pass
+        def on_progress(self, *a): pass
+    n = await pipe.place_tmdb_art([a], R())
+    assert n == 1
+    assert (folder / "poster.jpg").read_bytes() == b"RIGHT"
+    assert not (folder / "poster.png").exists()   # stale wrong-ext art removed

@@ -117,6 +117,7 @@
   <span class="cap" id="ver" title="Running version (git commit count + hash). Compare across machines to spot stale code."></span>
   <span class="cap" id="cap"></span>
   <button class="sec" id="redoall" style="margin-left:auto;" title="Re-OCR subtitles for every job that has names assigned (uses staged/cached subs; no re-encode).">Re-OCR all subtitles</button>
+  <button class="sec" id="refreshart" title="Re-fetch the real poster + backdrop from TMDB for every named job, overwriting wrong/generic art in each folder.">Refresh artwork</button>
   <label class="cap"><input type="checkbox" id="autoconfirm"> Auto-confirm single matches</label>
   <button class="sec" id="opensettings" title="Edit server settings (saved to config/settings.local.json; applied on next restart).">⚙ Settings</button>
 </header>
@@ -166,6 +167,7 @@
 
 <script>
 let TMDB_OK = true;
+let ARTV = 0;               // bumped on a manual artwork refresh to bust thumb caches
 const renderedState = {};   // jobId -> last state we built a card for
 
 async function api(method, url, body) {
@@ -450,7 +452,7 @@ function renderedStateClear(){ for(const k of Object.keys(renderedState)) delete
 function cardHtml(j){
   return `<div class="top">
       <div style="display:flex;gap:8px;align-items:center;min-width:0;">
-        <img class="thumb" loading="lazy" src="/api/jobs/${j.id}/artwork?t=${j.state}" onerror="this.remove()" alt="">
+        <img class="thumb" loading="lazy" src="/api/jobs/${j.id}/artwork?t=${j.state}&v=${ARTV}" onerror="this.remove()" alt="">
         <div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><b>${j.disc_name || j.source}</b> <span class="muted">#${j.id}</span></div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-shrink:0;">
@@ -867,6 +869,21 @@ document.getElementById('redoall').onclick = async (e) => {
   btn.disabled = true; const label = btn.textContent;
   try { const r = await api('POST','/api/jobs/redo-subs-all'); btn.textContent = `Re-OCR queued (${r.jobs||0})…`; }
   catch(err){ alert(err.message); }
+  finally { setTimeout(()=>{ btn.disabled=false; btn.textContent=label; }, 4000); }
+};
+document.getElementById('refreshart').onclick = async (e) => {
+  const btn = e.target; btn.disabled = true; const label = btn.textContent;
+  btn.textContent = 'Refreshing artwork…';
+  try {
+    const r = await api('POST','/api/jobs/refresh-artwork');
+    btn.textContent = `Artwork refreshed (${r.jobs||0})`;
+    // Bust the thumbnail cache and force a rebuild so new/changed posters show.
+    ARTV = Date.now();
+    renderedStateClear();
+    const snap = await fetch('/api/jobs').then(x=>x.json()).catch(()=>null);
+    if (snap) renderJobs(snap);
+  }
+  catch(err){ alert(err.message); btn.textContent = label; }
   finally { setTimeout(()=>{ btn.disabled=false; btn.textContent=label; }, 4000); }
 };
 // ---- Settings modal ----
