@@ -220,6 +220,16 @@ async function loadDrives() {
       const div = document.createElement('div');
       div.className = 'drive';
       const title = d.label || ('Drive ' + (d.device || ('disc:' + d.index)));
+      if (d.makemkv_blind) {
+        // OS sees a disc here but makemkvcon can't open the drive — not rippable
+        // until the drive is reset. Show it so the panel matches File Explorer.
+        div.innerHTML =
+          `<div class="drive-info"><b>${title}</b>` +
+          `<small class="disc-name" title="${d.disc_name||''}">${d.disc_name||''}</small>` +
+          `<small style="color:#f85149;">⚠ Windows sees this disc but MakeMKV can't open the drive — reset/reconnect it (or try another drive).</small></div>`;
+        el.appendChild(div);
+        continue;
+      }
       const disc = d.disc_name
         ? (d.disc_name + (d.os_detected ? ' <span class="muted" title="Detected by the OS — makemkvcon\'s quick probe missed it; a scan may still be slow or fail.">(via OS)</span>' : ''))
         : '<i>no disc / mounting…</i>';
