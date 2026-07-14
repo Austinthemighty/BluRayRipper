@@ -35,11 +35,12 @@ from . import process
 
 @dataclass
 class Drive:
-    index: int           # makemkvcon disc:N selector index
+    index: int           # makemkvcon disc:N selector index (-1 = MakeMKV-blind)
     name: str            # drive model
     device: str | None   # OS device, e.g. "F:" or "/dev/sr0"
     disc_name: str | None  # loaded disc label, if any
     os_detected: bool = False  # disc name came from the OS, not makemkvcon's probe
+    makemkv_blind: bool = False  # OS sees a disc here but makemkvcon can't open the drive
 
 
 def os_disc_label(device: str | None) -> str | None:
@@ -69,6 +70,39 @@ def os_disc_label(device: str | None) -> str | None:
         return buf.value.strip() or None
     except Exception:
         return None
+
+
+def os_optical_drives() -> list[tuple[str, str | None]]:
+    """(drive_letter, volume_label) for each Windows optical drive that has media.
+
+    Lets the app show a disc the OS has mounted (visible in File Explorer) even
+    when makemkvcon can't enumerate the drive at all — a wedged/half-offline
+    drive returns "no usable optical drives". Empty off Windows or on error."""
+    if not sys.platform.startswith("win"):
+        return []
+    try:
+        import ctypes
+
+        k = ctypes.windll.kernel32
+        DRIVE_CDROM = 5
+        prev = k.SetErrorMode(0x0001)  # suppress "no disk" popups while probing
+        try:
+            bitmask = k.GetLogicalDrives()
+            out: list[tuple[str, str | None]] = []
+            for i in range(26):
+                if not (bitmask >> i) & 1:
+                    continue
+                letter = f"{chr(ord('A') + i)}:"
+                if k.GetDriveTypeW(ctypes.c_wchar_p(f"{letter}\\")) != DRIVE_CDROM:
+                    continue
+                label = os_disc_label(letter)  # None if the drive is empty
+                if label:
+                    out.append((letter, label))
+            return out
+        finally:
+            k.SetErrorMode(prev)
+    except Exception:
+        return []
 
 
 def parse_drives(lines: list[str]) -> list[Drive]:
@@ -266,6 +300,15 @@ class MakeMKV:
                 if label:
                     d.disc_name = label
                     d.os_detected = True
+        # Surface a disc the OS has but makemkvcon couldn't enumerate at all (the
+        # drive dropped off the bus / "no usable optical drives"). Not rippable
+        # until the drive is reset, so it's flagged makemkv_blind (index -1).
+        seen = {(d.device or "").rstrip("\\/").upper() for d in drives}
+        for letter, label in os_optical_drives():
+            if letter.rstrip("\\/").upper() in seen:
+                continue
+            drives.append(Drive(index=-1, name="(optical drive)", device=letter,
+                                 disc_name=label, os_detected=True, makemkv_blind=True))
         return drives
 
     async def scan(

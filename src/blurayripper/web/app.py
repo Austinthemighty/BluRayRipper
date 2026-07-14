@@ -181,6 +181,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "index": d.index, "name": d.name, "device": d.device,
                 "disc_name": d.disc_name, "label": manager.drive_names.get(d.device),
                 "os_detected": getattr(d, "os_detected", False),
+                "makemkv_blind": getattr(d, "makemkv_blind", False),
             }
             for d in found
         ]

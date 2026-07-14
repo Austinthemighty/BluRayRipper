@@ -354,7 +354,8 @@ class JobManager:
             self._drives_cache_file.parent.mkdir(parents=True, exist_ok=True)
             self._drives_cache_file.write_text(json.dumps(
                 [{"index": d.index, "name": d.name, "device": d.device,
-                  "disc_name": d.disc_name} for d in self._drives_cache]),
+                  "disc_name": d.disc_name} for d in self._drives_cache
+                 if not getattr(d, "makemkv_blind", False)]),  # blind drives are live-only
                 encoding="utf-8")
         except OSError:
             pass
@@ -424,6 +425,8 @@ class JobManager:
     def _auto_open(self, drives: list[Drive]) -> None:
         present = set()
         for d in drives:
+            if getattr(d, "makemkv_blind", False):
+                continue  # OS sees it but makemkvcon can't open it — not rippable
             present.add(d.index)
             name = (d.disc_name or "").strip()
             if not name:
