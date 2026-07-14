@@ -17,9 +17,12 @@ async def notify(url: str | None, title: str, message: str,
     no url is configured). Never raises."""
     if not url:
         return False
-    headers = {"Title": title}
+    # The Title goes in an HTTP header, which httpx encodes as latin-1 — an emoji
+    # (💿/❌/📺…) would raise UnicodeEncodeError and be swallowed as a failure. Send
+    # it as raw UTF-8 bytes instead; ntfy decodes that and keeps the emoji.
+    headers: dict[str, str | bytes] = {"Title": title.encode("utf-8")}
     if priority:
-        headers["Priority"] = priority  # ntfy: 1..5 / min..urgent
+        headers["Priority"] = priority  # ntfy: 1..5 / min..urgent (ASCII)
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(url, content=message.encode("utf-8"), headers=headers)
