@@ -68,3 +68,15 @@ async def test_worker_processes_claimed_job(tmp_path, monkeypatch):
     assert done.state == "done"
     assert done.outputs and "WarGames" in done.outputs[0]
     assert done.worker == "w1"
+
+
+def test_worker_id_is_stable_hostname_by_default(monkeypatch):
+    """Default worker id is the hostname (stable across restarts), not host:pid —
+    so a restart doesn't spawn a duplicate worker or orphan its settings."""
+    import socket
+    from blurayripper.config import load_settings
+    from blurayripper.worker import WorkerRunner
+    monkeypatch.setattr(socket, "gethostname", lambda: "SteamMachine")
+    assert WorkerRunner(load_settings()).worker_id == "SteamMachine"
+    # An explicit --name still wins (for >1 worker per host).
+    assert WorkerRunner(load_settings(), worker_id="encoder-A").worker_id == "encoder-A"
