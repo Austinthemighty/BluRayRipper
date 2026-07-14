@@ -14,6 +14,8 @@ from pathlib import Path
 
 import httpx
 
+from .naming import subtitle_lang_suffix
+
 _BASE = "https://api.opensubtitles.com/api/v1"
 _UA = "BluRayRipper/1.0"
 
@@ -169,6 +171,10 @@ class OpenSubtitlesClient:
                 "OpenSubtitles API key not configured. Set OPENSUBTITLES_API_KEY in "
                 "config/secrets.env."
             )
+        # OpenSubtitles uses ISO 639-1 (en, pl) for both the search filter and the
+        # response's language field; our config uses 639-2/B (eng, pol). Passing
+        # "eng" returns nothing / filters everything out. Normalise to "en".
+        language = subtitle_lang_suffix(language)
         cache_path = self._cache_path(parent_tmdb_id, season, episode, language)
         if cache_path and cache_path.exists():
             return cache_path.read_text(encoding="utf-8", errors="replace")
