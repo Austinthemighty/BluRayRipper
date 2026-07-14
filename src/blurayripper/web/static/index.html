@@ -187,6 +187,7 @@
       <button class="sec" onclick="testNotify()" title="Send a test push to the configured notify URL and report whether it was accepted.">🔔 Test notification</button>
       <span id="settings-msg" class="muted"></span>
       <button class="sec" onclick="restartServer(false)" style="margin-left:auto;" title="Restart the server to apply saved settings. Warns if a rip/encode/OCR is running.">↻ Restart server</button>
+      <button class="sec" id="clear-worker-override" onclick="clearWorkerOverride()" style="display:none; margin-left:auto;" title="Remove this worker's saved override so it follows the global settings again.">Clear worker override</button>
     </div>
   </div>
 </div>
@@ -984,9 +985,11 @@ async function openSettings(scope){
     note.innerHTML = `Saved to <code>config/settings.local.json</code>; applied on the next server restart. ` +
       `Pick a worker above to override settings for just that machine. DB connection lives in <code>secrets.env</code>.`;
   }
-  // The Restart button only makes sense for the server (global) scope.
+  // Restart is a server (global) action; Clear-override is worker-only.
   const rb = document.querySelector('#settings-modal [onclick^="restartServer"]');
   if (rb) rb.style.display = worker ? 'none' : '';
+  const cb = document.getElementById('clear-worker-override');
+  if (cb) cb.style.display = worker ? '' : 'none';
 
   body.innerHTML = '';
   for(const g of data.groups){
@@ -1059,6 +1062,18 @@ async function testNotify(){
     msg.style.color = '#f85149';
     msg.textContent = 'Rejected by ' + r.url + ' — wrong URL/topic? (ntfy uses https://ntfy.sh/<topic>).';
   }
+}
+async function clearWorkerOverride(){
+  if (settingsScope === 'global') return;
+  if (!confirm(`Clear the settings override for ${settingsScope}?\n\nThis worker will follow the global settings again (applies on its next job).`)) return;
+  const msg = document.getElementById('settings-msg');
+  msg.style.color = '#8b949e'; msg.textContent = 'Clearing…';
+  try {
+    await api('POST','/api/settings/clear', {scope: settingsScope});
+    msg.style.color = '#3fb950';
+    msg.textContent = 'Override cleared — this worker follows global now.';
+    openSettings(settingsScope);   // refresh: override highlights gone
+  } catch(e){ msg.style.color = '#f85149'; msg.textContent = 'Error: ' + e.message; }
 }
 function closeSettings(){ document.getElementById('settings-modal').classList.remove('open'); }
 async function saveSettings(){
