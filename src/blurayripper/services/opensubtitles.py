@@ -173,7 +173,9 @@ class OpenSubtitlesClient:
         if cache_path and cache_path.exists():
             return cache_path.read_text(encoding="utf-8", errors="replace")
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            # follow_redirects: OpenSubtitles' download link (and some endpoints)
+            # 301/302-redirect; without this httpx raises instead of following.
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
                 await self._login(client)
                 search = await client.get(
                     f"{_BASE}/subtitles",
@@ -243,7 +245,7 @@ class OpenSubtitlesClient:
         token) — the Api-Key alone can't read /infos/user."""
         if not self._api_key:
             raise OpenSubtitlesError("OpenSubtitles API key not configured.", fatal=True)
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
             await self._login(client, required=True)  # raises a specific reason on failure
             try:
                 resp = await client.get(f"{_BASE}/infos/user", headers=self._headers())
