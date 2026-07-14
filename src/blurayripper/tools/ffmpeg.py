@@ -65,7 +65,11 @@ class FFmpeg:
 
     @property
     def available(self) -> bool:
-        return bool(self._settings.tools.ffmpeg)
+        # Confirm the binary exists on this machine (a configured path is trusted
+        # without a check), so the UHD path cleanly falls back to HandBrake rather
+        # than failing to spawn a missing ffmpeg.
+        p = self._settings.tools.ffmpeg
+        return bool(p) and shutil.which(p) is not None
 
     def _ffprobe_bin(self) -> str:
         ff = self._settings.tools.require("ffmpeg")

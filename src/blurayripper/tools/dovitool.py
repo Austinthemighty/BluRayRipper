@@ -10,6 +10,7 @@ HDR10-compatible) so Plex and TVs play it.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from ..config import Settings
@@ -32,7 +33,12 @@ class DoviTool:
 
     @property
     def available(self) -> bool:
-        return bool(self._settings.tools.dovitool)
+        # Verify the binary actually exists on THIS machine — a configured path is
+        # trusted without a check elsewhere, so a shared config can name a
+        # dovi_tool that isn't installed on this worker. Attempting DV then would
+        # fail mid-encode with a WinError 2 spawn error; better to skip to HDR10.
+        p = self._settings.tools.dovitool
+        return bool(p) and shutil.which(p) is not None
 
     def _bin(self) -> str:
         return self._settings.tools.require("dovitool")
