@@ -104,7 +104,11 @@ class WorkerReporter:
 class WorkerRunner:
     def __init__(self, settings: Settings, worker_id: str | None = None) -> None:
         self.settings = settings
-        self.worker_id = worker_id or f"{socket.gethostname()}:{__import__('os').getpid()}"
+        # Default to the hostname (STABLE across restarts) — not host:pid, or every
+        # restart would look like a brand-new worker (duplicate in the panel/scope
+        # dropdown, and its per-worker settings override orphaned). Run more than one
+        # worker on a host? Give each a distinct --name.
+        self.worker_id = worker_id or socket.gethostname()
         self.store = make_store(settings.database_url)
         self.pipeline = Pipeline(settings)
         self.scheduler = EncodeScheduler(settings.queue.encode_capacity)

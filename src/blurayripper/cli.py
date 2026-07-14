@@ -916,7 +916,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     worker = sub.add_parser(
         "worker", help="Run an encode worker that pulls jobs from the shared queue")
-    worker.add_argument("--name", default=None, help="Worker id (default: host:pid)")
+    worker.add_argument(
+        "--name", default=None,
+        help="Stable worker id (default: hostname). Give each worker on the SAME "
+             "host a distinct --name.")
     worker.set_defaults(func=_cmd_worker)
 
     resub = sub.add_parser(
