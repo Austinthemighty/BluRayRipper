@@ -50,3 +50,20 @@ def test_detects_dolby_vision():
 def test_hdr10_is_not_dolby_vision():
     info = hdr.parse_hdr({"streams": [{"codec_type": "video", "color_transfer": "smpte2084"}]})
     assert not info.is_dolby_vision
+
+
+def test_available_requires_the_binary_to_exist(monkeypatch, tmp_path):
+    s = load_settings()
+    # A configured path that isn't installed on this machine -> not available
+    # (so DV is skipped cleanly instead of failing to spawn mid-encode).
+    monkeypatch.setattr(s.tools, "dovitool", str(tmp_path / "nope" / "dovi_tool.exe"))
+    assert DoviTool(s).available is False
+    # A real, executable file -> available
+    real = tmp_path / "dovi_tool"
+    real.write_text("#!/bin/sh\n")
+    real.chmod(0o755)
+    monkeypatch.setattr(s.tools, "dovitool", str(real))
+    assert DoviTool(s).available is True
+    # Unset -> not available
+    monkeypatch.setattr(s.tools, "dovitool", None)
+    assert DoviTool(s).available is False

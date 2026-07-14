@@ -256,28 +256,42 @@ async def _cmd_check(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
     ok = True
 
-    # External tools
+    # External tools. Verify each configured path actually exists on THIS machine
+    # (a configured path is otherwise trusted blindly, so a shared config can name
+    # a tool that isn't installed here — which then fails only mid-encode).
+    import shutil as _shutil
+
+    def _on_disk(p: str | None) -> bool:
+        return bool(p) and _shutil.which(p) is not None
+
     tool_table = Table("Tool", "Status", title="External tools")
     for key in ("makemkvcon", "handbrakecli", "mkvmerge", "mkvextract", "subtitleedit"):
         path = getattr(settings.tools, key)
-        if path:
+        if _on_disk(path):
             tool_table.add_row(key, f"[green]{path}[/green]")
+        elif path:
+            tool_table.add_row(
+                key, f"[red]{path} — configured but NOT found on this machine[/red]")
+            ok = False
         else:
             tool_table.add_row(key, "[red]MISSING — install or set in settings.toml[/red]")
             ok = False
     runner = settings.tools.subtitleedit_runner
     tool_table.add_row("subtitleedit_runner", runner or "[dim](none — runs directly)[/dim]")
-    # ffmpeg is optional (grain preview + UHD/HDR encoding) — don't fail on it.
-    tool_table.add_row(
-        "ffmpeg [dim](optional)[/dim]",
-        f"[green]{settings.tools.ffmpeg}[/green]" if settings.tools.ffmpeg
-        else "[yellow]not found — grain preview + UHD/HDR encoding disabled[/yellow]",
-    )
-    tool_table.add_row(
-        "dovitool [dim](optional)[/dim]",
-        f"[green]{settings.tools.dovitool}[/green]" if settings.tools.dovitool
-        else "[yellow]not found — Dolby Vision falls back to HDR10[/yellow]",
-    )
+
+    def _optional_row(label: str, path: str | None, absent_msg: str) -> None:
+        if _on_disk(path):
+            tool_table.add_row(label, f"[green]{path}[/green]")
+        elif path:
+            tool_table.add_row(
+                label, f"[yellow]{path} — configured but NOT found on this machine[/yellow]")
+        else:
+            tool_table.add_row(label, f"[yellow]{absent_msg}[/yellow]")
+
+    _optional_row("ffmpeg [dim](optional)[/dim]", settings.tools.ffmpeg,
+                  "not found — grain preview + UHD/HDR encoding disabled")
+    _optional_row("dovitool [dim](optional)[/dim]", settings.tools.dovitool,
+                  "not found — Dolby Vision falls back to HDR10")
     # MSVC runtime: dovi_tool.exe / mkvtoolnix are MSVC-linked and won't launch
     # without vcruntime140.dll. Only meaningful (and shown) on Windows.
     vcr_level, vcr_msg = _vcruntime_status()
@@ -349,9 +363,10 @@ async def _cmd_check(args: argparse.Namespace) -> int:
                     f"[yellow]ffmpeg_audio='copy' needs container='mkv' (yours is "
                     f"'{enc.container}') — lossless audio (TrueHD/DTS-HD) won't fit mp4.[/yellow]")
         if enc.dovi:
-            if not settings.tools.dovitool:
-                console.print("[yellow]dovi is on but dovi_tool not found — DV falls back to HDR10.[/yellow]")
-            elif not settings.tools.mkvmerge:
+            if not _on_disk(settings.tools.dovitool):
+                console.print("[yellow]dovi is on but dovi_tool not found on this machine — "
+                              "DV falls back to HDR10.[/yellow]")
+            elif not _on_disk(settings.tools.mkvmerge):
                 console.print("[yellow]dovi is on but mkvmerge not found — DV falls back to HDR10.[/yellow]")
             elif vcr_level == "missing":
                 console.print(
