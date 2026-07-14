@@ -277,7 +277,15 @@ async def _cmd_check(args: argparse.Namespace) -> int:
             tool_table.add_row(key, "[red]MISSING — install or set in settings.toml[/red]")
             ok = False
     runner = settings.tools.subtitleedit_runner
-    tool_table.add_row("subtitleedit_runner", runner or "[dim](none — runs directly)[/dim]")
+    if not runner:
+        tool_table.add_row("subtitleedit_runner", "[dim](none — runs directly)[/dim]")
+    elif _on_disk(runner):  # a bare command (e.g. "mono") resolves via PATH
+        tool_table.add_row("subtitleedit_runner", f"[green]{runner}[/green]")
+    else:
+        tool_table.add_row(
+            "subtitleedit_runner",
+            f"[red]{runner} — configured but NOT found on this machine[/red]")
+        ok = False
 
     def _optional_row(label: str, path: str | None, absent_msg: str) -> None:
         if _on_disk(path):
@@ -303,15 +311,25 @@ async def _cmd_check(args: argparse.Namespace) -> int:
         )
     console.print(tool_table)
 
-    # Folders (writability)
+    # Folders (writability). Every configured folder path is probed by actually
+    # creating + writing a temp file, so a typo'd or unreachable path (e.g. a NAS
+    # that isn't mapped) shows NO rather than failing only mid-job.
     folder_table = Table("Folder", "Path", "Writable", title="Storage")
-    for label, path in (
+    required_folders = [
         ("staging", settings.storage.staging_dir),
         ("output", settings.storage.output_dir),
-    ):
+    ]
+    for label, path in required_folders:
         writable = _check_writable(path)
         folder_table.add_row(label, str(path), "[green]yes[/green]" if writable else "[red]NO[/red]")
         ok = ok and writable
+    # Optional, only if the user set it (subtitle upload export).
+    export_dir = settings.subtitles.upload_export_dir
+    if export_dir:
+        writable = _check_writable(export_dir)
+        folder_table.add_row(
+            "subtitle export [dim](optional)[/dim]", str(export_dir),
+            "[green]yes[/green]" if writable else "[yellow]NO — configured but unreachable[/yellow]")
     console.print(folder_table)
 
     # Preset file <-> name <-> container
