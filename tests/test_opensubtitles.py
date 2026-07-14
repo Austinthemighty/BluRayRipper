@@ -152,3 +152,38 @@ def test_remember_quota_captures_download_response():
     c._remember_quota({"requests": 100, "reset_time_utc": "2026-07-14T04:10:00Z"}, exhausted=True)
     q = c.last_known_quota()
     assert q["remaining"] == 0 and q["reset_time_utc"] == "2026-07-14T04:10:00Z"
+
+
+async def test_fetch_normalizes_language_to_iso1(monkeypatch, tmp_path):
+    """The app passes 'eng' (639-2/B); OpenSubtitles wants 'en'. fetch must
+    normalise it for the search param AND the response-language filter, else a
+    valid 'en' result gets filtered out and nothing is found."""
+    import blurayripper.services.opensubtitles as OS
+
+    captured = {}
+
+    class Resp:
+        def __init__(self, js=None, text=""):
+            self._js = js or {}; self.text = text; self.status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return self._js
+
+    class Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url, headers=None, params=None):
+            if url.endswith("/subtitles"):
+                captured["languages"] = params.get("languages")
+                return Resp(js={"data": [{"attributes": {
+                    "language": "en", "download_count": 5,
+                    "files": [{"file_id": 42}]}}]})
+            return Resp(text="1\n00:00:01,000 --> 00:00:02,000\nHi\n")  # the SRT link
+        async def post(self, url, headers=None, json=None):
+            return Resp(js={"link": "http://cdn/x.srt"})
+
+    monkeypatch.setattr(OS.httpx, "AsyncClient", Client)
+    c = OS.OpenSubtitlesClient("key", cache_dir=tmp_path)
+    srt = await c.fetch_episode_srt(1043, 2, 6, "eng")   # pass 639-2/B
+    assert captured["languages"] == "en"                 # normalised for the API
+    assert srt and "Hi" in srt                           # the 'en' result was accepted
