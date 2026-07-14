@@ -424,6 +424,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "applies": "next job" if is_worker else "restart",
         }
 
+    @app.post("/api/settings/clear")
+    async def clear_worker_settings(body: dict = Body(...)):
+        scope = (body or {}).get("scope")
+        if not scope or scope in ("global", "server"):
+            raise HTTPException(status_code=400, detail="Clear applies to a worker scope only.")
+        store = manager.store
+        if store is None or not getattr(store, "durable", False):
+            raise HTTPException(
+                status_code=400, detail="Per-worker settings need a shared Postgres store.")
+        store.set_worker_settings(scope, {})  # empty overlay deletes the row
+        return {"ok": True, "cleared": scope}
+
     @app.get("/api/tmdb/search")
     async def tmdb_search(kind: str, query: str):
         if not tmdb.configured:

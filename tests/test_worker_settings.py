@@ -73,3 +73,25 @@ def test_worker_save_requires_durable_store(tmp_path):
     import pytest
     with pytest.raises(ValueError):
         ss.save_settings(d, {"encode": {"ffmpeg_preset": "slow"}}, scope="w1", store=MemoryStore())
+
+
+def test_clear_worker_override_removes_the_row(tmp_path):
+    from blurayripper.web.app import create_app
+    from blurayripper.config import load_settings
+    from fastapi.testclient import TestClient
+
+    (tmp_path / "settings.toml").write_text('[encode]\nffmpeg_preset="medium"\n', encoding="utf-8")
+    app = create_app(load_settings(tmp_path))
+    store = DurableMem()
+    app.state.manager.store = store
+    store.set_worker_settings("SteamMachine", {"encode": {"ffmpeg_preset": "slower"}})
+    c = TestClient(app)
+
+    assert c.post("/api/settings/clear", json={"scope": "SteamMachine"}).status_code == 200
+    assert store.get_worker_settings("SteamMachine") == {}
+    assert "SteamMachine" not in store.all_worker_settings()
+    # global / non-durable are rejected
+    assert c.post("/api/settings/clear", json={"scope": "global"}).status_code == 400
+    from blurayripper.persistence import MemoryStore
+    app.state.manager.store = MemoryStore()
+    assert c.post("/api/settings/clear", json={"scope": "w1"}).status_code == 400
