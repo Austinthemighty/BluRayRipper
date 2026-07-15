@@ -1032,6 +1032,19 @@ class JobManager:
         self._persist(wj)
         self.bus.publish()
 
+    def _rip_pending(self, wj: WebJob) -> bool:
+        """True if this disc job still has a selected title left to rip — i.e. the
+        disc is still needed. False once every selected title has a ripped-file
+        checkpoint (an encode/subtitle/place failure no longer needs the disc)."""
+        if not (wj.source or "").startswith("disc:"):
+            return False
+        job = wj._pipeline_job
+        selected = wj.selected_title_ids or (getattr(job, "selected_title_ids", []) if job else [])
+        if not selected:
+            return True  # nothing ripped yet
+        cps = getattr(job, "checkpoints", {}) if job else {}
+        return any(not (cps.get(t) or {}).get("ripped_path") for t in selected)
+
     def _source_disc_missing(self, wj: WebJob) -> bool:
         """True if the job rips from a disc:N whose drive currently has no disc,
         so retrying is pointless until it's reinserted. Uses the OS-aware drive
@@ -1161,6 +1174,10 @@ class JobManager:
             "titles": self._title_dict(wj) if wj.disc else [],
             "selected": wj.selected_title_ids,
             "outputs": wj.outputs,
+            # Whether the disc is still needed (some title left to rip). False once
+            # ripping is done, so an encode/subtitle failure doesn't offer "change
+            # drive" (the disc isn't involved anymore).
+            "needs_disc": self._rip_pending(wj),
             "preview": (
                 {
                     # Poster URLs only when ffmpeg produced the stills.

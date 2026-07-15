@@ -765,3 +765,22 @@ def test_change_source_updates_drive_device(manager):
     # drive_device follows the new drive, so auto-eject won't eject E:'s disc
     assert wj.disc.drive_device == "F:"
     assert wj._pipeline_job.disc.drive_device == "F:"
+
+
+def test_rip_pending_gates_change_drive(manager):
+    from blurayripper.pipeline import Job
+    def mk(source, selected, cps):
+        wj = WebJob(id=700, source=source, state=JobState.FAILED)
+        wj.selected_title_ids = selected
+        wj._pipeline_job = Job(source=source)
+        wj._pipeline_job.checkpoints = cps
+        return wj
+    # rip incomplete -> disc still needed (show change-drive)
+    assert manager._rip_pending(mk("disc:0", [1, 5], {1: {"ripped_path": "a"}})) is True
+    # every title ripped -> encode/subtitle failure, disc not needed (hide it)
+    assert manager._rip_pending(
+        mk("disc:0", [1, 5], {1: {"ripped_path": "a"}, 5: {"ripped_path": "b"}})) is False
+    # non-disc source never offers change-drive
+    assert manager._rip_pending(mk("file:/x.mkv", [0], {})) is False
+    # nothing selected/ripped yet -> pending
+    assert manager._rip_pending(mk("disc:0", [], {})) is True
