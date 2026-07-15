@@ -694,3 +694,30 @@ async def test_auto_retry_skipped_when_disc_missing(manager):
     manager._drives_cache = [Drive(0, "ASUS", "E:", "DISC")]
     manager._schedule_auto_retry(wj2)
     assert manager._auto_retries.get(404, 0) == 1
+
+
+def test_rip_failure_hint_classifies_drive_vs_read_vs_disc(manager):
+    from blurayripper.tools.makemkv import Drive
+    # Drive dropped off the bus -> drive hint, retry skipped
+    wj = WebJob(id=501, source="disc:0", state=JobState.FAILED,
+                error="ProcessError: Command failed (11)")
+    wj.log = ["Error 'OS error - This device does not exist' occurred while reading",
+              "0 titles saved, 1 failed"]
+    hint = manager._rip_failure_hint(wj)
+    assert hint and "dropped" in hint.lower()
+
+    # SCSI read error -> read hint
+    wj2 = WebJob(id=502, source="disc:0", state=JobState.FAILED, error="ProcessError")
+    wj2.log = ["Error 'Scsi error - ILLEGAL REQUEST' occurred while reading", "1 failed"]
+    assert "read error" in manager._rip_failure_hint(wj2).lower()
+
+    # No signature but drive cache shows no disc -> the reinsert message (via schedule)
+    wj3 = WebJob(id=503, source="disc:0", state=JobState.FAILED, error="something else")
+    wj3.log = ["Ripping title 0 ..."]
+    manager.jobs[503] = wj3
+    manager._drives_cache = [Drive(0, "ASUS", "E:", None)]  # empty drive
+    manager.settings.auto_retry_max = 2
+    assert manager._rip_failure_hint(wj3) is None
+    manager._schedule_auto_retry(wj3)
+    assert manager._auto_retries.get(503, 0) == 0  # skipped
+    assert any("reinsert" in l.lower() for l in wj3.log)
