@@ -51,6 +51,16 @@ class SubtitleEdit:
         runner = self._settings.tools.subtitleedit_runner
         return ([runner, exe] if runner else [exe])
 
+    def _is_cli_tool(self) -> bool:
+        """True when the configured tool is the dedicated CLI (seconv / se-cli),
+        which is convert-only and must NOT be given the GUI's /convert keyword.
+        The GUI SubtitleEdit.exe still needs /convert; without it, SubtitleEdit 5
+        (the cross-platform rewrite) just opens the window instead of batching."""
+        exe = self._settings.tools.require("subtitleedit")
+        base = exe.replace("\\", "/").rsplit("/", 1)[-1]  # basename, either separator
+        stem = base.rsplit(".", 1)[0].lower().replace("_", "-")
+        return stem in ("seconv", "se-cli", "secli")
+
     def build_command(self, sup_path: Path, language: str, out_dir: Path) -> list[str]:
         # NOTE: SubtitleEdit's batch/command-line OCR does NOT accept a language
         # flag — Tesseract is hard-coded and the language is whatever was last
@@ -60,8 +70,9 @@ class SubtitleEdit:
         # the Tesseract language) and the batch tool reuses it. ``language`` is
         # still used for the sidecar filename and the error hint below.
         cmd = list(self._launcher())
+        if not self._is_cli_tool():
+            cmd.append("/convert")  # GUI SubtitleEdit.exe needs the batch keyword; seconv doesn't
         cmd += [
-            "/convert",
             str(sup_path),
             "srt",
             "/ocrengine:tesseract",
