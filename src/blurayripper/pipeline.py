@@ -703,7 +703,7 @@ class Pipeline:
             and title_id == job.selected_title_ids[-1]
             and job.source.split(":", 1)[0] in ("disc", "dev")
         ):
-            device = job.disc.drive_device if job.disc else None
+            device = await self._eject_device_for(job)
             try:
                 eject(device)
                 report.on_event(
@@ -714,6 +714,24 @@ class Pipeline:
                         "`serve` as Administrator" if sys.platform.startswith("win") else "")
                 report.on_event(f"Auto-eject failed ({device or 'no device'}): {exc}{hint}")
         return ripped_mkv
+
+    async def _eject_device_for(self, job: Job) -> str | None:
+        """The OS device to auto-eject: re-resolve it from the CURRENT rip source
+        (disc:N -> drive letter) rather than trusting job.disc.drive_device, which
+        can go stale after a drive change — and eject the WRONG disc (e.g. another
+        job's disc now sitting in the original drive)."""
+        device = job.disc.drive_device if job.disc else None
+        src = job.source or ""
+        if src.startswith("disc:"):
+            try:
+                idx = int(src.split(":", 1)[1])
+                drives = await self.makemkv.list_drives(timeout=15)
+                drv = next((d for d in drives if d.index == idx), None)
+                if drv and drv.device:
+                    device = drv.device
+            except Exception:
+                pass  # fall back to the stored device
+        return device
 
     async def _process_after_rip(
         self, job: Job, title_id: int, assignment: EpisodeAssignment, staging_root: Path,
