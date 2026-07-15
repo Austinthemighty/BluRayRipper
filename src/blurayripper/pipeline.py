@@ -667,6 +667,16 @@ class Pipeline:
         else:
             job.state = JobState.RIPPING
             report.on_event(f"Ripping title {title_id} ...")
+            # Clear any leftover .mkv from a failed prior attempt. Without this,
+            # MakeMKV hits an "already exists — overwrite?" path and, since it
+            # reuses the same filename, rip_title sees no NEWLY-appeared file
+            # (after - before is empty) and wrongly reports "produced no output".
+            if rip_dir.exists():
+                for stale in rip_dir.glob("*.mkv"):
+                    try:
+                        stale.unlink()
+                    except OSError:
+                        pass
             title = job.disc.title(title_id) if job.disc else None
             speed = _RipSpeed(total_bytes=title.size_bytes if title else 0)
             ripped = await self.makemkv.rip_title(

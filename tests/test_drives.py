@@ -118,3 +118,40 @@ def test_resolve_leaves_source_when_no_match(monkeypatch):
     monkeypatch.setattr(pipe.makemkv, "list_drives", fake_list)
     asyncio.run(pipe._resolve_source_drive(job, _report()))
     assert job.source == "disc:0"   # untouched -> rip fails with the reinsert message
+
+
+def test_ensure_ripped_clears_stale_partial(tmp_path, monkeypatch):
+    """A leftover .mkv from a failed prior attempt is removed before re-ripping,
+    so rip_title's newly-appeared-file detection works (no false 'no output')."""
+    from blurayripper.config import load_settings
+    from blurayripper.pipeline import Pipeline, Job
+    from blurayripper.models import DiscInfo, Title
+
+    s = load_settings()
+    monkeypatch.setattr(s.storage, "staging_dir", tmp_path)
+    monkeypatch.setattr(s, "auto_eject", False)
+    pipe = Pipeline(s)
+
+    job = Job(source="disc:0")
+    job.disc = DiscInfo(source="disc:0", titles=[Title(title_id=5, duration_seconds=1711)])
+    job.selected_title_ids = [5]
+    staging_root = tmp_path / "job_194"
+    rip_dir = staging_root / "rip" / "t005"
+    rip_dir.mkdir(parents=True)
+    stale = rip_dir / "Silicon Valley S2 D1_t05.mkv"
+    stale.write_text("partial from the failed disc:0 attempt")
+
+    seen = {}
+    async def fake_rip(source, title_id, dest_dir, **k):
+        seen["at_rip"] = sorted(p.name for p in dest_dir.glob("*.mkv"))
+        out = dest_dir / f"new_t{title_id:02d}.mkv"
+        out.write_text("full rip")
+        return [out]
+    async def noverify(*a): pass
+    monkeypatch.setattr(pipe.makemkv, "rip_title", fake_rip)
+    monkeypatch.setattr(pipe, "_verify_rip_duration", noverify)
+
+    ripped = asyncio.run(pipe._ensure_ripped(job, 5, staging_root, _report()))
+    assert seen["at_rip"] == []            # the stale partial was cleared first
+    assert not stale.exists()
+    assert ripped.name == "new_t05.mkv"    # the fresh rip is what gets used
