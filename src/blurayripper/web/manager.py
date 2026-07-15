@@ -1009,15 +1009,40 @@ class JobManager:
                 return not (d.disc_name and d.disc_name.strip())
         return False  # drive not in the (maybe unpopulated) cache — don't assume absent
 
+    # MakeMKV failure signatures that won't fix themselves on retry — the drive is
+    # offline or the disc/drive can't be read. Matched (lower-cased) against the
+    # job error + recent log.
+    _DRIVE_OFFLINE_SIGNS = (
+        "no usable optical drives", "device does not exist", "failed to open disc")
+    _READ_ERROR_SIGNS = ("scsi error", "read error", "hash check failed", "fetchframes")
+
+    def _rip_failure_hint(self, wj: WebJob) -> str | None:
+        """A specific, non-retryable hint for a drive/read failure, or None."""
+        blob = ((wj.error or "") + "\n" + "\n".join(wj.log[-12:])).lower()
+        if any(s in blob for s in self._DRIVE_OFFLINE_SIGNS):
+            return ("The optical drive became unavailable to MakeMKV — it likely dropped "
+                    "off the bus. The disc being inserted isn't enough: check the drive's "
+                    "power/connection or reset it (or use another drive), then click Retry.")
+        if any(s in blob for s in self._READ_ERROR_SIGNS):
+            return ("Disc read error — the drive couldn't read the disc (a bad sector, a "
+                    "dirty/scratched disc, or the drive dropping mid-read). Clean the disc "
+                    "or reset/try another drive, then click Retry.")
+        return None
+
     def _schedule_auto_retry(self, wj: WebJob) -> None:
         """After a failure, re-queue the job up to auto_retry_max times with
         exponential backoff (30s, 60s, 120s… capped 5m). Bounded so a genuinely
         broken job doesn't loop forever."""
-        if self._source_disc_missing(wj):
-            wj.log.append("The disc isn't in the drive — reinsert it, then click Retry.")
-            self._notify(f"💿 Insert disc: {self._name_of(wj)}",
-                         f"Job #{wj.id} is waiting for its disc to be reinserted.")
-            return  # don't burn retries against an empty drive
+        # A drive/read failure (or a genuinely absent disc) won't recover on its
+        # own — surface a specific reason and don't burn retries against it.
+        hint = self._rip_failure_hint(wj)
+        if hint is None and self._source_disc_missing(wj):
+            hint = "The disc isn't in the drive — reinsert it, then click Retry."
+        if hint:
+            wj.log.append(hint)
+            self._notify(f"💿 {self._name_of(wj)} needs attention",
+                         f"Job #{wj.id}: {hint}")
+            return
         n = self._auto_retries.get(wj.id, 0)
         if n >= self.settings.auto_retry_max:
             if self.settings.auto_retry_max:
