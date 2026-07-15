@@ -204,6 +204,7 @@ class Pipeline:
         self, job: Job, staging_root: Path, scheduler: EncodeScheduler, report
     ) -> None:
         assert job.disc is not None
+        await self._resolve_source_drive(job, report)  # follow the disc across drives
         await self._place_cover_art(job, report)  # before any rip/eject
         await self._place_tmdb_art(job, report)   # real poster/backdrop overrides disc art
         for title_id in job.selected_title_ids:
@@ -226,8 +227,9 @@ class Pipeline:
         the rip box's serve doesn't kill that long NAS-bound work); the rip box
         then only rips and resolves grain."""
         assert job.disc is not None
-        # 0) Grab the disc's cover art while the disc is still in the drive,
-        #    then override it with the real TMDB poster/backdrop when we have a key.
+        # 0) Follow the disc across drives, then grab the disc's cover art while
+        #    it's still in the drive, then override it with the real TMDB art.
+        await self._resolve_source_drive(job, report)
         await self._place_cover_art(job, report)
         await self._place_tmdb_art(job, report)
         # 1) Rip per title (sequential — one drive).
@@ -1029,6 +1031,72 @@ class Pipeline:
         (above Season NN) for TV."""
         vp = self._video_path_for(a)
         return vp.parent.parent if a.kind is MediaKind.TV else vp.parent
+
+    async def _resolve_source_drive(self, job: Job, report) -> None:
+        """Follow the disc across drives: if the job's disc:N no longer holds this
+        disc (moved to another drive, or makemkvcon renumbered the drives), find
+        the drive that does and re-point the rip there. Match by disc TITLE (the
+        volume label) first, then fall back to the fingerprint hash. Best-effort;
+        on any hiccup the original source is left untouched."""
+        src = job.source or ""
+        if not src.startswith("disc:") or job.disc is None:
+            return  # only for scanned disc jobs
+        try:
+            cur_idx = int(src.split(":", 1)[1])
+        except ValueError:
+            return
+        try:
+            # Short timeout: a wedged drive can make enumeration slow, and we don't
+            # want to delay the rip — just proceed with the original source then.
+            drives = await self.makemkv.list_drives(timeout=20)
+        except Exception:
+            return
+
+        want_label = (job.disc.volume_label or job.disc.disc_name or "").strip()
+
+        def label_matches(d) -> bool:
+            return bool(want_label) and (d.disc_name or "").strip().casefold() == want_label.casefold()
+
+        cur = next((d for d in drives if d.index == cur_idx), None)
+        if cur is not None and label_matches(cur):
+            return  # disc is still in the drive the job expects
+
+        # 1) another drive whose disc title (volume label) matches
+        for d in drives:
+            if d.index == cur_idx or d.index < 0 or getattr(d, "makemkv_blind", False):
+                continue
+            if label_matches(d):
+                self._rebind_drive(job, d, report, "disc title")
+                return
+
+        # 2) fallback: fingerprint (scan each candidate that has a disc — costlier)
+        if job.fingerprint:
+            for d in drives:
+                if (d.index == cur_idx or d.index < 0 or getattr(d, "makemkv_blind", False)
+                        or not d.disc_name):
+                    continue
+                try:
+                    scanned = await self.makemkv.scan(f"disc:{d.index}")
+                    if discinfo.disc_fingerprint(scanned) == job.fingerprint:
+                        self._rebind_drive(job, d, report, "fingerprint")
+                        return
+                except Exception:
+                    continue
+        # No match anywhere — leave the source as-is; the rip fails with the
+        # existing "reinsert the disc" handling.
+
+    def _rebind_drive(self, job: Job, drive, report, how: str) -> None:
+        new_src = f"disc:{drive.index}"
+        if new_src == job.source:
+            return
+        report.on_event(
+            f"Disc found in {new_src} ({drive.disc_name}) by {how} — ripping from "
+            f"there instead of {job.source}.")
+        job.source = new_src
+        if job.disc is not None:
+            job.disc.source = new_src
+            if drive.device:
+                job.disc.drive_device = drive.device
 
     async def _place_cover_art(self, job: Job, report) -> None:
         """Copy the disc's own cover art to each output folder as poster.jpg.
