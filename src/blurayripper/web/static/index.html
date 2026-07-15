@@ -790,7 +790,9 @@ function buildResting(card, j){
   // Failed disc job: let the user move the disc to another drive and rip from it
   // (a different drive can often read a sector the original couldn't).
   const isDisc = (j.source||'').startsWith('disc:');
-  if (j.state === 'failed' && isDisc) {
+  // Only when the disc is still needed (a title left to rip) — not for an
+  // encode/subtitle failure, where the rip is already done.
+  if (j.state === 'failed' && isDisc && j.needs_disc) {
     html += `<div class="row"><span class="muted">Rip from drive:</span>` +
       `<select data-drivesel style="flex:1;min-width:0;"><option value="${j.source}">${j.source} (current)</option></select>` +
       `<button class="sec" data-changedrive>Use this drive</button><span data-cmsg class="muted"></span></div>` +

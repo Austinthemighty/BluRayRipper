@@ -108,7 +108,7 @@
       "VideoTune": "",
       "VideoProfile": "auto",
       "VideoLevel": "auto",
-      "VideoOptionExtra": "ref=5:bframe=5:aq-mode=3",
+      "VideoOptionExtra": "ref=5:bframes=5:aq-mode=3",
       "VideoQualityType": 2,
       "VideoQualitySlider": 18,
       "VideoMultiPass": false,
