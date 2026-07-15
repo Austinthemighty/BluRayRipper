@@ -747,3 +747,21 @@ def test_change_source_repoints_job_to_another_drive(manager):
     # Unknown job
     with pytest.raises(KeyError):
         manager.change_source(999, "disc:1")
+
+
+def test_change_source_updates_drive_device(manager):
+    from blurayripper.pipeline import Job
+    from blurayripper.models import DiscInfo
+    from blurayripper.tools.makemkv import Drive
+    manager._drives_cache = [Drive(0, "E", "E:", "MINORITY_REPORT"),
+                             Drive(1, "F", "F:", "SV_S2_D1")]
+    wj = WebJob(id=602, source="disc:0", state=JobState.FAILED)
+    wj._pipeline_job = Job(source="disc:0")
+    wj._pipeline_job.disc = DiscInfo(source="disc:0", drive_device="E:", titles=[])
+    wj.disc = wj._pipeline_job.disc
+    manager.jobs[602] = wj
+
+    manager.change_source(602, "disc:1")
+    # drive_device follows the new drive, so auto-eject won't eject E:'s disc
+    assert wj.disc.drive_device == "F:"
+    assert wj._pipeline_job.disc.drive_device == "F:"

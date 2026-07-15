@@ -155,3 +155,28 @@ def test_ensure_ripped_clears_stale_partial(tmp_path, monkeypatch):
     assert seen["at_rip"] == []            # the stale partial was cleared first
     assert not stale.exists()
     assert ripped.name == "new_t05.mkv"    # the fresh rip is what gets used
+
+
+def test_eject_device_resolves_from_current_source(monkeypatch):
+    """Auto-eject targets the drive that currently maps to the rip source, not a
+    stale disc.drive_device — so it never ejects a different job's disc."""
+    from blurayripper.pipeline import Job
+    from blurayripper.models import DiscInfo
+    pipe = _pipe()
+    job = Job(source="disc:1")                       # disc was moved to disc:1
+    job.disc = DiscInfo(source="disc:1", drive_device="E:", titles=[])  # STALE E:
+    async def fake_list(timeout=60):
+        return [Drive(0, "E", "E:", "MINORITY_REPORT"), Drive(1, "F", "F:", "SV_S2_D1")]
+    monkeypatch.setattr(pipe.makemkv, "list_drives", fake_list)
+    assert asyncio.run(pipe._eject_device_for(job)) == "F:"   # NOT the stale E:
+
+
+def test_eject_device_falls_back_when_enumeration_fails(monkeypatch):
+    from blurayripper.pipeline import Job
+    from blurayripper.models import DiscInfo
+    pipe = _pipe()
+    job = Job(source="disc:1")
+    job.disc = DiscInfo(source="disc:1", drive_device="F:", titles=[])
+    async def boom(timeout=60): raise RuntimeError("drive scan down")
+    monkeypatch.setattr(pipe.makemkv, "list_drives", boom)
+    assert asyncio.run(pipe._eject_device_for(job)) == "F:"   # stored device

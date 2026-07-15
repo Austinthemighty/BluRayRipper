@@ -1007,11 +1007,27 @@ class JobManager:
         if self._live_state(wj) in self._REDO_BUSY:
             raise ValueError("Can't change the drive while the job is running.")
         wj.source = new_source
+        # Resolve the OS device for the new drive so auto-eject/cover-art target the
+        # RIGHT drive — a stale device would eject a DIFFERENT disc.
+        new_device = None
+        if new_source.startswith("disc:"):
+            try:
+                idx = int(new_source.split(":", 1)[1])
+                drv = next((d for d in self._drives_cache if d.index == idx), None)
+                new_device = drv.device if drv else None
+            except ValueError:
+                pass
         job = wj._pipeline_job
         if job is not None:
             job.source = new_source
             if getattr(job, "disc", None) is not None:
                 job.disc.source = new_source
+                if new_device:
+                    job.disc.drive_device = new_device
+        if wj.disc is not None:  # same object as job.disc when both exist; be safe
+            wj.disc.source = new_source
+            if new_device:
+                wj.disc.drive_device = new_device
         wj.log.append(f"Rip source changed to {new_source} — click Retry to rip from it.")
         self._persist(wj)
         self.bus.publish()
