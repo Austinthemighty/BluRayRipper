@@ -786,13 +786,53 @@ function lightbox(items, start){
 function buildResting(card, j){
   // done/failed jobs: offer a subtitle re-OCR (staged rip or cached subs).
   const body = card.querySelector('[data-body]');
-  body.innerHTML = `<div class="row"><button class="sec" data-redosubs title="Re-OCR subtitles from this job's staged rip or cached subs (no re-encode).">Redo subtitles</button><span data-msg class="muted"></span></div>`;
+  let html = `<div class="row"><button class="sec" data-redosubs title="Re-OCR subtitles from this job's staged rip or cached subs (no re-encode).">Redo subtitles</button><span data-msg class="muted"></span></div>`;
+  // Failed disc job: let the user move the disc to another drive and rip from it
+  // (a different drive can often read a sector the original couldn't).
+  const isDisc = (j.source||'').startsWith('disc:');
+  if (j.state === 'failed' && isDisc) {
+    html += `<div class="row"><span class="muted">Rip from drive:</span>` +
+      `<select data-drivesel style="flex:1;min-width:0;"><option value="${j.source}">${j.source} (current)</option></select>` +
+      `<button class="sec" data-changedrive>Use this drive</button><span data-cmsg class="muted"></span></div>` +
+      `<div class="muted" style="font-size:12px;">Move the disc to the other drive, pick it here, then Retry.</div>`;
+  }
+  body.innerHTML = html;
   body.querySelector('[data-redosubs]').onclick = async () => {
     const msg = body.querySelector('[data-msg]');
     msg.textContent = 'Re-OCR subtitles… (watch the log)';
     try { await api('POST','/api/jobs/'+j.id+'/redo-subs'); }
     catch(e){ msg.textContent = '⚠ '+e.message; }
   };
+  const sel = body.querySelector('[data-drivesel]');
+  if (sel) {
+    fetch('/api/drives').then(r=>r.json()).then(drives=>{
+      const cur = j.source;
+      sel.innerHTML = '';
+      for (const d of (drives||[])) {
+        if (d.makemkv_blind || d.index < 0) continue;   // not rippable
+        const opt = document.createElement('option');
+        opt.value = 'disc:' + d.index;
+        opt.textContent = `disc:${d.index} — ${d.disc_name || '(no disc)'} [${d.device||''}]`
+          + (opt.value === cur ? ' (current)' : '');
+        sel.appendChild(opt);
+      }
+      if (![...sel.options].some(o=>o.value===cur)) {
+        const o=document.createElement('option'); o.value=cur; o.textContent=cur+' (current)'; sel.appendChild(o);
+      }
+      sel.value = cur;
+    }).catch(()=>{});
+    body.querySelector('[data-changedrive]').onclick = async () => {
+      const cmsg = body.querySelector('[data-cmsg]');
+      const src = sel.value;
+      if (src === j.source) { cmsg.textContent = 'Pick a different drive first.'; return; }
+      cmsg.style.color = '#8b949e'; cmsg.textContent = 'Changing…';
+      try {
+        await api('POST','/api/jobs/'+j.id+'/change-source', {source: src});
+        cmsg.style.color = '#3fb950'; cmsg.textContent = `Set to ${src} — now click Retry.`;
+        j.source = src;
+      } catch(e){ cmsg.style.color = '#f85149'; cmsg.textContent = '⚠ '+e.message; }
+    };
+  }
 }
 
 function buildMatch(card, j){

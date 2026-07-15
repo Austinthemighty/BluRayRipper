@@ -94,6 +94,10 @@ class EditJob(BaseModel):
     edition: str | None = None
 
 
+class ChangeSource(BaseModel):
+    source: str
+
+
 class NameDrive(BaseModel):
     device: str
     name: str | None = None  # null/empty clears the custom name
@@ -278,6 +282,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/jobs/{job_id}/edit")
     async def edit_job(job_id: int, body: EditJob):
         _gate(lambda: manager.edit_job(job_id, body.grain_mode, body.tune_grain, body.edition))
+        return {"ok": True}
+
+    @app.post("/api/jobs/{job_id}/change-source")
+    async def change_source(job_id: int, body: ChangeSource):
+        try:
+            manager.change_source(job_id, body.source)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Job not found.")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         return {"ok": True}
 
     @app.post("/api/jobs/redo-subs-all")

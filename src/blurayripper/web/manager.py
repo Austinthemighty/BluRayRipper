@@ -993,6 +993,29 @@ class JobManager:
         self._persist(wj)
         self.bus.publish()
 
+    def change_source(self, job_id: int, new_source: str) -> None:
+        """Re-point a job at a different drive/selector (e.g. move the disc to a
+        drive that can read a bad sector). Not allowed while the job is running.
+        Completed titles keep their checkpoints (reused); the failed one re-rips
+        from the new drive on Retry."""
+        wj = self.jobs.get(job_id)
+        if wj is None:
+            raise KeyError(job_id)
+        new_source = (new_source or "").strip()
+        if not new_source.startswith(("disc:", "dev:", "iso:", "file:")):
+            raise ValueError("Source must be a selector like 'disc:1'.")
+        if self._live_state(wj) in self._REDO_BUSY:
+            raise ValueError("Can't change the drive while the job is running.")
+        wj.source = new_source
+        job = wj._pipeline_job
+        if job is not None:
+            job.source = new_source
+            if getattr(job, "disc", None) is not None:
+                job.disc.source = new_source
+        wj.log.append(f"Rip source changed to {new_source} — click Retry to rip from it.")
+        self._persist(wj)
+        self.bus.publish()
+
     def _source_disc_missing(self, wj: WebJob) -> bool:
         """True if the job rips from a disc:N whose drive currently has no disc,
         so retrying is pointless until it's reinserted. Uses the OS-aware drive

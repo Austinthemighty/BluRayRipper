@@ -721,3 +721,29 @@ def test_rip_failure_hint_classifies_drive_vs_read_vs_disc(manager):
     manager._schedule_auto_retry(wj3)
     assert manager._auto_retries.get(503, 0) == 0  # skipped
     assert any("reinsert" in l.lower() for l in wj3.log)
+
+
+def test_change_source_repoints_job_to_another_drive(manager):
+    from blurayripper.pipeline import Job
+    from blurayripper.models import DiscInfo
+    wj = WebJob(id=601, source="disc:0", state=JobState.FAILED)
+    wj._pipeline_job = Job(source="disc:0")
+    wj._pipeline_job.disc = DiscInfo(source="disc:0", disc_name="X", titles=[])
+    manager.jobs[601] = wj
+
+    manager.change_source(601, "disc:1")
+    assert wj.source == "disc:1"
+    assert wj._pipeline_job.source == "disc:1"          # rip reads this
+    assert wj._pipeline_job.disc.source == "disc:1"      # cover art / eject read this
+
+    # Bad selector rejected
+    with pytest.raises(ValueError):
+        manager.change_source(601, "E:")
+    # Not allowed mid-rip
+    wj.state = JobState.RIPPING
+    wj._pipeline_job.state = JobState.RIPPING
+    with pytest.raises(ValueError):
+        manager.change_source(601, "disc:0")
+    # Unknown job
+    with pytest.raises(KeyError):
+        manager.change_source(999, "disc:1")
