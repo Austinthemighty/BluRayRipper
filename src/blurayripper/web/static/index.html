@@ -23,6 +23,11 @@
      intrinsic width, so a nowrap job title ellipsizes instead of forcing the
      whole page wider than the screen (horizontal-scroll / clipped controls). */
   .wrap > * { min-width: 0; }
+  /* Drives + Workers sit in a row at the top; the Queue spans full width below. */
+  .toppanels { display: flex; flex-wrap: wrap; gap: 16px; padding: 16px 20px 0; align-items: flex-start; }
+  .toppanels .drives-panel { flex: 1 1 420px; min-width: 0; }
+  .toppanels #workers-panel { flex: 1 1 300px; min-width: 0; }
+  .queuewrap { padding: 16px 20px; }
   .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: #8b949e; margin: 0 0 10px; }
   button { background: #238636; color: #fff; border: 0; border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
@@ -66,8 +71,8 @@
   /* Mobile: stack the two columns, wrap the header, bigger touch targets. */
   @media (max-width: 760px) {
     .wrap { grid-template-columns: minmax(0, 1fr); padding: 10px; gap: 10px; }
-    /* Queue first — on a phone you're monitoring; Drives/Add are one scroll down. */
-    .wrap > .panel { order: -1; }
+    .toppanels { padding: 10px 10px 0; gap: 10px; }
+    .queuewrap { padding: 10px; }
     header { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
     header h1 { font-size: 20px; }
     #redoall { margin-left: 0 !important; }
@@ -108,9 +113,9 @@
   .pager .pbtn:disabled{opacity:.4; cursor:default;}
   .pager .pinfo{margin-left:auto; font-variant-numeric:tabular-nums;}
   /* Settings modal */
-  #settings-modal{position:fixed; inset:0; background:rgba(1,4,9,.7); z-index:3000; display:none;
+  .modal, #settings-modal{position:fixed; inset:0; background:rgba(1,4,9,.7); z-index:3000; display:none;
     align-items:flex-start; justify-content:center; overflow:auto; padding:24px;}
-  #settings-modal.open{display:flex;}
+  .modal.open, #settings-modal.open{display:flex;}
   .sheet{background:#161b22; border:1px solid #30363d; border-radius:10px; max-width:860px; width:100%; margin:auto;
     padding:0 20px 16px; box-shadow:0 10px 40px rgba(0,0,0,.5);}
   .sheet .shead{position:sticky; top:0; background:#161b22; padding:16px 0 10px; border-bottom:1px solid #21262d; z-index:1;}
@@ -143,30 +148,45 @@
 </header>
 <div id="stats"></div>
 <div id="bulkbar"></div>
-<div class="wrap">
-  <div>
-    <div class="panel">
-      <h2>Drives</h2>
-      <div id="drives"><span class="muted">Loading…</span></div>
-      <button class="sec" onclick="loadDrives()">Refresh</button>
-    </div>
-    <div class="panel" style="margin-top:16px;">
-      <h2>Add by selector</h2>
-      <div class="row">
-        <input id="manualSrc" placeholder="disc:0 / iso:/path" style="flex:1;" />
-        <button onclick="addManual()">Add</button>
+<div class="toppanels">
+  <div class="panel drives-panel">
+    <div class="row" style="justify-content:space-between; align-items:center; gap:8px;">
+      <h2 style="margin:0;">Drives</h2>
+      <div class="row" style="gap:6px;">
+        <button class="sec" onclick="loadDrives()">Refresh</button>
+        <button class="sec" onclick="openAddSelector()" title="Add a source that isn't a listed drive: disc:N, an ISO, a BDMV/VIDEO_TS folder, or a .mkv file/folder.">+ Add by selector</button>
       </div>
-      <div class="muted" style="font-size:12px;">disc:N · iso:/x.iso · file:/BDMV · a .mkv file · a folder of .mkv</div>
     </div>
-    <div class="panel" id="workers-panel" style="margin-top:16px; display:none;">
-      <h2>Workers</h2>
-      <div id="workers"></div>
-    </div>
+    <div id="drives" style="margin-top:10px;"><span class="muted">Loading…</span></div>
   </div>
+  <div class="panel" id="workers-panel" style="display:none;">
+    <h2>Workers</h2>
+    <div id="workers"></div>
+  </div>
+</div>
+<div class="queuewrap">
   <div class="panel">
     <h2>Queue</h2>
     <div id="pager" class="pager"></div>
-    <div id="jobs"><span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span></div>
+    <div id="jobs"><span id="placeholder" class="muted">No jobs yet. Add a disc above.</span></div>
+  </div>
+</div>
+
+<div id="addsel-modal" class="modal" onclick="if(event.target===this)closeAddSelector();">
+  <div class="sheet" style="max-width:460px;">
+    <div class="shead"><h2>Add by selector</h2></div>
+    <div style="padding:10px 0;">
+      <div class="row">
+        <input id="manualSrc" placeholder="disc:0 / iso:/path" style="flex:1;"
+               onkeydown="if(event.key==='Enter')submitAddSelector();" />
+      </div>
+      <div class="muted" style="font-size:12px; margin-top:8px;">disc:N · iso:/x.iso · file:/BDMV · a .mkv file · a folder of .mkv</div>
+    </div>
+    <div class="sfoot">
+      <button onclick="submitAddSelector()">Add</button>
+      <button class="sec" onclick="closeAddSelector()">Cancel</button>
+      <span id="addsel-msg" class="muted"></span>
+    </div>
   </div>
 </div>
 
@@ -240,7 +260,7 @@ async function loadDrives() {
       const btns = document.createElement('div');
       btns.className = 'drive-btns';
       const add = document.createElement('button');
-      add.textContent = 'Add'; add.onclick = () => addDisc('disc:' + d.index);
+      add.textContent = 'Add'; add.onclick = () => addDisc('disc:' + d.index).catch(e => alert(e.message));
       const ej = document.createElement('button');
       ej.className = 'sec'; ej.textContent = '⏏'; ej.title = 'Eject (open tray)';
       ej.style.padding = '6px 9px';
@@ -274,11 +294,10 @@ function toast(msg){
   setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 250); }, 3500);
 }
 async function addDisc(source) {
-  try {
-    const res = await api('POST','/api/jobs',{source});
-    const ids = (res && res.ids) || [];
-    toast(ids.length ? `Added ${source} — queued as #${ids.join(', #')}` : `Added ${source}`);
-  } catch(e){ alert(e.message);} }
+  const res = await api('POST','/api/jobs',{source});
+  const ids = (res && res.ids) || [];
+  toast(ids.length ? `Added ${source} — queued as #${ids.join(', #')}` : `Added ${source}`);
+}
 async function renameDrive(d){
   const current = d.label || '';
   const name = prompt(`Name for drive ${d.device||('disc:'+d.index)} (blank to clear):`, current);
@@ -290,7 +309,20 @@ async function trayAction(d, action){
   try { await api('POST','/api/drives/'+action,{device:d.device||null}); }
   catch(e){ alert((action==='eject'?'Eject':'Close tray')+' failed: '+e.message); }
 }
-function addManual(){ const v=document.getElementById('manualSrc').value.trim(); if(v) addDisc(v); }
+function openAddSelector(){
+  const m = document.getElementById('addsel-modal');
+  document.getElementById('addsel-msg').textContent = '';
+  m.classList.add('open');
+  const inp = document.getElementById('manualSrc');
+  inp.value = ''; inp.focus();
+}
+function closeAddSelector(){ document.getElementById('addsel-modal').classList.remove('open'); }
+async function submitAddSelector(){
+  const v = document.getElementById('manualSrc').value.trim();
+  if(!v) return;
+  try { await addDisc(v); closeAddSelector(); }
+  catch(e){ document.getElementById('addsel-msg').textContent = e.message; }
+}
 
 function badgeClass(s){ if(s==='done')return'done'; if(s==='failed')return'failed'; if(s.startsWith('awaiting'))return'await'; return''; }
 
@@ -437,7 +469,7 @@ function renderJobs(snap) {
     if (u) u.textContent = (snap.uptime != null) ? 'up ' + fmtUptime(snap.uptime) : ''; }
   renderStats(snap.jobs || []);           // counts always reflect ALL jobs
   renderWorkers(snap.workers || []);
-  if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); renderJobs._sig = ''; renderJobs._known = new Set(); renderBulkBar(0); const pg = document.getElementById('pager'); if (pg){ pg.innerHTML=''; pg._sig=''; } return; }
+  if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc above.</span>'; renderedStateClear(); renderJobs._sig = ''; renderJobs._known = new Set(); renderBulkBar(0); const pg = document.getElementById('pager'); if (pg){ pg.innerHTML=''; pg._sig=''; } return; }
   const ph = document.getElementById('placeholder'); if (ph) ph.remove();
   const allJobs = [...snap.jobs].filter(j => !jobFilter || catOf(j.state)===jobFilter)
                                 .sort((a,b) => jobRank(a)-jobRank(b) || a.id-b.id);
