@@ -65,16 +65,17 @@ class SubtitleEdit:
         cmd = list(self._launcher())
         subs = self._settings.subtitles
         if self._is_cli_tool():
-            # seconv (SubtitleEdit 5.1 CLI): GNU-style `--` options, and it takes
-            # the OCR language directly (--ocr-language), so — unlike the GUI batch
-            # tool — there's NO need to pre-select the language in the GUI.
+            # seconv (SubtitleEdit 5.x CLI, Spectre.Console.Cli): the format is an
+            # OPTION (--format), and option values are space-separated. It takes the
+            # OCR language directly (--ocr-language), so — unlike the GUI batch tool
+            # — there's NO need to pre-select the language in the GUI.
             cmd += [
                 str(sup_path),
-                "subrip",
-                "--ocr-engine:tesseract",
-                f"--ocr-language:{tesseract_language(language)}",
-                "--encoding:utf-8",
-                f"--output-folder:{out_dir}",
+                "--format", "subrip",
+                "--ocr-engine", "tesseract",
+                "--ocr-language", tesseract_language(language),
+                "--encoding", "utf-8",
+                "--output-folder", str(out_dir),
                 "--overwrite",
             ]
             if subs.fix_common_errors:
