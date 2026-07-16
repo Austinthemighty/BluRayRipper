@@ -225,6 +225,26 @@ def test_snapshot_reports_server_uptime(manager):
     assert "uptime" in snap and isinstance(snap["uptime"], int) and snap["uptime"] >= 0
 
 
+def test_stamp_log_prefixes_time_and_is_idempotent():
+    import re
+
+    from blurayripper.persistence import stamp_log
+    stamped = stamp_log("Scanning disc:0 ...")
+    assert re.match(r"^\[\d\d:\d\d:\d\d\] Scanning disc:0 \.\.\.$", stamped)
+    # Re-stamping an already-stamped line (e.g. reloaded from the store) is a no-op.
+    assert stamp_log(stamped) == stamped
+
+
+def test_reporter_timestamps_job_log(manager):
+    import re
+
+    from blurayripper.web.manager import _Reporter
+    wj = WebJob(id=1, source="disc:0")
+    _Reporter(manager, wj).on_event("Found 3 titles.")
+    assert wj.log and wj.log[-1].endswith("Found 3 titles.")
+    assert re.match(r"^\[\d\d:\d\d:\d\d\] ", wj.log[-1])
+
+
 async def test_full_gate_flow(manager):
     wj = manager.add_disc("disc:0")
     await _settle()

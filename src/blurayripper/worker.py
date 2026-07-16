@@ -23,6 +23,7 @@ from .persistence import (
     disc_from_dict,
     disc_to_dict,
     make_store,
+    stamp_log,
 )
 from .pipeline import Job, JobState, Pipeline
 from .scheduler import EncodeScheduler
@@ -61,7 +62,7 @@ class WorkerReporter:
 
     def on_event(self, message: str) -> None:
         print(f"[job {self._job_id}] {message}", flush=True)
-        self.log.append(message)
+        self.log.append(stamp_log(message))
         del self.log[:-200]
 
     def on_progress(self, stage: str, fraction: float | None) -> None:

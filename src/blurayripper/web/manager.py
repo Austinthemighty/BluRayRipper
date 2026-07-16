@@ -27,6 +27,7 @@ from ..persistence import (
     disc_from_dict,
     disc_to_dict,
     make_store,
+    stamp_log,
 )
 from ..pipeline import Job, JobState, Pipeline, _resolve_path
 from ..scheduler import EncodeScheduler
@@ -122,7 +123,7 @@ class _Reporter:
         self._wj = wj
 
     def on_event(self, message: str) -> None:
-        self._wj.log.append(message)
+        self._wj.log.append(stamp_log(message))
         del self._wj.log[:-200]  # cap log length
         self._m.bus.publish()
 
@@ -215,7 +216,7 @@ class JobManager:
         try:
             self.store.save(self._to_record(wj))
         except Exception as exc:  # never let a persistence hiccup kill a job
-            wj.log.append(f"persist failed: {exc}")
+            wj.log.append(stamp_log(f"persist failed: {exc}"))
 
     def _to_record(self, wj: WebJob) -> JobRecord:
         job = wj._pipeline_job
@@ -330,7 +331,7 @@ class JobManager:
         wj.state = JobState.READY
         wj.progress = 0.0
         wj.error = None
-        wj.log.append("Recovered after restart — resuming.")
+        wj.log.append(stamp_log("Recovered after restart — resuming."))
         wj._task = self._spawn(self._run_job(wj))
 
     # --- queries --------------------------------------------------------
@@ -593,7 +594,7 @@ class JobManager:
         # Also clear the pipeline job's FAILED state, or _live_state keeps
         # reporting "failed" and the retry looks like it did nothing.
         wj._pipeline_job.state = JobState.READY
-        wj.log.append("Retrying…")
+        wj.log.append(stamp_log("Retrying…"))
         self._persist(wj)
         self.bus.publish()
         wj._task = self._spawn(self._run_job(wj))
@@ -827,7 +828,7 @@ class JobManager:
             return
         task = wj._task
         if task is not None and not task.done():
-            wj.log.append("Removing — cancelling in-flight work…")
+            wj.log.append(stamp_log("Removing — cancelling in-flight work…"))
             self.bus.publish()
             task.cancel()
             try:
@@ -997,7 +998,7 @@ class JobManager:
                 # — its finished rip is reused, only the encode re-runs.
                 wj.state = JobState.READY
                 wj.error = None
-                wj.log.append("Interrupted (server stopping?) — will resume on restart.")
+                wj.log.append(stamp_log("Interrupted (server stopping?) — will resume on restart."))
             else:
                 wj.state = JobState.FAILED
                 wj.error = f"{type(exc).__name__}: {exc}"
@@ -1042,7 +1043,7 @@ class JobManager:
             wj.disc.source = new_source
             if new_device:
                 wj.disc.drive_device = new_device
-        wj.log.append(f"Rip source changed to {new_source} — click Retry to rip from it.")
+        wj.log.append(stamp_log(f"Rip source changed to {new_source} — click Retry to rip from it."))
         self._persist(wj)
         self.bus.publish()
 
@@ -1105,21 +1106,21 @@ class JobManager:
         if hint is None and self._source_disc_missing(wj):
             hint = "The disc isn't in the drive — reinsert it, then click Retry."
         if hint:
-            wj.log.append(hint)
+            wj.log.append(stamp_log(hint))
             self._notify(f"💿 {self._name_of(wj)} needs attention",
                          f"Job #{wj.id}: {hint}")
             return
         n = self._auto_retries.get(wj.id, 0)
         if n >= self.settings.auto_retry_max:
             if self.settings.auto_retry_max:
-                wj.log.append(f"Auto-retry exhausted ({n}) — hit Retry to try again.")
+                wj.log.append(stamp_log(f"Auto-retry exhausted ({n}) — hit Retry to try again."))
             self._notify(f"❌ Failed: {self._name_of(wj)}",
                          f"Job #{wj.id} failed: {wj.error}", priority="high")
             return
         self._auto_retries[wj.id] = n + 1
         delay = min(30 * (2 ** n), 300)
-        wj.log.append(
-            f"Auto-retry {n + 1}/{self.settings.auto_retry_max} in {delay}s…")
+        wj.log.append(stamp_log(
+            f"Auto-retry {n + 1}/{self.settings.auto_retry_max} in {delay}s…"))
         self._spawn(self._auto_retry_later(wj.id, delay))
 
     async def _auto_retry_later(self, job_id: int, delay: float) -> None:
