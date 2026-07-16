@@ -17,6 +17,7 @@ MemoryStore without needing a database.
 from __future__ import annotations
 
 import json
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
@@ -24,14 +25,18 @@ from datetime import datetime
 
 from .models import DiscInfo, EpisodeAssignment, MediaKind, Stream, StreamType, Title
 
+# Matches an already-stamped line — with or without the date, so lines written
+# by an older build (time-only) aren't re-stamped either.
+_STAMPED_RE = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2}:\d{2}\] ")
+
 
 def stamp_log(message: str) -> str:
-    """Prefix a job-log line with the local wall-clock time it occurred, so the
-    UI shows when each step (disc scan, naming, encode, …) actually started.
-    Already-stamped lines (reloaded from the store) are left untouched."""
-    if message.startswith("[") and len(message) > 9 and message[9:11] == "] ":
+    """Prefix a job-log line with the local date + wall-clock time it occurred,
+    so the UI shows when each step (disc scan, naming, encode, …) actually
+    started. Already-stamped lines (reloaded from the store) are left untouched."""
+    if _STAMPED_RE.match(message):
         return message
-    return f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
+    return f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
 
 
 # --- serializable record ------------------------------------------------

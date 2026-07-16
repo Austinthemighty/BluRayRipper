@@ -230,9 +230,11 @@ def test_stamp_log_prefixes_time_and_is_idempotent():
 
     from blurayripper.persistence import stamp_log
     stamped = stamp_log("Scanning disc:0 ...")
-    assert re.match(r"^\[\d\d:\d\d:\d\d\] Scanning disc:0 \.\.\.$", stamped)
+    assert re.match(r"^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\] Scanning disc:0 \.\.\.$", stamped)
     # Re-stamping an already-stamped line (e.g. reloaded from the store) is a no-op.
     assert stamp_log(stamped) == stamped
+    # An older time-only stamp is also recognized and not re-stamped.
+    assert stamp_log("[12:15:07] old line") == "[12:15:07] old line"
 
 
 def test_reporter_timestamps_job_log(manager):
@@ -242,7 +244,7 @@ def test_reporter_timestamps_job_log(manager):
     wj = WebJob(id=1, source="disc:0")
     _Reporter(manager, wj).on_event("Found 3 titles.")
     assert wj.log and wj.log[-1].endswith("Found 3 titles.")
-    assert re.match(r"^\[\d\d:\d\d:\d\d\] ", wj.log[-1])
+    assert re.match(r"^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\] ", wj.log[-1])
 
 
 async def test_full_gate_flow(manager):
