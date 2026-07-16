@@ -110,3 +110,16 @@ def test_postgres_roundtrip():
         assert loaded[999001].checkpoints == {"0": {"placed": True}}
     finally:
         store.delete(999001)
+
+
+def test_release_allows_immediate_reclaim():
+    """A worker releasing its claim lets the job be re-claimed at once, instead of
+    waiting for the frozen heartbeat to age past stale_after_seconds."""
+    store = MemoryStore()
+    store.save(JobRecord(id=1, source="x", state="ready"))
+    assert store.claim_next("W1", ["ready"]).id == 1
+    # Still 'ready' but already claimed -> no other worker can take it.
+    assert store.claim_next("W2", ["ready"]) is None
+    store.release(1)
+    # After release it's claimable again (mirrors a retry the manager re-queues).
+    assert store.claim_next("W2", ["ready"]).id == 1

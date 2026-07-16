@@ -700,6 +700,25 @@ async def test_active_jobs_flags_only_live_local_tasks(manager):
             t.cancel()
 
 
+async def test_resume_clears_stale_pipeline_state(manager):
+    """_resume must reset the restored pipeline-job state (e.g. RIPPING) so the
+    recovered job doesn't report a phantom in-flight state before its task runs
+    (same reason retry() resets it)."""
+    wj = WebJob(id=42, source="disc:0", state=JobState.RIPPING)
+    job = Job(source="disc:0")
+    job.state = JobState.RIPPING
+    wj._pipeline_job = job
+    manager.jobs[42] = wj
+
+    manager._resume(wj)
+    # Synchronously after resume (the spawned task hasn't advanced yet): the live
+    # state is READY, not the stale RIPPING _live_state would otherwise surface.
+    assert wj.state is JobState.READY
+    assert wj._pipeline_job.state is JobState.READY
+    assert manager._live_state(wj) is JobState.READY
+    await _settle()
+
+
 def test_is_stalled_detects_orphaned_worker_job(manager):
     from blurayripper.persistence import WorkerInfo
     wj = WebJob(id=13, source="file:x.mkv", state=JobState.ENCODING)
