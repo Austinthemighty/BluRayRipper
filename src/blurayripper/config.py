@@ -212,6 +212,12 @@ class SubtitleSettings:
     # When set, each placed SRT is also copied here with a text sheet pre-filling
     # the OpenSubtitles manual-upload form. Blank/None = off.
     upload_export_dir: Path | None = None
+    # SubtitleEdit's "Dictionaries" folder (holds <lang>_OCRFixReplaceList.xml).
+    # seconv only runs the deeper "Fix common OCR errors" pass — the one that
+    # repairs glyph confusions like a capital I misread as "|" — when
+    # --fix-common-errors is paired with --dictionary-folder pointing here.
+    # Blank/None = seconv uses its own default (which may lack the replace list).
+    dictionary_folder: Path | None = None
 
 
 @dataclass
@@ -432,6 +438,7 @@ def load_settings(config_dir: Path | None = None, extra_overlay: dict | None = N
 
     sub_cfg = data.get("subtitles", {})
     _upload_dir = _override("BLURAYRIPPER_SUB_UPLOAD_DIR", sub_cfg.get("upload_export_dir"))
+    _dict_dir = _override("BLURAYRIPPER_SUB_DICT_DIR", sub_cfg.get("dictionary_folder"))
     subtitles = SubtitleSettings(
         fix_common_errors=bool(sub_cfg.get("fix_common_errors", True)),
         remove_text_for_hi=bool(sub_cfg.get("remove_text_for_hi", False)),
@@ -440,6 +447,7 @@ def load_settings(config_dir: Path | None = None, extra_overlay: dict | None = N
         extract_concurrency=int(sub_cfg.get("extract_concurrency", 2)),
         ocr_timeout_seconds=int(sub_cfg.get("ocr_timeout_seconds", 3600)),
         upload_export_dir=_resolve_path(_upload_dir, REPO_ROOT) if _upload_dir else None,
+        dictionary_folder=_resolve_path(_dict_dir, REPO_ROOT) if _dict_dir else None,
     )
 
     audio_cfg = data.get("audio", {})

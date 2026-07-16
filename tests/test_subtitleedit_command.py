@@ -71,3 +71,28 @@ def test_seconv_uses_gnu_options_and_ocr_language(monkeypatch):
     # colon-joined and old slash-style options must NOT appear
     assert "--ocr-engine:tesseract" not in j
     assert "/ocrengine:tesseract" not in j and "/outputfolder" not in j
+
+
+def test_seconv_dictionary_folder_wires_ocr_fix_pass(monkeypatch, tmp_path):
+    """--dictionary-folder is added (enabling the OCR-error fix pass that repairs
+    e.g. a capital I read as '|') only when fix_common_errors AND a folder are set."""
+    s = load_settings()
+    monkeypatch.setattr(s.tools, "subtitleedit_runner", None)
+    monkeypatch.setattr(s.tools, "subtitleedit", r"C:\SE-Conv\seconv.exe")
+    monkeypatch.setattr(s.subtitles, "dictionary_folder", tmp_path)
+
+    # With the fix pass on, the folder is passed as a --dictionary-folder value.
+    monkeypatch.setattr(s.subtitles, "fix_common_errors", True)
+    cmd = SubtitleEdit(s).build_command(Path("x.sup"), "eng", Path("/out"))
+    assert cmd[cmd.index("--dictionary-folder") + 1] == str(tmp_path)
+
+    # No fix pass -> no dictionary folder (nothing to fix with).
+    monkeypatch.setattr(s.subtitles, "fix_common_errors", False)
+    assert "--dictionary-folder" not in SubtitleEdit(s).build_command(
+        Path("x.sup"), "eng", Path("/out"))
+
+    # No folder configured -> flag absent even with the fix pass on.
+    monkeypatch.setattr(s.subtitles, "fix_common_errors", True)
+    monkeypatch.setattr(s.subtitles, "dictionary_folder", None)
+    assert "--dictionary-folder" not in SubtitleEdit(s).build_command(
+        Path("x.sup"), "eng", Path("/out"))
