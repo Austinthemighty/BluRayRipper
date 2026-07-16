@@ -287,8 +287,14 @@ class Pipeline:
             return reused
         extracted = await self._extract_subs(ripped_mkv, sub_dir, report)
         if extracted is None:
-            # Extraction failed this run — don't checkpoint, so a retry re-attempts.
-            return []
+            # Extraction genuinely FAILED (mkvextract/identify error) — distinct
+            # from [] ("this title has no kept-language subs", which proceeds).
+            # Raise so the job fails and a retry re-extracts, instead of silently
+            # placing a subtitle-less video and marking the title done (cp["placed"]
+            # would then make every later resume skip it — subs lost for good).
+            raise RuntimeError(
+                f"Subtitle extraction failed for title {title_id} (see log above); "
+                "retry the job to re-extract.")
         cp["subs"] = [
             _sub_checkpoint(self.settings.storage.staging_dir, sup, tr) for sup, tr in extracted
         ]
