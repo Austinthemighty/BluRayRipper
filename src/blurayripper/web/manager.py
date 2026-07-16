@@ -405,12 +405,16 @@ class JobManager:
 
     async def _refresh_from_store(self) -> None:
         while not self.closing:
+            # Run the (blocking, synchronous psycopg) reads in a thread so a slow
+            # query doesn't stall the event loop — and thus every client's SSE/UI —
+            # for its whole duration. Each store call opens its own connection, so
+            # off-loop execution is safe. This loop only runs with a durable store.
             try:
-                self._workers_cache = self.store.list_workers()
+                self._workers_cache = await asyncio.to_thread(self.store.list_workers)
             except Exception as exc:
                 self._log_store_error("list_workers", exc)
             try:
-                records = {r.id: r for r in self.store.load_all()}
+                records = {r.id: r for r in await asyncio.to_thread(self.store.load_all)}
                 changed = False
                 for wj in list(self.jobs.values()):
                     rec = records.get(wj.id)
