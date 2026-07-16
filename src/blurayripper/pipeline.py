@@ -660,7 +660,6 @@ class Pipeline:
         staging_dir = self.settings.storage.staging_dir
         prior_rip = cp.get("ripped_path")
         prior_path = _resolve_path(staging_dir, prior_rip) if prior_rip else None
-        did_rip = False
         if prior_path and prior_path.exists():
             report.on_event(f"Resuming title {title_id}: reusing ripped file.")
             ripped_mkv = prior_path
@@ -694,11 +693,15 @@ class Pipeline:
             # disc title. A short file raises here, so it isn't reused — it re-rips.
             await self._verify_rip_duration(job, title_id, ripped_mkv, report)
             cp["ripped_path"] = _rel_path(staging_dir, ripped_mkv)
-            did_rip = True
+            job._ripped_this_run = True
             _checkpoint(report)
 
+        # Eject after the LAST selected title, as long as SOMETHING was ripped this
+        # run — not only when this specific title was freshly ripped. Otherwise a
+        # resume where the last title is reused from a checkpoint (did_rip=False)
+        # while an earlier title re-rips would never eject the disc.
         if (
-            did_rip
+            getattr(job, "_ripped_this_run", False)
             and self.settings.auto_eject
             and title_id == job.selected_title_ids[-1]
             and job.source.split(":", 1)[0] in ("disc", "dev")
