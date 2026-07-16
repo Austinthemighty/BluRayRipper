@@ -721,6 +721,39 @@ class _KeyPress:
                 termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old)
 
 
+def _find_git() -> str | None:
+    """Locate a git executable. Many Windows boxes use GitHub Desktop, which bundles
+    git but never puts it on PATH — so also look in its versioned app folder and the
+    usual Git-for-Windows install dirs. BLURAYRIPPER_GIT overrides everything."""
+    import os
+    import shutil
+    from pathlib import Path
+
+    override = os.environ.get("BLURAYRIPPER_GIT")
+    if override:
+        return override if Path(override).exists() else shutil.which(override)
+
+    onpath = shutil.which("git")
+    if onpath:
+        return onpath
+    if sys.platform != "win32":
+        return None
+
+    candidates: list[Path] = []
+    localapp = os.environ.get("LOCALAPPDATA", "")
+    if localapp:
+        gh = Path(localapp) / "GitHubDesktop"
+        # app-<version> changes on every GitHub Desktop update — take the newest.
+        for sub in ("cmd/git.exe", "mingw64/bin/git.exe"):
+            candidates += sorted(gh.glob(f"app-*/resources/app/git/{sub}"), reverse=True)
+        candidates.append(Path(localapp) / "Programs" / "Git" / "cmd" / "git.exe")
+    for base in (os.environ.get("ProgramFiles", r"C:\Program Files"),
+                 os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")):
+        candidates.append(Path(base) / "Git" / "cmd" / "git.exe")
+        candidates.append(Path(base) / "Git" / "bin" / "git.exe")
+    return next((str(c) for c in candidates if c.exists()), None)
+
+
 def _pull_and_restart(console) -> None:
     """git pull --ff-only in the repo, then re-exec the worker with the same args.
     Restarts on the current code even if the pull fails, so the worker stays up."""
@@ -729,23 +762,30 @@ def _pull_and_restart(console) -> None:
 
     from .config import REPO_ROOT
 
-    console.print("[bold cyan]Pulling latest code…[/bold cyan]")
-    sys.stdout.flush()
-    try:
-        r = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "pull", "--ff-only"],
-            capture_output=True, text=True, timeout=180)
-        if r.stdout.strip():
-            console.print(r.stdout.strip())
-        if r.returncode != 0:
-            console.print(
-                f"[yellow]git pull did not succeed (exit {r.returncode}) — "
-                "restarting on the current code.[/yellow]")
-            if r.stderr.strip():
-                console.print(f"[yellow]{r.stderr.strip()}[/yellow]")
-    except Exception as exc:  # network/git error must not leave the worker dead
-        console.print(f"[yellow]git pull failed ({type(exc).__name__}: {exc}) — "
-                      "restarting on the current code.[/yellow]")
+    git = _find_git()
+    if not git:
+        console.print(
+            "[yellow]git not found — GitHub Desktop bundles git but doesn't add it to "
+            "PATH. Set BLURAYRIPPER_GIT to your git.exe, or install Git for Windows. "
+            "Restarting on the current code (no pull).[/yellow]")
+    else:
+        console.print(f"[bold cyan]Pulling latest code…[/bold cyan] [dim]({git})[/dim]")
+        sys.stdout.flush()
+        try:
+            r = subprocess.run(
+                [git, "-C", str(REPO_ROOT), "pull", "--ff-only"],
+                capture_output=True, text=True, timeout=180)
+            if r.stdout.strip():
+                console.print(r.stdout.strip())
+            if r.returncode != 0:
+                console.print(
+                    f"[yellow]git pull did not succeed (exit {r.returncode}) — "
+                    "restarting on the current code.[/yellow]")
+                if r.stderr.strip():
+                    console.print(f"[yellow]{r.stderr.strip()}[/yellow]")
+        except Exception as exc:  # network/git error must not leave the worker dead
+            console.print(f"[yellow]git pull failed ({type(exc).__name__}: {exc}) — "
+                          "restarting on the current code.[/yellow]")
     console.print("[bold green]Restarting worker…[/bold green]")
     sys.stdout.flush()
     sys.stderr.flush()
