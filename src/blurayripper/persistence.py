@@ -34,6 +34,7 @@ class WorkerInfo:
     job_id: int | None
     stage: str | None
     seconds_since_seen: float
+    uptime_seconds: float = 0.0  # since the worker PROCESS (re)started
 
 
 @dataclass
@@ -181,8 +182,13 @@ class Store(ABC):
         return max((r.id for r in self.load_all()), default=0)
 
     def record_worker(self, worker_id: str, version: str | None,
-                      job_id: int | None, stage: str | None) -> None:
-        """Upsert a worker's presence/heartbeat. No-op for non-durable stores."""
+                      job_id: int | None, stage: str | None,
+                      run_token: str | None = None) -> None:
+        """Upsert a worker's presence/heartbeat. No-op for non-durable stores.
+
+        ``run_token`` is a per-process id: when it changes (a worker restart), the
+        store resets the worker's started_at so uptime is measured from the new
+        process, not from when the worker was first ever seen."""
 
     def list_workers(self) -> list[WorkerInfo]:
         """Workers seen recently (for the UI). Empty for non-durable stores."""
@@ -273,12 +279,16 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS state TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_by TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS heartbeat TIMESTAMPTZ;
 CREATE TABLE IF NOT EXISTS workers (
-    worker_id TEXT PRIMARY KEY,
-    version   TEXT,
-    job_id    BIGINT,
-    stage     TEXT,
-    last_seen TIMESTAMPTZ NOT NULL DEFAULT now()
+    worker_id  TEXT PRIMARY KEY,
+    version    TEXT,
+    job_id     BIGINT,
+    stage      TEXT,
+    last_seen  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    run_token  TEXT
 );
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS run_token TEXT;
 CREATE TABLE IF NOT EXISTS worker_settings (
     worker_id  TEXT PRIMARY KEY,
     overlay    JSONB NOT NULL,
@@ -371,14 +381,20 @@ class PostgresStore(Store):
             cur.execute("UPDATE jobs SET claimed_by = NULL WHERE id = %s", (job_id,))
 
     def record_worker(self, worker_id: str, version: str | None,
-                      job_id: int | None, stage: str | None) -> None:
+                      job_id: int | None, stage: str | None,
+                      run_token: str | None = None) -> None:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO workers (worker_id, version, job_id, stage, last_seen) "
-                "VALUES (%s, %s, %s, %s, now()) ON CONFLICT (worker_id) DO UPDATE SET "
+                "INSERT INTO workers (worker_id, version, job_id, stage, last_seen, "
+                "run_token) VALUES (%s, %s, %s, %s, now(), %s) "
+                "ON CONFLICT (worker_id) DO UPDATE SET "
                 "version = EXCLUDED.version, job_id = EXCLUDED.job_id, "
-                "stage = EXCLUDED.stage, last_seen = now()",
-                (worker_id, version, job_id, stage),
+                "stage = EXCLUDED.stage, last_seen = now(), "
+                # Reset the clock only when the process changed (new run_token).
+                "started_at = CASE WHEN workers.run_token IS DISTINCT FROM EXCLUDED.run_token "
+                "THEN now() ELSE workers.started_at END, "
+                "run_token = EXCLUDED.run_token",
+                (worker_id, version, job_id, stage, run_token),
             )
 
     def get_worker_settings(self, worker_id: str) -> dict:
@@ -415,10 +431,12 @@ class PostgresStore(Store):
                 "DELETE FROM workers WHERE last_seen < now() - interval '1 hour'")
             cur.execute(
                 "SELECT worker_id, version, job_id, stage, "
-                "EXTRACT(EPOCH FROM (now() - last_seen)) FROM workers "
+                "EXTRACT(EPOCH FROM (now() - last_seen)), "
+                "EXTRACT(EPOCH FROM (now() - started_at)) FROM workers "
                 "WHERE last_seen > now() - interval '10 minutes' ORDER BY worker_id")
             rows = cur.fetchall()
-        return [WorkerInfo(w, v, j, s, float(age or 0)) for (w, v, j, s, age) in rows]
+        return [WorkerInfo(w, v, j, s, float(age or 0), float(up or 0))
+                for (w, v, j, s, age, up) in rows]
 
 
 def make_store(database_url: str | None) -> Store:

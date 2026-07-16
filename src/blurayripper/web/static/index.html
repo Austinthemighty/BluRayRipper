@@ -134,6 +134,7 @@
 <header>
   <h1>BluRayRipper</h1>
   <span class="cap" id="ver" title="Running version (git commit count + hash). Compare across machines to spot stale code."></span>
+  <span class="cap" id="uptime" title="How long this server process has been running. Restart from ⚙ Settings to pick up pulled code."></span>
   <span class="cap" id="cap"></span>
   <button class="sec" id="redoall" style="margin-left:auto;" title="Re-OCR subtitles for every job that has names assigned (uses staged/cached subs; no re-encode).">Re-OCR all subtitles</button>
   <button class="sec" id="refreshart" title="Re-fetch the real poster + backdrop from TMDB for every named job, overwriting wrong/generic art in each folder.">Refresh artwork</button>
@@ -374,6 +375,16 @@ function renderBulkBar(count){
   } else host.innerHTML = '';
 }
 
+function fmtUptime(sec){
+  sec = Math.max(0, Math.round(sec || 0));
+  const d = Math.floor(sec/86400), h = Math.floor(sec%86400/3600),
+        m = Math.floor(sec%3600/60), s = sec%60;
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
 function renderWorkers(workers){
   const panel = document.getElementById('workers-panel');
   const host = document.getElementById('workers');
@@ -388,7 +399,7 @@ function renderWorkers(workers){
       <div style="min-width:0;flex:1;">
         <div class="wname"><b>${w.id}</b></div>
         <div class="muted wsub">${state}${busy && w.stage ? ' · '+w.stage : ''}</div>
-        <div class="muted" style="font-size:11px;">v${w.version||'?'} · seen ${w.age}s ago</div>
+        <div class="muted" style="font-size:11px;">v${w.version||'?'} · seen ${w.age}s ago${w.uptime != null ? ' · up '+fmtUptime(w.uptime) : ''}</div>
       </div></div>`;
   }).join('');
 }
@@ -422,6 +433,8 @@ function renderJobs(snap) {
   renderJobs._lastSnap = snap;
   const host = document.getElementById('jobs');
   if (snap.version) { const v = document.getElementById('ver'); if (v) v.textContent = 'v' + snap.version; }
+  { const u = document.getElementById('uptime');
+    if (u) u.textContent = (snap.uptime != null) ? 'up ' + fmtUptime(snap.uptime) : ''; }
   renderStats(snap.jobs || []);           // counts always reflect ALL jobs
   renderWorkers(snap.workers || []);
   if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the left.</span>'; renderedStateClear(); renderJobs._sig = ''; renderJobs._known = new Set(); renderBulkBar(0); const pg = document.getElementById('pager'); if (pg){ pg.innerHTML=''; pg._sig=''; } return; }

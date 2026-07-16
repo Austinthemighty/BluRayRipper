@@ -13,6 +13,7 @@ import asyncio
 import itertools
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -176,6 +177,8 @@ class JobManager:
         self.drive_names = DriveNames(
             settings.storage.output_dir / ".blurayripper" / "drive_names.json")
         self.closing = False
+        # Monotonic so the reported uptime is immune to wall-clock adjustments.
+        self._start_monotonic = time.monotonic()
         self._ids = itertools.count(1)
         self._tasks: set[asyncio.Task] = set()
         # Bounds how many jobs prep (rip+subs+grain) at once — so a restart that
@@ -466,10 +469,16 @@ class JobManager:
         workers = [
             {"id": w.worker_id, "version": w.version, "job_id": w.job_id,
              "stage": w.stage, "age": round(w.seconds_since_seen),
-             "stale": w.seconds_since_seen > stale}
+             "stale": w.seconds_since_seen > stale,
+             "uptime": round(w.uptime_seconds)}
             for w in self._workers_cache
         ]
-        return {"jobs": jobs, "version": get_version(), "workers": workers}
+        return {
+            "jobs": jobs,
+            "version": get_version(),
+            "workers": workers,
+            "uptime": round(time.monotonic() - self._start_monotonic),
+        }
 
     async def refresh_artwork(self, job_id: int) -> int:
         """Re-fetch TMDB poster/backdrop for one job, overwriting its folder art."""
