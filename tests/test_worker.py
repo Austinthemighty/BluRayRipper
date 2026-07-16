@@ -80,3 +80,65 @@ def test_worker_id_is_stable_hostname_by_default(monkeypatch):
     assert WorkerRunner(load_settings()).worker_id == "SteamMachine"
     # An explicit --name still wins (for >1 worker per host).
     assert WorkerRunner(load_settings(), worker_id="encoder-A").worker_id == "encoder-A"
+
+
+def test_claimable_states_excludes_subs_unless_worker_does_subs():
+    from blurayripper.worker import _SUBS_STATES
+    s = load_settings()
+    s.cluster.worker_does_subs = False
+    assert set(WorkerRunner(s, worker_id="w1")._claimable_states()) == set(CLAIMABLE_STATES)
+    assert "extracting_subs" not in WorkerRunner(s, worker_id="w1")._claimable_states()
+    s.cluster.worker_does_subs = True
+    assert set(WorkerRunner(s, worker_id="w1")._claimable_states()) == (
+        set(CLAIMABLE_STATES) | set(_SUBS_STATES))
+
+
+def test_fully_ripped_guard(tmp_path, monkeypatch):
+    s = load_settings()
+    monkeypatch.setattr(s.storage, "staging_dir", tmp_path)
+    r = WorkerRunner(s, worker_id="w1")
+
+    placed = JobRecord(id=1, source="disc:0", state="ready", selected_title_ids=[0],
+                       checkpoints={"0": {"placed": True}})
+    assert r._fully_ripped(placed) is True             # already placed -> ready
+
+    missing = JobRecord(id=2, source="disc:0", state="ready", selected_title_ids=[0],
+                        checkpoints={"0": {"ripped_path": "job_2/rip/t000/x.mkv"}})
+    assert r._fully_ripped(missing) is False           # rip file absent -> serve still ripping
+
+    f = tmp_path / "job_2" / "rip" / "t000" / "x.mkv"
+    f.parent.mkdir(parents=True)
+    f.write_text("x")
+    assert r._fully_ripped(missing) is True             # now present -> ready
+
+
+async def test_worker_releases_job_still_being_ripped(tmp_path, monkeypatch):
+    """A worker that claims a job the serve box is still ripping (claimable READY,
+    but no rip file yet) must release it back, not fail it or steal it."""
+    settings = load_settings()
+    monkeypatch.setattr(settings.storage, "staging_dir", tmp_path / "stage")
+    monkeypatch.setattr(settings, "database_url", "memory://test")
+    settings.cluster.worker_poll_seconds = 0
+    runner = WorkerRunner(settings, worker_id="w1")
+    runner.store = MemoryStore()
+    runner.store.save(JobRecord(
+        id=9, source="disc:0", state="ready", selected_title_ids=[0],
+        assignments=[assignment_to_dict(EpisodeAssignment(0, MediaKind.MOVIE, "X", 2000))],
+        checkpoints={"0": {"ripped_path": "job_9/rip/t000/x.mkv"}}))  # file doesn't exist
+
+    processed = []
+
+    async def fake_process(rec):
+        processed.append(rec.id)
+    monkeypatch.setattr(runner, "_process", fake_process)
+
+    orig_release = runner.store.release
+
+    def release_and_stop(jid):
+        orig_release(jid)
+        runner.request_stop()
+    monkeypatch.setattr(runner.store, "release", release_and_stop)
+
+    await runner.run()
+    assert processed == []                                  # never handed to _process
+    assert runner.store.claim_next("w2", ["ready"]).id == 9  # released -> claimable again
