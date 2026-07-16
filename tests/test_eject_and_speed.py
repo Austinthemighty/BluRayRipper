@@ -90,3 +90,66 @@ async def test_eject_fires_when_last_title_reused_but_earlier_ripped(tmp_path, m
     assert ejected == []                                  # not the last title -> no eject
     await pipe._ensure_ripped(job, 1, staging_root, r)   # reused, but LAST -> eject
     assert ejected == ["D:"]
+
+
+class _NotifyReport:
+    def __init__(self): self.notes = []
+    def on_event(self, m): pass
+    def on_progress(self, *a): pass
+    def notify(self, title, message): self.notes.append((title, message))
+
+
+async def test_rip_finish_notifies_with_movie_name(tmp_path, monkeypatch):
+    """Finishing the last rip pushes a 'finished ripping' notification (named after
+    the movie/show mapping), even when auto-eject is off."""
+    from blurayripper.config import load_settings
+    from blurayripper.models import DiscInfo, EpisodeAssignment, MediaKind, Title
+    from blurayripper.pipeline import Job, Pipeline
+
+    s = load_settings()
+    s.auto_eject = False
+    s.rip_duration_tolerance_pct = 0
+    monkeypatch.setattr(s.storage, "staging_dir", tmp_path)
+    pipe = Pipeline(s)
+
+    job = Job(source="disc:0")
+    job.disc = DiscInfo(source="disc:0", disc_name="DISC LABEL", titles=[Title(title_id=0)])
+    job.selected_title_ids = [0]
+    job.assignments = {0: EpisodeAssignment(0, MediaKind.MOVIE, "WALL-E", 2008)}
+
+    async def fake_rip(source, title_id, rip_dir, on_progress=None, on_message=None):
+        rip_dir.mkdir(parents=True, exist_ok=True)
+        p = rip_dir / "t.mkv"
+        p.write_text("x")
+        return [p]
+    monkeypatch.setattr(pipe.makemkv, "rip_title", fake_rip)
+
+    r = _NotifyReport()
+    await pipe._ensure_ripped(job, 0, tmp_path / "job_1", r)
+    assert r.notes, "expected a finished-ripping notification"
+    title, _msg = r.notes[0]
+    assert "Finished ripping" in title and "WALL-E" in title
+
+
+async def test_no_rip_no_notify(tmp_path, monkeypatch):
+    """A resume that reuses the already-ripped last title (nothing ripped this run)
+    doesn't re-notify."""
+    from blurayripper.config import load_settings
+    from blurayripper.models import DiscInfo, Title
+    from blurayripper.pipeline import Job, Pipeline, _rel_path
+
+    s = load_settings()
+    monkeypatch.setattr(s.storage, "staging_dir", tmp_path)
+    pipe = Pipeline(s)
+    job = Job(source="disc:0")
+    job.disc = DiscInfo(source="disc:0", disc_name="X", titles=[Title(title_id=0)])
+    job.selected_title_ids = [0]
+    d = tmp_path / "job_1" / "rip" / "t000"
+    d.mkdir(parents=True)
+    f = d / "x.mkv"
+    f.write_text("x")
+    job.checkpoints[0] = {"ripped_path": _rel_path(tmp_path, f)}
+
+    r = _NotifyReport()
+    await pipe._ensure_ripped(job, 0, tmp_path / "job_1", r)
+    assert r.notes == []

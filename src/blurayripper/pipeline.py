@@ -702,27 +702,47 @@ class Pipeline:
             job._ripped_this_run = True
             _checkpoint(report)
 
-        # Eject after the LAST selected title, as long as SOMETHING was ripped this
-        # run — not only when this specific title was freshly ripped. Otherwise a
-        # resume where the last title is reused from a checkpoint (did_rip=False)
-        # while an earlier title re-rips would never eject the disc.
+        # After the LAST selected title — as long as SOMETHING was ripped this run
+        # (not only when this specific title was freshly ripped, or a resume that
+        # reuses the last title would skip this) — eject and notify that the disc
+        # is done, so you know it's safe to swap in the next one.
         if (
             getattr(job, "_ripped_this_run", False)
-            and self.settings.auto_eject
             and title_id == job.selected_title_ids[-1]
             and job.source.split(":", 1)[0] in ("disc", "dev")
         ):
-            device = await self._eject_device_for(job)
-            try:
-                eject(device)
-                report.on_event(
-                    f"Ejected disc ({device or 'default drive'}) — safe to load the next one."
-                )
-            except Exception as exc:
-                hint = (" — on Windows the force-eject IOCTL needs admin; run "
-                        "`serve` as Administrator" if sys.platform.startswith("win") else "")
-                report.on_event(f"Auto-eject failed ({device or 'no device'}): {exc}{hint}")
+            ejected = False
+            if self.settings.auto_eject:
+                device = await self._eject_device_for(job)
+                try:
+                    eject(device)
+                    ejected = True
+                    report.on_event(
+                        f"Ejected disc ({device or 'default drive'}) — safe to load the next one."
+                    )
+                except Exception as exc:
+                    hint = (" — on Windows the force-eject IOCTL needs admin; run "
+                            "`serve` as Administrator" if sys.platform.startswith("win") else "")
+                    report.on_event(f"Auto-eject failed ({device or 'no device'}): {exc}{hint}")
+            name = self._rip_notify_name(job)
+            _emit_notify(
+                report, f"💿 Finished ripping: {name}",
+                f"“{name}” is done ripping"
+                + (" — disc ejected, safe to swap in the next one." if ejected
+                   else ". Safe to swap the disc."))
         return ripped_mkv
+
+    def _rip_notify_name(self, job: Job) -> str:
+        """A human name for the just-ripped disc: prefer the movie/show title from
+        the naming mapping, fall back to the disc label, then the raw source."""
+        if job.selected_title_ids:
+            a = job.assignments.get(job.selected_title_ids[-1])
+            title = getattr(a, "show_or_movie_title", None) if a else None
+            if title:
+                return title
+        if job.disc and job.disc.disc_name:
+            return job.disc.disc_name
+        return job.source
 
     async def _eject_device_for(self, job: Job) -> str | None:
         """The OS device to auto-eject: re-resolve it from the CURRENT rip source
@@ -1262,6 +1282,14 @@ def _checkpoint(report) -> None:
     fn = getattr(report, "checkpoint", None)
     if fn is not None:
         fn()
+
+
+def _emit_notify(report, title: str, message: str) -> None:
+    """Push a user notification, if the reporter supports it. The web _Reporter
+    does (it forwards to the notify service); the CLI/worker reporters don't."""
+    fn = getattr(report, "notify", None)
+    if fn is not None:
+        fn(title, message)
 
 
 def _sub_checkpoint(root: Path, sup: Path, track: SubtitleTrack) -> dict:

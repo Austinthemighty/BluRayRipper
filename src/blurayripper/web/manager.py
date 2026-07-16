@@ -137,6 +137,10 @@ class _Reporter:
         """Pipeline reached a durable checkpoint (rip done / output placed)."""
         self._m._persist(self._wj)
 
+    def notify(self, title: str, message: str) -> None:
+        """Pipeline asked to push a user notification (e.g. disc finished ripping)."""
+        self._m._notify(title, message)
+
     async def resolve_grain(self, job, preview) -> bool:
         """Park the job at the grain gate with preview assets; wait for the pick."""
         wj = self._wj
