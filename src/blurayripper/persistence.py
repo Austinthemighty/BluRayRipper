@@ -20,8 +20,18 @@ import json
 import time
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 
 from .models import DiscInfo, EpisodeAssignment, MediaKind, Stream, StreamType, Title
+
+
+def stamp_log(message: str) -> str:
+    """Prefix a job-log line with the local wall-clock time it occurred, so the
+    UI shows when each step (disc scan, naming, encode, …) actually started.
+    Already-stamped lines (reloaded from the store) are left untouched."""
+    if message.startswith("[") and len(message) > 9 and message[9:11] == "] ":
+        return message
+    return f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
 
 
 # --- serializable record ------------------------------------------------
