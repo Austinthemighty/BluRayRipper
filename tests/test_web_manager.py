@@ -700,6 +700,36 @@ async def test_active_jobs_flags_only_live_local_tasks(manager):
             t.cancel()
 
 
+def test_is_stalled_detects_orphaned_worker_job(manager):
+    from blurayripper.persistence import WorkerInfo
+    wj = WebJob(id=13, source="file:x.mkv", state=JobState.ENCODING)
+    manager.jobs[13] = wj
+
+    # Store says ENCODING, but the only live worker is on a DIFFERENT job -> stalled.
+    manager._workers_cache = [WorkerInfo("W1", "v", 14, "Encode", 5.0, 100.0)]
+    assert manager._is_stalled(wj, JobState.ENCODING) is True
+
+    # A live worker heartbeating THIS job -> not stalled.
+    manager._workers_cache = [WorkerInfo("W1", "v", 13, "Encode", 5.0, 100.0)]
+    assert manager._is_stalled(wj, JobState.ENCODING) is False
+
+    # That worker's heartbeat has gone stale -> stalled again.
+    stale = manager.settings.cluster.stale_after_seconds
+    manager._workers_cache = [WorkerInfo("W1", "v", 13, "Encode", stale + 50, 100.0)]
+    assert manager._is_stalled(wj, JobState.ENCODING) is True
+
+    # A live LOCAL task on this box (e.g. rip-box local encode) -> not stalled.
+    class _LiveTask:
+        def done(self): return False
+    wj._task = _LiveTask()
+    manager._workers_cache = []
+    assert manager._is_stalled(wj, JobState.ENCODING) is False
+    wj._task = None
+
+    # READY is a claimable queue slot, not active work -> never "stalled".
+    assert manager._is_stalled(wj, JobState.READY) is False
+
+
 def test_source_disc_missing_uses_drive_cache(manager):
     from blurayripper.tools.makemkv import Drive
     wj = WebJob(id=401, source="disc:0", state=JobState.FAILED)
