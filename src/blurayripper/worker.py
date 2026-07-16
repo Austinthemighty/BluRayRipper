@@ -214,6 +214,13 @@ class WorkerRunner:
             hb.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await hb
+            # Drop our claim now the job is DONE/FAILED. Otherwise claimed_by stays
+            # set with a frozen heartbeat, so a user's immediate Retry can't be
+            # re-claimed by any worker until the heartbeat ages past stale_after
+            # (default 180s). The state is already non-claimable here, so releasing
+            # is safe; it only matters once the manager flips a retry back to READY.
+            with contextlib.suppress(Exception):
+                self.store.release(rec.id)
 
     async def _heartbeat(self, reporter: WorkerReporter) -> None:
         while True:

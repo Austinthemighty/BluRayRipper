@@ -331,6 +331,12 @@ class JobManager:
         wj.state = JobState.READY
         wj.progress = 0.0
         wj.error = None
+        # Clear the pipeline job's restored in-flight state (e.g. RIPPING) too, or
+        # _live_state keeps reporting it until the resumed task advances — same
+        # reason retry() resets it. Otherwise a just-recovered job reads as
+        # "ripping"/"encoding" with nothing actually running yet.
+        if wj._pipeline_job is not None:
+            wj._pipeline_job.state = JobState.READY
         wj.log.append(stamp_log("Recovered after restart — resuming."))
         wj._task = self._spawn(self._run_job(wj))
 
@@ -401,8 +407,8 @@ class JobManager:
         while not self.closing:
             try:
                 self._workers_cache = self.store.list_workers()
-            except Exception:
-                pass
+            except Exception as exc:
+                self._log_store_error("list_workers", exc)
             try:
                 records = {r.id: r for r in self.store.load_all()}
                 changed = False
@@ -425,9 +431,18 @@ class JobManager:
                     changed = True
                 if changed:
                     self.bus.publish()
-            except Exception:
-                pass
+            except Exception as exc:
+                self._log_store_error("load_all", exc)
             await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
+
+    def _log_store_error(self, op: str, exc: Exception) -> None:
+        # A persistent store failure (schema drift, bad row) would otherwise make
+        # the UI silently stop reflecting worker progress with zero diagnostics.
+        # Log the cause once per distinct message, not every poll.
+        msg = f"[store] {op} failed: {type(exc).__name__}: {exc}"
+        if msg != getattr(self, "_last_store_error", None):
+            print(msg)
+            self._last_store_error = msg
 
     async def _watch_drives(self) -> None:
         while not self.closing:
@@ -852,8 +867,14 @@ class JobManager:
             task.cancel()
             try:
                 await task
-            except (asyncio.CancelledError, Exception):
-                pass
+            except asyncio.CancelledError:
+                # Expected: we cancelled `task`. But if remove() ITSELF is being
+                # cancelled (e.g. server shutdown), propagate instead of swallowing.
+                cur = asyncio.current_task()
+                if cur is not None and cur.cancelling():
+                    raise
+            except Exception:
+                pass  # the job's task errored on its way down — fine, we're removing it
         library.cleanup(self.settings.storage.staging_dir / f"job_{wj.id}")
         self.jobs.pop(job_id, None)
         try:
