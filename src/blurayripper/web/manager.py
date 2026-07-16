@@ -377,6 +377,25 @@ class JobManager:
         JobState.READY, JobState.ENCODING, JobState.EXTRACTING_SUBS,
         JobState.OCR_SUBS, JobState.PLACING, JobState.DONE, JobState.FAILED,
     )
+    # States that imply active work is happening RIGHT NOW (unlike READY, which is
+    # a claimable queue slot). A job in one of these with no live local task and no
+    # live worker claiming it has been orphaned — its worker died/restarted — so it
+    # shows a frozen "encoding" that isn't actually progressing.
+    _ACTIVE_WORKER_STATES = (
+        JobState.ENCODING, JobState.EXTRACTING_SUBS, JobState.OCR_SUBS, JobState.PLACING,
+    )
+
+    def _is_stalled(self, wj: WebJob, live_state: JobState) -> bool:
+        if live_state not in self._ACTIVE_WORKER_STATES:
+            return False
+        task = getattr(wj, "_task", None)
+        if task is not None and not task.done():
+            return False  # a live coroutine on THIS box is working it
+        stale = self.settings.cluster.stale_after_seconds
+        for w in self._workers_cache:
+            if w.job_id == wj.id and w.seconds_since_seen <= stale:
+                return False  # a live remote worker is heartbeating it
+        return True
 
     async def _refresh_from_store(self) -> None:
         while not self.closing:
@@ -1183,6 +1202,9 @@ class JobManager:
             "state": live_state.value if hasattr(live_state, "value") else str(live_state),
             "stage": wj.stage,
             "progress": round(wj.progress, 4),
+            # True when the state says "encoding/OCR/placing" but nothing is actually
+            # working it (worker died/restarted). Lets the UI flag a frozen job.
+            "stalled": self._is_stalled(wj, live_state),
             "error": wj.error,
             "disc_name": wj.disc.disc_name if wj.disc else None,
             "kind_guess": (discinfo.guess_kind(wj.disc).value if wj.disc else None),

@@ -548,10 +548,14 @@ function removeJob(j){
 }
 
 function liveUpdate(card, j){
-  card.querySelector('[data-badge]').textContent = j.state.replace(/_/g,' ');
-  card.querySelector('[data-badge]').className = 'badge '+badgeClass(j.state);
+  const badge = card.querySelector('[data-badge]');
+  badge.textContent = j.stalled ? 'stalled' : j.state.replace(/_/g,' ');
+  badge.className = 'badge ' + (j.stalled ? 'failed' : badgeClass(j.state));
   card.querySelector('[data-bar]').style.width = Math.round(j.progress*100)+'%';
-  card.querySelector('[data-stage]').textContent = j.error ? ('⚠ '+j.error) : (j.stage||'');
+  card.querySelector('[data-stage]').textContent =
+    j.error ? ('⚠ '+j.error)
+    : j.stalled ? ('⚠ No worker is running this (last: '+(j.stage||'—')+') — waiting for a free worker to reclaim it.')
+    : (j.stage||'');
   const logEl = card.querySelector('[data-log]');
   const logText = (j.log||[]).join('\n');
   if (logEl.textContent !== logText) {           // don't reset scroll when unchanged
