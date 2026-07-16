@@ -203,6 +203,12 @@ class EncodeSettings:
 class SubtitleSettings:
     fix_common_errors: bool = True
     remove_text_for_hi: bool = False
+    # OCR of a wide subtitle image yields one very long line; SubtitleEdit only
+    # wraps it (into two lines, respecting libse's ~43-char single-line max) when
+    # asked to. split_long_lines does the wrap; balance_lines evens the two lines.
+    # seconv-only (the GUI batch tool uses different action keywords).
+    split_long_lines: bool = True
+    balance_lines: bool = True
     ocr_concurrency: int = 4  # how many subtitle tracks to OCR at once
     keep_extracted: bool = True  # cache extracted .sup subs so re-OCR needs no re-rip
     extract_concurrency: int = 2  # how many titles may read the rip + extract subs at once
@@ -442,6 +448,10 @@ def load_settings(config_dir: Path | None = None, extra_overlay: dict | None = N
     subtitles = SubtitleSettings(
         fix_common_errors=bool(sub_cfg.get("fix_common_errors", True)),
         remove_text_for_hi=bool(sub_cfg.get("remove_text_for_hi", False)),
+        split_long_lines=_bool_override(
+            "BLURAYRIPPER_SUB_SPLIT_LONG_LINES", sub_cfg.get("split_long_lines"), True),
+        balance_lines=_bool_override(
+            "BLURAYRIPPER_SUB_BALANCE_LINES", sub_cfg.get("balance_lines"), True),
         ocr_concurrency=int(sub_cfg.get("ocr_concurrency", 4)),
         keep_extracted=bool(sub_cfg.get("keep_extracted", True)),
         extract_concurrency=int(sub_cfg.get("extract_concurrency", 2)),

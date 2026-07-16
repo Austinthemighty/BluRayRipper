@@ -87,6 +87,12 @@ class SubtitleEdit:
                     cmd += ["--dictionary-folder", str(subs.dictionary_folder)]
             if subs.remove_text_for_hi:
                 cmd.append("--remove-text-for-hi")
+            # OCR emits one long single line; wrap (and balance) it into two so it
+            # respects the max single-line length instead of running off-screen.
+            if subs.split_long_lines:
+                cmd.append("--split-long-lines")
+            if subs.balance_lines:
+                cmd.append("--balance-lines")
             return cmd
         # Classic GUI SubtitleEdit.exe batch mode. It needs the /convert keyword,
         # and its batch OCR does NOT accept a language flag — Tesseract's language
