@@ -96,3 +96,20 @@ def test_seconv_dictionary_folder_wires_ocr_fix_pass(monkeypatch, tmp_path):
     monkeypatch.setattr(s.subtitles, "dictionary_folder", None)
     assert "--dictionary-folder" not in SubtitleEdit(s).build_command(
         Path("x.sup"), "eng", Path("/out"))
+
+
+def test_seconv_line_wrapping_flags_toggle(monkeypatch):
+    """--split-long-lines / --balance-lines wrap a too-long OCR line into two."""
+    s = load_settings()
+    monkeypatch.setattr(s.tools, "subtitleedit_runner", None)
+    monkeypatch.setattr(s.tools, "subtitleedit", r"C:\SE-Conv\seconv.exe")
+
+    monkeypatch.setattr(s.subtitles, "split_long_lines", True)
+    monkeypatch.setattr(s.subtitles, "balance_lines", True)
+    cmd = SubtitleEdit(s).build_command(Path("x.sup"), "eng", Path("/out"))
+    assert "--split-long-lines" in cmd and "--balance-lines" in cmd
+
+    monkeypatch.setattr(s.subtitles, "split_long_lines", False)
+    monkeypatch.setattr(s.subtitles, "balance_lines", False)
+    cmd = SubtitleEdit(s).build_command(Path("x.sup"), "eng", Path("/out"))
+    assert "--split-long-lines" not in cmd and "--balance-lines" not in cmd
