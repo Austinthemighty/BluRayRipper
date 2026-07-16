@@ -309,6 +309,36 @@ async def _cmd_check(args: argparse.Namespace) -> int:
             "vcruntime140.dll [dim](Windows)[/dim]",
             f"[{_vcr_color}]{vcr_msg}[/{_vcr_color}]",
         )
+
+    # Tesseract OCR engine. seconv / se-cli shell out to a SYSTEM tesseract on
+    # PATH (the GUI SubtitleEdit.exe bundles its own), so a seconv worker without
+    # Tesseract fails every subtitle OCR. Missing is fatal for a CLI build, just
+    # a note for the bundled GUI. Also cross-check the languages we keep against
+    # the installed Tesseract language packs.
+    from .tools.subtitleedit import SubtitleEdit, tesseract_language
+
+    tess_exe, tess_ver, tess_langs = _tesseract_status()
+    uses_cli_ocr = bool(settings.tools.subtitleedit) and SubtitleEdit(settings)._is_cli_tool()
+    if tess_exe:
+        tool_table.add_row("tesseract", f"[green]{tess_ver or tess_exe}[/green]")
+        want = {tesseract_language(l) for l in settings.languages.keep}
+        missing_langs = sorted(w for w in want if w not in tess_langs) if tess_langs else []
+        if tess_langs:
+            tool_table.add_row(
+                "tesseract langs",
+                (f"[green]{', '.join(sorted(tess_langs))}[/green]" if not missing_langs
+                 else f"[yellow]installed: {', '.join(sorted(tess_langs))} — "
+                      f"MISSING for kept languages: {', '.join(missing_langs)}[/yellow]"))
+    elif uses_cli_ocr:
+        tool_table.add_row(
+            "tesseract",
+            "[red]NOT found on PATH — seconv/se-cli OCR needs it. Install from "
+            "github.com/UB-Mannheim/tesseract (check 'Add to PATH')[/red]")
+        ok = False
+    else:
+        tool_table.add_row(
+            "tesseract [dim](optional)[/dim]",
+            "[dim]not on PATH — GUI SubtitleEdit.exe uses its bundled copy[/dim]")
     console.print(tool_table)
 
     # Folders (writability). Every configured folder path is probed by actually
@@ -456,6 +486,45 @@ def _vcruntime_status() -> tuple[str, str]:
     if not _locate("vcruntime140_1.dll"):
         return "warn", f"{core} — but vcruntime140_1.dll missing (newer dovi_tool builds need it)"
     return "ok", core
+
+
+def _tesseract_status() -> tuple[str, str | None, set[str]]:
+    """Probe for the Tesseract OCR binary on PATH and its installed languages.
+
+    Unlike the classic SubtitleEdit.exe (which bundles its own Tesseract), the
+    seconv / se-cli builds shell out to a SYSTEM ``tesseract`` on PATH — so a
+    worker with seconv but no Tesseract fails every OCR mid-job. Surface it here.
+
+    Returns (path_or_None, version_or_None, installed_lang_codes).
+    """
+    import shutil
+    import subprocess
+
+    exe = shutil.which("tesseract")
+    if not exe:
+        return None, None, set()
+    version: str | None = None
+    langs: set[str] = set()
+    try:
+        out = subprocess.run(
+            [exe, "--version"], capture_output=True, text=True, timeout=15)
+        first = (out.stdout or out.stderr or "").splitlines()
+        if first:
+            version = first[0].strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        out = subprocess.run(
+            [exe, "--list-langs"], capture_output=True, text=True, timeout=15)
+        # First line is a header ("List of available languages ..."); the rest
+        # are one code per line.
+        for line in (out.stdout or "").splitlines()[1:]:
+            code = line.strip()
+            if code:
+                langs.add(code)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return exe, version, langs
 
 
 def _check_writable(path) -> bool:
