@@ -264,11 +264,21 @@ async def _cmd_check(args: argparse.Namespace) -> int:
     def _on_disk(p: str | None) -> bool:
         return bool(p) and _shutil.which(p) is not None
 
+    # The subtitleedit path can be the classic GUI SubtitleEdit.exe or a seconv /
+    # se-cli build; they need different command syntax, so show which mode is live.
+    from .tools.subtitleedit import SubtitleEdit, tesseract_language
+
+    uses_cli_ocr = bool(settings.tools.subtitleedit) and SubtitleEdit(settings)._is_cli_tool()
+
     tool_table = Table("Tool", "Status", title="External tools")
     for key in ("makemkvcon", "handbrakecli", "mkvmerge", "mkvextract", "subtitleedit"):
         path = getattr(settings.tools, key)
         if _on_disk(path):
-            tool_table.add_row(key, f"[green]{path}[/green]")
+            note = ""
+            if key == "subtitleedit":
+                note = (" [dim](seconv/se-cli CLI mode)[/dim]" if uses_cli_ocr
+                        else " [dim](GUI batch mode — bundled Tesseract, GUI-set language)[/dim]")
+            tool_table.add_row(key, f"[green]{path}[/green]{note}")
         elif path:
             tool_table.add_row(
                 key, f"[red]{path} — configured but NOT found on this machine[/red]")
@@ -315,10 +325,7 @@ async def _cmd_check(args: argparse.Namespace) -> int:
     # Tesseract fails every subtitle OCR. Missing is fatal for a CLI build, just
     # a note for the bundled GUI. Also cross-check the languages we keep against
     # the installed Tesseract language packs.
-    from .tools.subtitleedit import SubtitleEdit, tesseract_language
-
     tess_exe, tess_ver, tess_langs = _tesseract_status()
-    uses_cli_ocr = bool(settings.tools.subtitleedit) and SubtitleEdit(settings)._is_cli_tool()
     if tess_exe:
         tool_table.add_row("tesseract", f"[green]{tess_ver or tess_exe}[/green]")
         want = {tesseract_language(l) for l in settings.languages.keep}
