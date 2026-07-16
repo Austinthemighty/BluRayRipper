@@ -40,10 +40,29 @@ def test_gui_exe_gets_convert_but_seconv_does_not(monkeypatch):
     gui = SubtitleEdit(s).build_command(Path("x.sup"), "eng", Path("/out"))
     assert gui[1] == "/convert" and gui[2].endswith("x.sup")
 
-    # seconv / se-cli -> convert-only, must NOT get /convert (it would open GUI / fail)
+    # seconv / se-cli -> convert-only, must NOT get /convert; input is first arg,
+    # format is "subrip", and options are the GNU --style ones.
     for cli in (r"C:\se-cli\seconv.exe", r"C:\tools\se-cli", "/usr/bin/seconv"):
         monkeypatch.setattr(s.tools, "subtitleedit", cli)
         cmd = SubtitleEdit(s).build_command(Path("x.sup"), "eng", Path("/out"))
         assert "/convert" not in cmd
-        assert cmd[1].endswith("x.sup") and cmd[2] == "srt"     # input is first arg
-        assert "/ocrengine:tesseract" in cmd
+        assert cmd[1].endswith("x.sup") and cmd[2] == "subrip"
+        assert "--ocr-engine:tesseract" in cmd
+
+
+def test_seconv_uses_gnu_options_and_ocr_language(monkeypatch):
+    """seconv (SE 5.1 CLI) takes --style options and the OCR language directly."""
+    s = load_settings()
+    monkeypatch.setattr(s.tools, "subtitleedit_runner", None)
+    monkeypatch.setattr(s.tools, "subtitleedit", r"C:\SE-Conv\seconv.exe")
+    monkeypatch.setattr(s.subtitles, "fix_common_errors", True)
+    cmd = SubtitleEdit(s).build_command(Path("x.sup"), "ger", Path("/out"))
+    j = " ".join(cmd)
+    assert "/convert" not in cmd                       # not the GUI keyword
+    assert cmd[1].endswith("x.sup") and cmd[2] == "subrip"
+    assert "--ocr-engine:tesseract" in cmd
+    assert "--ocr-language:deu" in cmd                 # ger -> deu (Tesseract name)
+    assert "--output-folder:/out" in j and "--overwrite" in cmd
+    assert "--fix-common-errors" in cmd
+    # old slash-style options must NOT appear
+    assert "/ocrengine:tesseract" not in j and "/outputfolder" not in j
