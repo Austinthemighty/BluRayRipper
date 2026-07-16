@@ -62,17 +62,33 @@ class SubtitleEdit:
         return stem in ("seconv", "se-cli", "secli")
 
     def build_command(self, sup_path: Path, language: str, out_dir: Path) -> list[str]:
-        # NOTE: SubtitleEdit's batch/command-line OCR does NOT accept a language
-        # flag — Tesseract is hard-coded and the language is whatever was last
-        # selected in the SubtitleEdit GUI (saved in Settings.xml). Passing
-        # /tesseractlanguage: makes it abort ("Unknown option"). So we only pass
-        # the engine; set the OCR language once in the GUI (OCR any .sup and pick
-        # the Tesseract language) and the batch tool reuses it. ``language`` is
-        # still used for the sidecar filename and the error hint below.
         cmd = list(self._launcher())
-        if not self._is_cli_tool():
-            cmd.append("/convert")  # GUI SubtitleEdit.exe needs the batch keyword; seconv doesn't
+        subs = self._settings.subtitles
+        if self._is_cli_tool():
+            # seconv (SubtitleEdit 5.1 CLI): GNU-style `--` options, and it takes
+            # the OCR language directly (--ocr-language), so — unlike the GUI batch
+            # tool — there's NO need to pre-select the language in the GUI.
+            cmd += [
+                str(sup_path),
+                "subrip",
+                "--ocr-engine:tesseract",
+                f"--ocr-language:{tesseract_language(language)}",
+                "--encoding:utf-8",
+                f"--output-folder:{out_dir}",
+                "--overwrite",
+            ]
+            if subs.fix_common_errors:
+                cmd.append("--fix-common-errors")
+            if subs.remove_text_for_hi:
+                cmd.append("--remove-text-for-hi")
+            return cmd
+        # Classic GUI SubtitleEdit.exe batch mode. It needs the /convert keyword,
+        # and its batch OCR does NOT accept a language flag — Tesseract's language
+        # is whatever was last selected in the SubtitleEdit GUI (saved in
+        # Settings.xml). So set it once in the GUI (OCR any .sup, pick the language)
+        # and the batch tool reuses it. Prefer seconv to avoid this entirely.
         cmd += [
+            "/convert",
             str(sup_path),
             "srt",
             "/ocrengine:tesseract",
@@ -80,9 +96,9 @@ class SubtitleEdit:
             f"/outputfolder:{out_dir}",
             "/overwrite",
         ]
-        if self._settings.subtitles.fix_common_errors:
+        if subs.fix_common_errors:
             cmd.append("/fixcommonerrors")
-        if self._settings.subtitles.remove_text_for_hi:
+        if subs.remove_text_for_hi:
             cmd.append("/removetextforhi")
         return cmd
 
@@ -96,10 +112,12 @@ class SubtitleEdit:
         srt_path = out_dir / (sup_path.stem + ".srt")
         if not srt_path.exists():
             # SubtitleEdit names the output after the input stem; surface a clear error.
+            tlang = tesseract_language(language)
+            gui_hint = ("" if self._is_cli_tool() else
+                        " and that you've OCR'd one file in the SubtitleEdit GUI to set the "
+                        "OCR language (the GUI batch tool can't take a language flag — seconv can)")
             raise FileNotFoundError(
                 f"SubtitleEdit did not produce expected SRT at {srt_path}. "
-                f"Ensure the Tesseract '{tesseract_language(language)}' language data is "
-                "installed and that you've OCR'd one file in the SubtitleEdit GUI to set "
-                "the OCR language (the batch tool can't take a language flag)."
+                f"Ensure the Tesseract '{tlang}' language data is installed{gui_hint}."
             )
         return srt_path
