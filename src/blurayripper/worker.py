@@ -28,12 +28,17 @@ from .persistence import (
 from .pipeline import Job, JobState, Pipeline
 from .scheduler import EncodeScheduler
 
-# States a worker may claim: freshly-queued, plus in-progress states (reclaimed
-# only when their previous worker's heartbeat has gone stale).
+# States a worker may always claim: a freshly-queued job (READY), plus the
+# in-progress encode/place states (reclaimed only when a previous worker's
+# heartbeat has gone stale).
 CLAIMABLE_STATES = [
-    JobState.READY.value, JobState.ENCODING.value, JobState.EXTRACTING_SUBS.value,
-    JobState.OCR_SUBS.value, JobState.PLACING.value,
+    JobState.READY.value, JobState.ENCODING.value, JobState.PLACING.value,
 ]
+# The subtitle states are claimable ONLY when workers do the subtitle work
+# (cluster.worker_does_subs). Otherwise the serve box owns them — it passes
+# through EXTRACTING_SUBS/OCR_SUBS while prepping, with no claimed_by set — and a
+# worker grabbing one would start encoding a job the rip box is still preparing.
+_SUBS_STATES = [JobState.EXTRACTING_SUBS.value, JobState.OCR_SUBS.value]
 
 
 def job_from_record(rec: JobRecord) -> Job:
@@ -148,7 +153,8 @@ class WorkerRunner:
         while not self._stop:
             try:
                 rec = self.store.claim_next(
-                    self.worker_id, CLAIMABLE_STATES, self.settings.cluster.stale_after_seconds)
+                    self.worker_id, self._claimable_states(),
+                    self.settings.cluster.stale_after_seconds)
                 last_error = None
             except Exception as exc:
                 # Transient DB outage (e.g. a storage blip): keep the worker
@@ -164,8 +170,44 @@ class WorkerRunner:
                 self._register(None, "idle")   # heartbeat presence while idle
                 await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
                 continue
+            if not self._fully_ripped(rec):
+                # The rip box is still preparing this job: it can briefly show a
+                # claimable READY state before its rip checkpoints exist. Put the
+                # claim back and keep polling, rather than failing it with
+                # "no ripped file to encode" (and stealing it from the rip box).
+                with contextlib.suppress(Exception):
+                    self.store.release(rec.id)
+                self._register(None, "idle")
+                print(f"Job {rec.id} claimed but not fully ripped yet — "
+                      "released for the rip box.", flush=True)
+                await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
+                continue
             self._apply_worker_settings()       # apply latest override before this job
             await self._process(rec)
+
+    def _claimable_states(self) -> list[str]:
+        """Which job states this worker may claim. The subtitle states are only
+        claimable when workers own subtitle work; otherwise they're serve-owned."""
+        if self.settings.cluster.worker_does_subs:
+            return CLAIMABLE_STATES + _SUBS_STATES
+        return CLAIMABLE_STATES
+
+    def _fully_ripped(self, rec: JobRecord) -> bool:
+        """True once every selected title has a ripped file (or is already placed).
+        Guards against claiming a job the serve box is still ripping — which shows a
+        claimable READY state during the rip, before any rip checkpoint exists."""
+        from .pipeline import _resolve_path
+
+        staging = self.settings.storage.staging_dir
+        for tid in rec.selected_title_ids:
+            cp = rec.checkpoints.get(str(tid)) or rec.checkpoints.get(tid) or {}
+            if cp.get("placed"):
+                continue
+            prior = cp.get("ripped_path")
+            ripped = _resolve_path(staging, prior) if prior else None
+            if ripped is None or not ripped.exists():
+                return False
+        return True
 
     def _apply_worker_settings(self) -> None:
         """Pull this worker's central override from the store; if it changed,
