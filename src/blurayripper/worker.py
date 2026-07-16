@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import json
 import socket
+import uuid
 
 from .config import Settings, load_settings
 from .persistence import (
@@ -113,6 +114,9 @@ class WorkerRunner:
         self.pipeline = Pipeline(settings)
         self.scheduler = EncodeScheduler(settings.queue.encode_capacity)
         self._stop = False
+        # A per-process id so the store can tell a restart of THIS worker apart
+        # from an ordinary heartbeat and reset its uptime clock accordingly.
+        self._run_token = uuid.uuid4().hex
 
     def request_stop(self) -> None:
         """Drain: finish the job currently encoding (if any), claim no more, exit."""
@@ -185,7 +189,8 @@ class WorkerRunner:
         """Report this worker's presence to the store (for the UI's panel)."""
         with contextlib.suppress(Exception):
             self.store.record_worker(
-                self.worker_id, getattr(self, "_version", None), job_id, stage)
+                self.worker_id, getattr(self, "_version", None), job_id, stage,
+                self._run_token)
 
     async def _process(self, rec: JobRecord) -> None:
         job = job_from_record(rec)
