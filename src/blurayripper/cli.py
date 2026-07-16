@@ -668,6 +668,93 @@ async def _cmd_queue(args: argparse.Namespace) -> int:
     return 0 if len(done) == len(prepared) else 1
 
 
+def _is_update_key(ch: str) -> bool:
+    """Ctrl+U (0x15) — or a plain 'u' — requests a drain-then-update-then-restart."""
+    return ch in ("\x15", "u", "U")
+
+
+class _KeyPress:
+    """Read single keystrokes from a TTY on a daemon thread and invoke a callback.
+
+    Cross-platform: msvcrt on Windows, cbreak-mode termios on POSIX. A no-op when
+    stdin isn't a TTY (e.g. the worker runs as a service / with redirected input),
+    so it never interferes with headless deployments. Ctrl+C is left to SIGINT.
+    """
+
+    def __init__(self, on_key) -> None:
+        self._on_key = on_key
+        self._stop = False
+        self._fd = None
+        self._old = None
+
+    def start(self) -> None:
+        if not (sys.stdin and sys.stdin.isatty()):
+            return
+        import threading
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self) -> None:
+        if sys.platform == "win32":
+            import msvcrt
+            while not self._stop:
+                self._on_key(msvcrt.getwch())
+            return
+        import select
+        import termios
+        import tty
+        self._fd = sys.stdin.fileno()
+        self._old = termios.tcgetattr(self._fd)
+        tty.setcbreak(self._fd)  # keeps ISIG on, so Ctrl+C still raises SIGINT
+        while not self._stop:
+            if select.select([sys.stdin], [], [], 0.3)[0]:
+                ch = sys.stdin.read(1)
+                if ch:
+                    self._on_key(ch)
+
+    def stop(self) -> None:
+        # Restore the terminal before we exit or re-exec, or the shell is left in
+        # cbreak mode. No-op on Windows (msvcrt doesn't change the mode).
+        self._stop = True
+        if self._fd is not None and self._old is not None:
+            import termios
+            with contextlib.suppress(Exception):
+                termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old)
+
+
+def _pull_and_restart(console) -> None:
+    """git pull --ff-only in the repo, then re-exec the worker with the same args.
+    Restarts on the current code even if the pull fails, so the worker stays up."""
+    import os
+    import subprocess
+
+    from .config import REPO_ROOT
+
+    console.print("[bold cyan]Pulling latest code…[/bold cyan]")
+    sys.stdout.flush()
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "pull", "--ff-only"],
+            capture_output=True, text=True, timeout=180)
+        if r.stdout.strip():
+            console.print(r.stdout.strip())
+        if r.returncode != 0:
+            console.print(
+                f"[yellow]git pull did not succeed (exit {r.returncode}) — "
+                "restarting on the current code.[/yellow]")
+            if r.stderr.strip():
+                console.print(f"[yellow]{r.stderr.strip()}[/yellow]")
+    except Exception as exc:  # network/git error must not leave the worker dead
+        console.print(f"[yellow]git pull failed ({type(exc).__name__}: {exc}) — "
+                      "restarting on the current code.[/yellow]")
+    console.print("[bold green]Restarting worker…[/bold green]")
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        os.execv(sys.executable, [sys.executable, "-m", "blurayripper", *sys.argv[1:]])
+    except OSError as exc:
+        console.print(f"[red]Restart (re-exec) failed: {exc}[/red]")
+
+
 async def _cmd_worker(args: argparse.Namespace) -> int:
     from .worker import WorkerRunner
 
@@ -680,7 +767,8 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
     runner = WorkerRunner(settings, worker_id=args.name)
     console.print(
         f"[bold green]Encode worker[/bold green] {runner.worker_id} — "
-        "Ctrl+C to drain (finish current encode, then exit); Ctrl+C again to abort.")
+        "Ctrl+C to drain (finish current encode, then exit); Ctrl+C again to abort. "
+        "Press [bold]u[/bold] (or Ctrl+U) to drain, pull updates, and restart.")
 
     import signal
 
@@ -693,17 +781,35 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
             "[yellow]Draining — will finish the current encode and place it, then "
             "exit. Ctrl+C again to abort now.[/yellow]")
 
+    update = {"do": False}
+
+    def _on_key(ch):
+        if _is_update_key(ch) and not runner._stop:
+            update["do"] = True
+            runner.request_stop()
+            console.print(
+                "[cyan]Update requested — draining (finish the current encode), then "
+                "git pull + restart. Ctrl+C to abort now.[/cyan]")
+
+    keys = _KeyPress(_on_key)
+
     with contextlib.suppress(ValueError):  # signal only settable on the main thread
         signal.signal(signal.SIGINT, _drain)
+    keys.start()
     try:
         await runner.run()
     except KeyboardInterrupt:
+        keys.stop()
         console.print("[red]Aborted — the in-progress encode was discarded; its job "
                       "will be reclaimed and re-encoded from the rip.[/red]")
         return 130
     except ToolNotFoundError as exc:
+        keys.stop()
         console.print(f"[red]{exc}[/red]")
         return 2
+    keys.stop()
+    if update["do"]:
+        _pull_and_restart(console)  # git pull + os.execv — normally never returns
     return 0
 
 
@@ -1030,7 +1136,8 @@ def _build_parser() -> argparse.ArgumentParser:
     db_init.set_defaults(func=_cmd_db_init)
 
     worker = sub.add_parser(
-        "worker", help="Run an encode worker that pulls jobs from the shared queue")
+        "worker", help="Run an encode worker that pulls jobs from the shared queue "
+                       "(Ctrl+C drains; 'u'/Ctrl+U drains + git-pulls + restarts)")
     worker.add_argument(
         "--name", default=None,
         help="Stable worker id (default: hostname). Give each worker on the SAME "
