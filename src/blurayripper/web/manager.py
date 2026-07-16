@@ -846,6 +846,7 @@ class JobManager:
                 wj.assignments = job.assignments
                 wj.selected_title_ids = job.selected_title_ids
                 wj.state = JobState.READY
+                job.state = JobState.READY  # sync off SCANNING (see below)
                 self._persist(wj)
                 self.bus.publish()
                 wj._task = self._spawn(self._run_job(wj))
@@ -860,6 +861,10 @@ class JobManager:
                     reporter.on_event("Single title — auto-selected; confirm the name.")
                 else:
                     wj.state = JobState.AWAITING_TITLES
+                # scan_disc leaves the pipeline job at SCANNING; sync it to the
+                # parked gate so _live_state can't surface a phantom "scanning"
+                # that the UI shows forever with no way to reach the gate.
+                job.state = wj.state
                 self._persist(wj)
                 self.bus.publish()
                 self._notify(f"🟡 Needs your input: {self._name_of(wj)}",

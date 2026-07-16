@@ -240,6 +240,7 @@ async def test_single_title_disc_auto_advances_to_mapping(manager, monkeypatch):
     async def fake_scan(source, report):
         from blurayripper.pipeline import Job
         job = Job(source=source)
+        job.state = JobState.SCANNING  # real scan_disc leaves it here
         job.disc = _single_title_disc()
         job.fingerprint = "fp_single"
         return job
@@ -250,6 +251,11 @@ async def test_single_title_disc_auto_advances_to_mapping(manager, monkeypatch):
     # One main-feature title — skipped the titles gate.
     assert wj.state is JobState.AWAITING_MAPPING
     assert wj.selected_title_ids == [0]
+    # The API-facing state must NOT be a stale "scanning": scan_disc left the
+    # pipeline job at SCANNING, and _live_state falls through to it unless the
+    # parked gate is synced. Otherwise the UI shows a phantom, unclickable scan.
+    assert manager._live_state(wj) is JobState.AWAITING_MAPPING
+    assert wj._pipeline_job.state is JobState.AWAITING_MAPPING
 
 
 async def test_set_titles_rejected_in_wrong_state(manager):
