@@ -346,6 +346,27 @@ async def _cmd_check(args: argparse.Namespace) -> int:
         tool_table.add_row(
             "tesseract [dim](optional)[/dim]",
             "[dim]not on PATH — GUI SubtitleEdit.exe uses its bundled copy[/dim]")
+
+    # OCR-fix dictionary folder. In seconv CLI mode the deeper "Fix common OCR
+    # errors" pass (repairs glyph confusions like a capital I read as "|") only
+    # runs when --fix-common-errors is paired with a --dictionary-folder holding
+    # <lang>_OCRFixReplaceList.xml. Only meaningful for a seconv build with the
+    # fix pass enabled; surface whether it's set and actually present.
+    if uses_cli_ocr and settings.subtitles.fix_common_errors:
+        from pathlib import Path as _Path
+
+        dict_dir = settings.subtitles.dictionary_folder
+        if dict_dir and _Path(dict_dir).is_dir():
+            tool_table.add_row("OCR-fix dictionary", f"[green]{dict_dir}[/green]")
+        elif dict_dir:
+            tool_table.add_row(
+                "OCR-fix dictionary",
+                f"[yellow]{dict_dir} — configured but NOT a folder on this machine[/yellow]")
+        else:
+            tool_table.add_row(
+                "OCR-fix dictionary [dim](optional)[/dim]",
+                "[yellow]unset — OCR glyph fixes (e.g. '|'->'I') disabled. Point "
+                "[subtitles] dictionary_folder at SubtitleEdit's Dictionaries folder[/yellow]")
     console.print(tool_table)
 
     # Folders (writability). Every configured folder path is probed by actually

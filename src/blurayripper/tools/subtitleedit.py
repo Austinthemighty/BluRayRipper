@@ -80,6 +80,11 @@ class SubtitleEdit:
             ]
             if subs.fix_common_errors:
                 cmd.append("--fix-common-errors")
+                # The deeper "Fix common OCR errors" pass (repairs glyph confusions
+                # like a capital I read as "|") only runs when a dictionary folder
+                # with <lang>_OCRFixReplaceList.xml is supplied.
+                if subs.dictionary_folder:
+                    cmd += ["--dictionary-folder", str(subs.dictionary_folder)]
             if subs.remove_text_for_hi:
                 cmd.append("--remove-text-for-hi")
             return cmd
