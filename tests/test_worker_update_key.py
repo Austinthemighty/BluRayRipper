@@ -44,3 +44,40 @@ def test_update_key_callback_requests_drain_and_flags_update():
     assert update["do"] is False and runner._stop is False
     on_key("u")
     assert update["do"] is True and runner._stop is True
+
+
+def test_find_git_env_override_wins(monkeypatch, tmp_path):
+    from blurayripper.cli import _find_git
+    fake = tmp_path / "mygit.exe"
+    fake.write_text("")
+    monkeypatch.setenv("BLURAYRIPPER_GIT", str(fake))
+    assert _find_git() == str(fake)
+
+
+def test_find_git_prefers_path(monkeypatch):
+    import shutil
+
+    from blurayripper.cli import _find_git
+    monkeypatch.delenv("BLURAYRIPPER_GIT", raising=False)
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/git")
+    assert _find_git() == "/usr/bin/git"
+
+
+def test_find_git_locates_github_desktop_bundle(monkeypatch, tmp_path):
+    import shutil
+
+    from blurayripper.cli import _find_git
+    monkeypatch.delenv("BLURAYRIPPER_GIT", raising=False)
+    monkeypatch.setattr(shutil, "which", lambda name: None)   # not on PATH
+    monkeypatch.setattr(sys, "platform", "win32")
+    # Two GitHub Desktop versions installed — the newest wins.
+    la = tmp_path / "LocalAppData"
+    for ver in ("app-3.4.1", "app-3.4.3"):
+        p = la / "GitHubDesktop" / ver / "resources" / "app" / "git" / "cmd" / "git.exe"
+        p.parent.mkdir(parents=True)
+        p.write_text("")
+    monkeypatch.setenv("LOCALAPPDATA", str(la))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "nope"))
+    monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path / "nope2"))
+    got = _find_git()
+    assert got is not None and got.endswith("git.exe") and "app-3.4.3" in got
