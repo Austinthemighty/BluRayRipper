@@ -75,6 +75,14 @@ SCHEMA: list[tuple[str, list[Field]]] = [
     ]),
     ("Subtitles", [
         Field("subtitles", "fix_common_errors", "bool", "Fix common OCR errors", True),
+        Field("subtitles", "dictionary_folder", "str", "OCR-fix dictionary folder", "",
+              "SubtitleEdit 'Dictionaries' folder (holds <lang>_OCRFixReplaceList.xml). "
+              "Enables the deeper OCR glyph fixes (e.g. '|'->'I') with 'Fix common OCR errors'. "
+              "seconv only; blank = off.", env="BLURAYRIPPER_SUB_DICT_DIR"),
+        Field("subtitles", "split_long_lines", "bool", "Split long subtitle lines", True,
+              "Wrap an over-long OCR'd line onto two lines (seconv only)."),
+        Field("subtitles", "balance_lines", "bool", "Balance subtitle lines", True,
+              "Even out the two lines after splitting (seconv only)."),
         Field("subtitles", "remove_text_for_hi", "bool", "Strip SDH (hearing-impaired)", False),
         Field("subtitles", "ocr_concurrency", "int", "OCR concurrency", 4),
         Field("subtitles", "keep_extracted", "bool", "Cache extracted subs", True),
