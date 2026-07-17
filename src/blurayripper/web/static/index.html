@@ -23,12 +23,14 @@
      intrinsic width, so a nowrap job title ellipsizes instead of forcing the
      whole page wider than the screen (horizontal-scroll / clipped controls). */
   .wrap > * { min-width: 0; }
-  /* Drives + Workers sit in a row at the top; the Queue spans full width below. */
-  .toppanels { display: flex; flex-wrap: wrap; gap: 16px; padding: 16px 20px 0; align-items: flex-start; }
-  .toppanels .drives-panel { flex: 1 1 420px; min-width: 0; }
-  .toppanels #workers-panel { flex: 1 1 300px; min-width: 0; }
-  .queuewrap { padding: 16px 20px; }
+  /* Desktop: Drives + Workers in a left sidebar, Queue on the right. */
+  .side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
   .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }
+  /* Collapsible panel header (the collapse only takes effect on mobile). */
+  .phead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .phead h2 { margin: 0; }
+  .phead .phead-actions { display: flex; align-items: center; gap: 6px; }
+  .chev { display: none; color: #8b949e; font-size: 12px; transition: transform .15s; }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: #8b949e; margin: 0 0 10px; }
   button { background: #238636; color: #fff; border: 0; border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
   button.sec { background: #30363d; }
@@ -68,11 +70,14 @@
   input, select { background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:6px; padding:5px 8px; font-size:13px; min-width:0; max-width:100%; }
   .row { display:flex; gap:8px; align-items:center; margin:6px 0; flex-wrap:wrap; }
   .muted { color:#8b949e; }
-  /* Mobile: stack the two columns, wrap the header, bigger touch targets. */
+  /* Mobile: stack the sidebar (Drives + Workers) above the Queue, and let the
+     Drives/Workers panels collapse so the Queue is reachable with less scrolling. */
   @media (max-width: 760px) {
     .wrap { grid-template-columns: minmax(0, 1fr); padding: 10px; gap: 10px; }
-    .toppanels { padding: 10px 10px 0; gap: 10px; }
-    .queuewrap { padding: 10px; }
+    .chev { display: inline; }
+    .phead { cursor: pointer; }
+    .panel.collapsed .chev { transform: rotate(-90deg); }
+    .panel.collapsed .pbody { display: none; }
     header { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
     header h1 { font-size: 20px; }
     #redoall { margin-left: 0 !important; }
@@ -148,27 +153,31 @@
 </header>
 <div id="stats"></div>
 <div id="bulkbar"></div>
-<div class="toppanels">
-  <div class="panel drives-panel">
-    <div class="row" style="justify-content:space-between; align-items:center; gap:8px;">
-      <h2 style="margin:0;">Drives</h2>
-      <div class="row" style="gap:6px;">
-        <button class="sec" onclick="loadDrives()">Refresh</button>
-        <button class="sec" onclick="openAddSelector()" title="Add a source that isn't a listed drive: disc:N, an ISO, a BDMV/VIDEO_TS folder, or a .mkv file/folder.">+ Add by selector</button>
+<div class="wrap">
+  <div class="side">
+    <div class="panel drives-panel" id="drives-panel">
+      <div class="phead" onclick="togglePanel('drives-panel')">
+        <h2>Drives</h2>
+        <div class="phead-actions">
+          <button class="sec" onclick="event.stopPropagation();loadDrives()">Refresh</button>
+          <button class="sec" onclick="event.stopPropagation();openAddSelector()" title="Add a source that isn't a listed drive: disc:N, an ISO, a BDMV/VIDEO_TS folder, or a .mkv file/folder.">+ Add by selector</button>
+          <span class="chev">▾</span>
+        </div>
       </div>
+      <div class="pbody"><div id="drives" style="margin-top:10px;"><span class="muted">Loading…</span></div></div>
     </div>
-    <div id="drives" style="margin-top:10px;"><span class="muted">Loading…</span></div>
+    <div class="panel" id="workers-panel" style="display:none;">
+      <div class="phead" onclick="togglePanel('workers-panel')">
+        <h2>Workers</h2>
+        <span class="chev">▾</span>
+      </div>
+      <div class="pbody"><div id="workers"></div></div>
+    </div>
   </div>
-  <div class="panel" id="workers-panel" style="display:none;">
-    <h2>Workers</h2>
-    <div id="workers"></div>
-  </div>
-</div>
-<div class="queuewrap">
   <div class="panel">
     <h2>Queue</h2>
     <div id="pager" class="pager"></div>
-    <div id="jobs"><span id="placeholder" class="muted">No jobs yet. Add a disc above.</span></div>
+    <div id="jobs"><span id="placeholder" class="muted">No jobs yet. Add a disc from the Drives panel.</span></div>
   </div>
 </div>
 
@@ -227,6 +236,23 @@ async function api(method, url, body) {
   if (text) { try { data = JSON.parse(text); } catch (e) { data = null; } }
   if (!r.ok) { throw new Error((data && data.detail) || r.statusText || ('HTTP ' + r.status)); }
   return data;
+}
+
+// Collapse a sidebar panel (Drives / Workers). Mobile-only — on desktop the
+// sidebar always shows, so a header tap there is a no-op. State is remembered.
+function togglePanel(id){
+  if (window.matchMedia('(min-width: 761px)').matches) return;
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.classList.toggle('collapsed');
+  try { localStorage.setItem('brr_collapse_'+id, el.classList.contains('collapsed') ? '1' : '0'); } catch(e){}
+}
+function restorePanelCollapse(){
+  for (const id of ['drives-panel','workers-panel']) {
+    try {
+      if (localStorage.getItem('brr_collapse_'+id) === '1') document.getElementById(id)?.classList.add('collapsed');
+    } catch(e){}
+  }
 }
 
 let drivesLoading = false;
@@ -469,7 +495,7 @@ function renderJobs(snap) {
     if (u) u.textContent = (snap.uptime != null) ? 'up ' + fmtUptime(snap.uptime) : ''; }
   renderStats(snap.jobs || []);           // counts always reflect ALL jobs
   renderWorkers(snap.workers || []);
-  if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc above.</span>'; renderedStateClear(); renderJobs._sig = ''; renderJobs._known = new Set(); renderBulkBar(0); const pg = document.getElementById('pager'); if (pg){ pg.innerHTML=''; pg._sig=''; } return; }
+  if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the Drives panel.</span>'; renderedStateClear(); renderJobs._sig = ''; renderJobs._known = new Set(); renderBulkBar(0); const pg = document.getElementById('pager'); if (pg){ pg.innerHTML=''; pg._sig=''; } return; }
   const ph = document.getElementById('placeholder'); if (ph) ph.remove();
   const allJobs = [...snap.jobs].filter(j => !jobFilter || catOf(j.state)===jobFilter)
                                 .sort((a,b) => jobRank(a)-jobRank(b) || a.id-b.id);
@@ -1224,6 +1250,7 @@ async function restartServer(force){
 
 const ev = new EventSource('/api/events');
 ev.onmessage = (m) => { try { renderJobs(JSON.parse(m.data)); } catch (e) { /* ignore a partial/empty frame */ } };
+restorePanelCollapse();
 loadDrives();
 setInterval(loadDrives, 10000);   // keep the drive list / loaded discs current
 fetch('/api/jobs').then(r=>r.json()).then(renderJobs).catch(()=>{});
