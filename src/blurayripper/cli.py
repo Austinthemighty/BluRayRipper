@@ -365,8 +365,8 @@ async def _cmd_check(args: argparse.Namespace) -> int:
         else:
             tool_table.add_row(
                 "OCR-fix dictionary [dim](optional)[/dim]",
-                "[yellow]unset — OCR glyph fixes (e.g. '|'->'I') disabled. Point "
-                "[subtitles] dictionary_folder at SubtitleEdit's Dictionaries folder[/yellow]")
+                r"[yellow]unset — OCR glyph fixes (e.g. '|'->'I') disabled. Point "
+                r"\[subtitles] dictionary_folder at SubtitleEdit's Dictionaries folder[/yellow]")
     console.print(tool_table)
 
     # Folders (writability). Every configured folder path is probed by actually
