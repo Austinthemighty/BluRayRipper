@@ -413,9 +413,11 @@ class JobManager:
             # query doesn't stall the event loop — and thus every client's SSE/UI —
             # for its whole duration. Each store call opens its own connection, so
             # off-loop execution is safe. This loop only runs with a durable store.
+            tick_ok = True
             try:
                 self._workers_cache = await asyncio.to_thread(self.store.list_workers)
             except Exception as exc:
+                tick_ok = False
                 self._log_store_error("list_workers", exc)
             try:
                 records = {r.id: r for r in await asyncio.to_thread(self.store.load_all)}
@@ -440,7 +442,11 @@ class JobManager:
                 if changed:
                     self.bus.publish()
             except Exception as exc:
+                tick_ok = False
                 self._log_store_error("load_all", exc)
+            if tick_ok and getattr(self, "_last_store_error", None) is not None:
+                print("[store] reconnected — database reachable again")
+                self._last_store_error = None
             await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
 
     def _log_store_error(self, op: str, exc: Exception) -> None:

@@ -123,3 +123,47 @@ def test_release_allows_immediate_reclaim():
     store.release(1)
     # After release it's claimable again (mirrors a retry the manager re-queues).
     assert store.claim_next("W2", ["ready"]).id == 1
+
+
+def test_postgres_connect_retries_transient_blip(monkeypatch):
+    """A transient connect failure is retried (absorbed) instead of tripping the
+    15s circuit breaker; only a sustained failure opens it."""
+    import sys
+    import types
+
+    from blurayripper import persistence as P
+
+    state = {"calls": 0, "fail_up_to": 1}
+
+    class _FakeConn:
+        pass
+
+    def fake_connect(url, autocommit=None, connect_timeout=None):
+        state["calls"] += 1
+        if state["calls"] <= state["fail_up_to"]:
+            raise OSError("transient network blip")
+        return _FakeConn()
+
+    fake = types.ModuleType("psycopg")
+    fake.connect = fake_connect
+    monkeypatch.setitem(sys.modules, "psycopg", fake)
+    monkeypatch.setattr(P.time, "sleep", lambda *_a: None)  # no real backoff delay
+
+    store = P.PostgresStore("postgresql://x")
+
+    # One blip then success -> retry absorbs it; breaker stays closed.
+    assert isinstance(store._connect(), _FakeConn)
+    assert store._down_until == 0.0
+
+    # Every attempt fails -> breaker opens and the error propagates.
+    state["calls"] = 0
+    state["fail_up_to"] = 99
+    with pytest.raises(OSError):
+        store._connect()
+    assert store._down_until > 0.0
+
+    # While the breaker is open, calls fail instantly without touching psycopg.
+    before = state["calls"]
+    with pytest.raises(ConnectionError):
+        store._connect()
+    assert state["calls"] == before
