@@ -16,6 +16,7 @@ def _fake_psycopg(on_connect):
 
 
 def test_circuit_breaker_skips_connect_during_cooldown(monkeypatch):
+    import blurayripper.persistence as P
     calls = {"n": 0}
 
     def boom(*a, **k):
@@ -23,17 +24,19 @@ def test_circuit_breaker_skips_connect_during_cooldown(monkeypatch):
         raise RuntimeError("unreachable")
 
     monkeypatch.setitem(sys.modules, "psycopg", _fake_psycopg(boom))
+    monkeypatch.setattr(P.time, "sleep", lambda *_a: None)  # skip the retry backoff
     store = PostgresStore("postgresql://nope")
 
-    # First connect actually tries (and fails), tripping the breaker.
+    # First connect retries a few times within the call (all fail), then trips the
+    # breaker — so a single transient blip wouldn't open it, only a sustained one.
     with pytest.raises(RuntimeError):
         store._connect()
-    assert calls["n"] == 1
+    assert calls["n"] == 3
 
     # Next connect fails INSTANTLY without calling psycopg.connect again.
     with pytest.raises(ConnectionError):
         store._connect()
-    assert calls["n"] == 1  # not retried during cooldown
+    assert calls["n"] == 3  # cooldown — not retried
 
 
 def test_breaker_resets_after_successful_connect(monkeypatch):

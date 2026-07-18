@@ -322,19 +322,28 @@ class PostgresStore(Store):
     def _connect(self):
         import psycopg  # lazy: only needed when Postgres is configured
 
-        # Circuit breaker: once a connect fails, fail the next few seconds of
-        # calls INSTANTLY instead of blocking 5s each. Without this, a dead DB
-        # freezes the async event loop (and thus the whole UI) on every persist.
+        # Circuit breaker: once connects fail, fail the next few seconds of calls
+        # INSTANTLY instead of blocking on each. Without this, a dead DB freezes
+        # the async event loop (and thus the whole UI) on every persist.
         if time.monotonic() < self._down_until:
             raise ConnectionError("database unreachable (in cooldown after a recent failure)")
-        try:
-            # connect_timeout bounds a single hang; libpq clamps it to >= 2s.
-            conn = psycopg.connect(self._url, autocommit=True, connect_timeout=5)
-        except Exception:
-            self._down_until = time.monotonic() + 15  # back off before retrying
-            raise
-        self._down_until = 0.0  # recovered
-        return conn
+        # A fresh connection per call means an occasional transient blip (a brief
+        # network hiccup, a momentary refusal while Postgres is busy) would trip
+        # the breaker and blank the store for 15s even though the DB is fine. Retry
+        # a couple of times with a short backoff first, so only a SUSTAINED failure
+        # opens the breaker. connect_timeout bounds a single hang (libpq clamps >=2s).
+        last: Exception | None = None
+        for attempt in range(3):
+            try:
+                conn = psycopg.connect(self._url, autocommit=True, connect_timeout=4)
+                self._down_until = 0.0  # recovered / healthy
+                return conn
+            except Exception as exc:
+                last = exc
+                if attempt < 2:
+                    time.sleep(0.4 * (attempt + 1))
+        self._down_until = time.monotonic() + 15  # sustained failure — back off
+        raise last
 
     def init(self) -> None:
         with self._connect() as conn, conn.cursor() as cur:
