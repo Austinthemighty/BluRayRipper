@@ -152,6 +152,11 @@ _WORKER_KEYS: set[tuple[str, str]] = {
     ("encode", "ffmpeg_preset"), ("encode", "ffmpeg_audio"), ("encode", "dovi"),
     ("subtitles", "ocr_concurrency"), ("subtitles", "extract_concurrency"),
     ("subtitles", "ocr_timeout_seconds"),
+    # OCR-engine config: these build the seconv command that runs on the worker
+    # (when it does subtitles), and the dictionary folder is a per-machine path.
+    ("subtitles", "fix_common_errors"), ("subtitles", "dictionary_folder"),
+    ("subtitles", "split_long_lines"), ("subtitles", "balance_lines"),
+    ("subtitles", "remove_text_for_hi"),
     ("queue", "encode_capacity"),
     ("cluster", "local_encode_max_height"), ("cluster", "worker_does_subs"),
 }
