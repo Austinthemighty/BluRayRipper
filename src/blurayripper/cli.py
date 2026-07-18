@@ -1212,7 +1212,30 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _quiet_windows_shutdown() -> None:
+    """Silence the benign teardown tracebacks the Windows asyncio Proactor prints
+    when subprocess/pipe transports are finalized by the GC at interpreter
+    shutdown (e.g. after Ctrl+C): 'Exception ignored in __del__ … ValueError: I/O
+    operation on closed pipe'. Only those; everything else goes to the default
+    hook, and this is a no-op off Windows."""
+    if sys.platform != "win32":
+        return
+    import warnings
+
+    warnings.filterwarnings("ignore", message="unclosed transport", category=ResourceWarning)
+    default_hook = sys.unraisablehook
+
+    def _hook(unraisable):
+        exc = unraisable.exc_value
+        if isinstance(exc, ValueError) and "closed pipe" in str(exc):
+            return  # proactor transport __del__ on an already-closed pipe — harmless
+        default_hook(unraisable)
+
+    sys.unraisablehook = _hook
+
+
 def main(argv: list[str] | None = None) -> int:
+    _quiet_windows_shutdown()
     parser = _build_parser()
     args = parser.parse_args(argv)
     config_dir = None
