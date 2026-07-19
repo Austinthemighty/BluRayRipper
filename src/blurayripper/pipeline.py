@@ -879,6 +879,24 @@ class Pipeline:
         enc = self.settings.encode
         use_ffmpeg = (enc.ffmpeg_uhd and self.ffmpeg.available
                       and bool(height) and height >= enc.uhd_min_height)
+        # HDR/Dolby Vision downgrade guard: a UHD title that ISN'T taking the
+        # ffmpeg path goes through HandBrake, which silently drops HDR10/DV. Warn
+        # loudly — and, when the intent was clearly to keep HDR (ffmpeg_uhd is on
+        # but ffmpeg is missing on THIS machine, e.g. a worker), push a notification
+        # so the misconfig doesn't quietly produce SDR files for hours.
+        if bool(height) and height >= enc.uhd_min_height and not use_ffmpeg:
+            name = getattr(assignment, "show_or_movie_title", None) or video_dest.stem
+            if enc.ffmpeg_uhd and not self.ffmpeg.available:
+                warn = (f"⚠ {name}: UHD ({height}p) but ffmpeg isn't available here — "
+                        "HandBrake will encode it and HDR/Dolby Vision will NOT be "
+                        "preserved. Install ffmpeg (and dovi_tool for DV) on this "
+                        "worker to keep HDR.")
+                report.on_event(warn)
+                _emit_notify(report, f"⚠ HDR not preserved: {name}", warn)
+            elif not enc.ffmpeg_uhd:
+                report.on_event(
+                    f"Note: {name} is UHD ({height}p) — HandBrake encode won't keep "
+                    "HDR/Dolby Vision (the ffmpeg UHD path is disabled in settings).")
         acquired = await scheduler.acquire(weight)
         try:
             job.state = JobState.ENCODING
