@@ -362,6 +362,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def refresh_artwork(job_id: int):
         return {"ok": True, "placed": await manager.refresh_artwork(job_id)}
 
+    @app.post("/api/workers/update")
+    async def update_workers():
+        try:
+            n = manager.request_worker_update()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"ok": True, "workers": n}
+
     @app.post("/api/server/restart")
     async def restart_server(body: RestartServer):
         srv = getattr(app.state, "uvicorn_server", None)

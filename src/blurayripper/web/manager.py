@@ -623,6 +623,17 @@ class JobManager:
         self._persist(wj)
         self.bus.publish()
 
+    def request_worker_update(self) -> int:
+        """Signal every worker to drain (finish its current encode), git pull, and
+        restart — the cluster-wide version of a worker's 'u' key. Returns how many
+        workers are currently connected (for the confirmation message)."""
+        if not self.store.durable:
+            raise ValueError(
+                "Updating workers needs the shared Postgres store "
+                "(set BLURAYRIPPER_DATABASE_URL) — there are no remote workers otherwise.")
+        self.store.request_worker_update()
+        return len(self._workers_cache)
+
     def set_titles(self, job_id: int, title_ids: list[int]) -> None:
         wj = self.jobs[job_id]
         if wj.state is not JobState.AWAITING_TITLES:

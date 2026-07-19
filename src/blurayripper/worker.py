@@ -120,6 +120,10 @@ class WorkerRunner:
         self.pipeline = Pipeline(settings)
         self.scheduler = EncodeScheduler(settings.queue.encode_capacity)
         self._stop = False
+        # Set when a drain should be followed by a git-pull + restart (from the
+        # 'u' key OR a cluster-wide "update all workers" signal from the server).
+        self.update_requested = False
+        self._update_token = 0  # cluster update signal value seen at startup
         # A per-process id so the store can tell a restart of THIS worker apart
         # from an ordinary heartbeat and reset its uptime clock accordingly.
         self._run_token = uuid.uuid4().hex
@@ -127,6 +131,25 @@ class WorkerRunner:
     def request_stop(self) -> None:
         """Drain: finish the job currently encoding (if any), claim no more, exit."""
         self._stop = True
+
+    def request_update(self) -> None:
+        """Drain, then git-pull + restart (the CLI does the pull/re-exec on exit)."""
+        self.update_requested = True
+        self._stop = True
+
+    def _check_update_signal(self) -> None:
+        """Act on a server-triggered 'update all workers' once, when the shared
+        signal rises above what we saw at startup."""
+        if self.update_requested:
+            return
+        try:
+            tok = self.store.worker_update_token()
+        except Exception:
+            return  # DB blip — try again next poll
+        if tok > self._update_token:
+            print("Update requested from the server — draining, then git pull + restart.",
+                  flush=True)
+            self.request_update()
 
     async def run(self) -> None:
         if not self.settings.database_url:
@@ -148,9 +171,14 @@ class WorkerRunner:
         from .version import get_version
         self._version = get_version()
         self._apply_worker_settings()  # central per-worker override, if any
+        with contextlib.suppress(Exception):
+            self._update_token = self.store.worker_update_token()  # only newer signals count
         print(f"Worker {self.worker_id} ready (v{self._version}) — polling for jobs…", flush=True)
         last_error = None
         while not self._stop:
+            self._check_update_signal()  # server-triggered "update all workers"?
+            if self._stop:
+                break
             try:
                 rec = self.store.claim_next(
                     self.worker_id, self._claimable_states(),

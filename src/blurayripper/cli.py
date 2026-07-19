@@ -808,7 +808,8 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
     console.print(
         f"[bold green]Encode worker[/bold green] {runner.worker_id} — "
         "Ctrl+C to drain (finish current encode, then exit); Ctrl+C again to abort. "
-        "Press [bold]u[/bold] (or Ctrl+U) to drain, pull updates, and restart.")
+        "Press [bold]u[/bold] (or Ctrl+U) to drain, pull updates, and restart "
+        "('Update all workers' in the web UI does the same to every worker).")
 
     import signal
 
@@ -821,12 +822,9 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
             "[yellow]Draining — will finish the current encode and place it, then "
             "exit. Ctrl+C again to abort now.[/yellow]")
 
-    update = {"do": False}
-
     def _on_key(ch):
         if _is_update_key(ch) and not runner._stop:
-            update["do"] = True
-            runner.request_stop()
+            runner.request_update()
             console.print(
                 "[cyan]Update requested — draining (finish the current encode), then "
                 "git pull + restart. Ctrl+C to abort now.[/cyan]")
@@ -848,7 +846,7 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
         console.print(f"[red]{exc}[/red]")
         return 2
     keys.stop()
-    if update["do"]:
+    if runner.update_requested:  # 'u' key or a server "update all workers" signal
         _pull_and_restart(console)  # git pull + os.execv — normally never returns
     return 0
 
