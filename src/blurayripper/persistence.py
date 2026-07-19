@@ -68,6 +68,9 @@ class JobRecord:
     checkpoints: dict = field(default_factory=dict)  # {str(title_id): {ripped_path, placed}}
     outputs: list[str] = field(default_factory=list)
     error: str | None = None
+    # Queue priority: higher is claimed/encoded sooner (0 = normal). "Encode next"
+    # bumps this above everything currently queued.
+    priority: int = 0
     # Display fields (so a worker's live progress shows in the rip box's UI):
     stage: str = ""
     progress: float = 0.0
@@ -264,7 +267,9 @@ class MemoryStore(Store):
         self, worker_id: str, states: list[str], stale_after_seconds: int = 180
     ) -> JobRecord | None:
         # Single-process: no real concurrency/heartbeat staleness to worry about.
-        for jid, data in sorted(self._rows.items()):
+        # Highest priority first, then oldest (lowest id).
+        ordered = sorted(self._rows.items(), key=lambda kv: (-int(kv[1].get("priority", 0) or 0), kv[0]))
+        for jid, data in ordered:
             if data.get("state") in states and jid not in self._claimed:
                 self._claimed.add(jid)
                 return JobRecord.from_json(data)
@@ -383,7 +388,8 @@ class PostgresStore(Store):
                 "  SELECT id FROM jobs"
                 "  WHERE state = ANY(%s)"
                 "    AND (claimed_by IS NULL OR heartbeat < now() - make_interval(secs => %s))"
-                "  ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1"
+                "  ORDER BY COALESCE((data->>'priority')::int, 0) DESC, id ASC "
+                "  FOR UPDATE SKIP LOCKED LIMIT 1"
                 ") RETURNING data",
                 (worker_id, list(states), stale_after_seconds),
             )

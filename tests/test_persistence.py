@@ -167,3 +167,21 @@ def test_postgres_connect_retries_transient_blip(monkeypatch):
     with pytest.raises(ConnectionError):
         store._connect()
     assert state["calls"] == before
+
+
+def test_claim_next_prefers_higher_priority():
+    """A bumped (higher-priority) job is claimed before older, normal-priority ones."""
+    store = MemoryStore()
+    store.save(JobRecord(id=1, source="a", state="ready"))
+    store.save(JobRecord(id=2, source="b", state="ready"))
+    store.save(JobRecord(id=3, source="c", state="ready", priority=5))  # bumped
+    # Highest priority first, then oldest id.
+    assert store.claim_next("w", ["ready"]).id == 3
+    assert store.claim_next("w", ["ready"]).id == 1
+    assert store.claim_next("w", ["ready"]).id == 2
+
+
+def test_priority_round_trips_through_record():
+    store = MemoryStore()
+    store.save(JobRecord(id=9, source="x", state="ready", priority=7))
+    assert {r.id: r.priority for r in store.load_all()}[9] == 7

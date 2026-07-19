@@ -868,3 +868,29 @@ def test_rip_pending_gates_change_drive(manager):
     assert manager._rip_pending(mk("file:/x.mkv", [0], {})) is False
     # nothing selected/ripped yet -> pending
     assert manager._rip_pending(mk("disc:0", [], {})) is True
+
+
+def test_bump_job_makes_it_next_to_encode(manager):
+    from blurayripper.pipeline import Job
+    # Three queued jobs; bumping #3 raises its priority above the others.
+    for jid in (1, 2, 3):
+        wj = WebJob(id=jid, source=f"disc:{jid}", state=JobState.READY)
+        wj._pipeline_job = Job(source=f"disc:{jid}")
+        manager.jobs[jid] = wj
+
+    manager.bump_job(3)
+    assert manager.jobs[3].priority > manager.jobs[1].priority
+    assert manager.jobs[3].priority > manager.jobs[2].priority
+
+    # Bumping #2 now puts it ahead of the previously-bumped #3.
+    manager.bump_job(2)
+    assert manager.jobs[2].priority > manager.jobs[3].priority
+
+    # Surfaced in the snapshot for the UI to order by.
+    d = {j["id"]: j for j in manager.snapshot()["jobs"]}
+    assert d[2]["priority"] > d[3]["priority"] > d[1]["priority"]
+
+
+def test_bump_unknown_job_raises(manager):
+    with pytest.raises(ValueError):
+        manager.bump_job(999)

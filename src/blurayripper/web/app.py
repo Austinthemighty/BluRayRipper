@@ -279,6 +279,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _gate(lambda: manager.retry(job_id))
         return {"ok": True}
 
+    @app.post("/api/jobs/{job_id}/bump")
+    async def bump_job(job_id: int):
+        _gate(lambda: manager.bump_job(job_id))
+        return {"ok": True}
+
     @app.post("/api/jobs/{job_id}/edit")
     async def edit_job(job_id: int, body: EditJob):
         _gate(lambda: manager.edit_job(job_id, body.grain_mode, body.tune_grain, body.edition))
