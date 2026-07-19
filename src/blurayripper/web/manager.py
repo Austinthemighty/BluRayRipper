@@ -200,6 +200,7 @@ class JobManager:
         self._last_disc: dict[int, str] = {}  # drive index -> last auto-opened disc name
         self._last_drive_error: str | None = None
         self._workers_cache: list = []  # WorkerInfo, refreshed by the store poll
+        self._done_notified: set[int] = set()  # jobs we've pushed a "done" notify for
 
     async def shutdown(self) -> None:
         """Stop cleanly: wake SSE streams, then cancel running job tasks (which
@@ -306,6 +307,8 @@ class JobManager:
             wj = self._from_record(rec)
             self.jobs[wj.id] = wj
             max_id = max(max_id, wj.id)
+            if wj.state is JobState.DONE:
+                self._done_notified.add(wj.id)  # don't re-notify old history on restart
             # Resume jobs that were mid-flight, plus FAILED jobs whose failure was
             # actually a killed process (server shutdown), not a real error.
             interrupted_fail = (
@@ -433,6 +436,7 @@ class JobManager:
                         new_state = JobState(rec.state)
                     except ValueError:
                         continue
+                    was_done = wj.state is JobState.DONE
                     wj.state = new_state
                     if wj._pipeline_job is not None:
                         wj._pipeline_job.state = new_state
@@ -441,6 +445,10 @@ class JobManager:
                         wj.log = list(rec.log)
                     if rec.outputs:
                         wj.outputs = list(rec.outputs)
+                    # A worker just finished this encode — notify (once) on the
+                    # transition into DONE, not for jobs that were already done.
+                    if new_state is JobState.DONE and not was_done:
+                        self._maybe_notify_done(wj)
                     changed = True
                 if changed:
                     self.bus.publish()
@@ -1055,6 +1063,7 @@ class JobManager:
                 wj.progress = 1.0
                 wj.outputs = [str(r.video_path) for r in results if r.video_path]
                 self._persist(wj)
+                self._maybe_notify_done(wj)
                 self.bus.publish()
                 return
             async with self._prep_sem:  # single-box: bound concurrent jobs
@@ -1062,6 +1071,7 @@ class JobManager:
             wj.state = JobState.DONE
             wj.progress = 1.0
             wj.outputs = [str(r.video_path) for r in job.results if r.video_path]
+            self._maybe_notify_done(wj)
         except Exception as exc:
             if _looks_interrupted(exc):
                 # A tool was terminated (e.g. the server stopped mid-encode), not
@@ -1213,6 +1223,19 @@ class JobManager:
         """Fire-and-forget push (if a notify_url is configured)."""
         if self.settings.notify_url:
             self._spawn(notify(self.settings.notify_url, title, message, priority))
+
+    def _maybe_notify_done(self, wj: WebJob) -> None:
+        """Push a 'finished encoding' notification the first time a job reaches
+        DONE. Guarded by a set so it fires once — and jobs already DONE at startup
+        are pre-seeded (in recover), so a restart never re-notifies old history."""
+        if wj.id in self._done_notified:
+            return
+        self._done_notified.add(wj.id)
+        name = self._name_of(wj)
+        n = len(wj.outputs)
+        self._notify(
+            f"✅ Done: {name}",
+            f"{name} finished encoding — {n} file{'' if n == 1 else 's'} placed in your library.")
 
     def _name_of(self, wj: WebJob) -> str:
         return (wj.disc.disc_name if wj.disc else None) or wj.source

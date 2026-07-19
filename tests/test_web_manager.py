@@ -894,3 +894,28 @@ def test_bump_job_makes_it_next_to_encode(manager):
 def test_bump_unknown_job_raises(manager):
     with pytest.raises(ValueError):
         manager.bump_job(999)
+
+
+def test_done_notification_fires_once(manager):
+    notes = []
+    manager._notify = lambda title, msg, priority=None: notes.append((title, msg))
+    wj = WebJob(id=1, source="disc:0", state=JobState.DONE, outputs=["/lib/WALL-E.mkv"])
+    wj.disc = DiscInfo(source="disc:0", disc_name="WALL-E", titles=[])
+
+    manager._maybe_notify_done(wj)
+    manager._maybe_notify_done(wj)  # second call is a no-op (guarded)
+
+    assert len(notes) == 1
+    title, msg = notes[0]
+    assert "Done" in title and "WALL-E" in title
+    assert "1 file placed" in msg
+
+
+def test_done_notification_not_refired_for_startup_history(manager):
+    notes = []
+    manager._notify = lambda title, msg, priority=None: notes.append(title)
+    # A job already DONE at startup is pre-seeded so recovery never re-notifies.
+    manager._done_notified.add(7)
+    wj = WebJob(id=7, source="disc:0", state=JobState.DONE, outputs=["/lib/x.mkv"])
+    manager._maybe_notify_done(wj)
+    assert notes == []
