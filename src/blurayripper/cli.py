@@ -1029,6 +1029,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     where = "all interfaces" if host == "0.0.0.0" else host
     from .version import get_version
     console.print(f"[bold green]BluRayRipper UI[/bold green] v{get_version()} → http://{host}:{port}  ({where})")
+    console.print("[dim]Ctrl+C to stop · press 'u' (or Ctrl+U) to git pull + restart.[/dim]")
     if host == "0.0.0.0":
         console.print(
             "[yellow]Bound to all interfaces — reachable on your LAN with no login. "
@@ -1042,6 +1043,20 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     # Let the web UI's "Restart server" button reach this server (graceful
     # shutdown frees the port) and flag a restart we honor after serve() returns.
     app.state.uvicorn_server = server
+
+    # Ctrl+U (or 'u') at the console: git pull + restart, like a worker. Unlike a
+    # worker there's no clean "drain" — in-flight rips/encodes are interrupted, but
+    # crash-recovery resumes them from their last checkpoint on restart.
+    serve_update = {"do": False}
+
+    def _on_key(ch):
+        if _is_update_key(ch) and not serve_update["do"]:
+            serve_update["do"] = True
+            console.print("[cyan]Update requested — shutting down, then git pull + "
+                          "restart. In-flight jobs resume after restart.[/cyan]")
+            server.should_exit = True  # graceful uvicorn shutdown, frees the port
+    keys = _KeyPress(_on_key)
+    keys.start()
 
     # uvicorn waits for active connections (the SSE stream) to finish before it
     # runs the lifespan shutdown that sets manager.closing — a deadlock that hangs
@@ -1060,6 +1075,12 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         await server.serve()
     finally:
         watcher.cancel()
+        keys.stop()
+
+    # Ctrl+U at the console: pull the latest code, then restart.
+    if serve_update["do"]:
+        _pull_and_restart(console)  # git pull + os.execv — normally never returns
+        return 1                    # only reached if the re-exec itself failed
 
     # A web-triggered restart: uvicorn has now shut down gracefully and released
     # the port, so replace this process with a fresh `serve` that picks up the
