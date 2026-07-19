@@ -498,7 +498,7 @@ function renderJobs(snap) {
   if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the Drives panel.</span>'; renderedStateClear(); renderJobs._sig = ''; renderJobs._known = new Set(); renderBulkBar(0); const pg = document.getElementById('pager'); if (pg){ pg.innerHTML=''; pg._sig=''; } return; }
   const ph = document.getElementById('placeholder'); if (ph) ph.remove();
   const allJobs = [...snap.jobs].filter(j => !jobFilter || catOf(j.state)===jobFilter)
-                                .sort((a,b) => jobRank(a)-jobRank(b) || a.id-b.id);
+                                .sort((a,b) => jobRank(a)-jobRank(b) || (b.priority||0)-(a.priority||0) || a.id-b.id);
   renderBulkBar(allJobs.length);
   // Paginate — rendering 150+ heavy cards (logs, live SSE, thumbnails) at once
   // crashes phones. The sort puts active/needs-you jobs first, so page 1 is the
@@ -798,9 +798,16 @@ function buildEdit(card, j){
       Edition ${editionSelectHtml()}
       <button class="sec" data-apply>Apply</button>
       <button class="sec" data-preview>Preview grain</button>
-      <button class="sec" data-redosubs title="Re-OCR subtitles from this job's staged/cached subs (no re-rip, no re-encode).">Redo subtitles</button><span data-msg class="muted"></span></div>
+      <button class="sec" data-redosubs title="Re-OCR subtitles from this job's staged/cached subs (no re-rip, no re-encode).">Redo subtitles</button>
+      <button class="sec" data-bump title="Move this job to the front of the encode queue — it becomes the next one encoded. Won't interrupt a job that's already encoding.">⬆ Encode next</button><span data-msg class="muted"></span></div>
     <div data-pv></div>`;
   wireEdition(body);
+  body.querySelector('[data-bump]').onclick = async () => {
+    const msg = body.querySelector('[data-msg]');
+    msg.textContent = 'Moving to front…';
+    try { await api('POST','/api/jobs/'+j.id+'/bump'); msg.textContent = 'Moved to front — next to encode ✓'; }
+    catch(e){ msg.textContent = '⚠ '+e.message; }
+  };
   body.querySelector('[data-apply]').onclick = async () => {
     const gm = body.querySelector('[data-gm]').value;
     const ed = editionValue(body);

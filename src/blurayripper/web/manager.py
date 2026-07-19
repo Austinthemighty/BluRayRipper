@@ -98,6 +98,7 @@ class WebJob:
     outputs: list[str] = field(default_factory=list)
     grain_mode: str = "auto"
     tune_grain: bool | None = None
+    priority: int = 0  # higher = claimed/encoded sooner ("Encode next")
     # Subtitle-based episode identification (auto-identify scrambled TV discs).
     auto_identify: bool = False
     show_tmdb_id: int | None = None
@@ -238,6 +239,7 @@ class JobManager:
             checkpoints=checkpoints,
             outputs=wj.outputs,
             error=wj.error,
+            priority=wj.priority,
             stage=wj.stage,
             progress=round(wj.progress, 4),
             log=wj.log[-30:],
@@ -256,6 +258,7 @@ class JobManager:
             selected_title_ids=list(rec.selected_title_ids),
             grain_mode=rec.grain_mode, tune_grain=rec.tune_grain,
         )
+        wj.priority = rec.priority
         wj.disc = disc_from_dict(rec.disc)
         wj.assignments = {a.title_id: a for a in (assignment_from_dict(d) for d in rec.assignments)}
         wj.stage, wj.progress = rec.stage, rec.progress
@@ -597,6 +600,20 @@ class JobManager:
         wj._task = self._spawn(self._scan_mkv(wj, path))
         self.bus.publish()
         return wj
+
+    def bump_job(self, job_id: int) -> None:
+        """Move a queued job to the front so it's the NEXT to encode. Raises the
+        job's priority above everything currently queued; the next free worker (or
+        the next local encode) then claims it first. A job already encoding keeps
+        going — this only reorders what's still waiting."""
+        wj = self.jobs.get(job_id)
+        if wj is None:
+            raise ValueError(f"No job {job_id}.")
+        top = max((j.priority for j in self.jobs.values()), default=0)
+        wj.priority = top + 1
+        wj.log.append(stamp_log("Bumped to the front of the encode queue — next to encode."))
+        self._persist(wj)
+        self.bus.publish()
 
     def set_titles(self, job_id: int, title_ids: list[int]) -> None:
         wj = self.jobs[job_id]
@@ -1240,6 +1257,7 @@ class JobManager:
             # True when the state says "encoding/OCR/placing" but nothing is actually
             # working it (worker died/restarted). Lets the UI flag a frozen job.
             "stalled": self._is_stalled(wj, live_state),
+            "priority": wj.priority,  # higher = bumped ahead in the encode queue
             "error": wj.error,
             "disc_name": wj.disc.disc_name if wj.disc else None,
             "kind_guess": (discinfo.guess_kind(wj.disc).value if wj.disc else None),
