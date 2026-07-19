@@ -284,6 +284,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _gate(lambda: manager.bump_job(job_id))
         return {"ok": True}
 
+    @app.post("/api/jobs/{job_id}/requeue")
+    async def requeue_job(job_id: int):
+        _gate(lambda: manager.requeue(job_id))
+        return {"ok": True}
+
+    @app.post("/api/jobs/requeue-stalled")
+    async def requeue_stalled():
+        return {"ok": True, "requeued": manager.requeue_stalled()}
+
     @app.post("/api/jobs/{job_id}/edit")
     async def edit_job(job_id: int, body: EditJob):
         _gate(lambda: manager.edit_job(job_id, body.grain_mode, body.tune_grain, body.edition))

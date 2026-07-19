@@ -609,6 +609,46 @@ class JobManager:
         self.bus.publish()
         return wj
 
+    def requeue(self, job_id: int) -> None:
+        """Recover a STALLED job — one in a worker-owned state (encoding / subtitles
+        / placing) with nothing actually working it (its worker died or the serve
+        box restarted mid-prep). Reset it to READY, drop any stale claim, and re-run
+        from its checkpoints (the finished rip is reused; only the unfinished stage
+        re-runs). Rejected if the job isn't actually stalled, so it never interrupts
+        live work."""
+        wj = self.jobs.get(job_id)
+        if wj is None:
+            raise ValueError(f"No job {job_id}.")
+        if not self._is_stalled(wj, self._live_state(wj)):
+            raise ValueError(f"Job {job_id} isn't stalled — nothing to requeue.")
+        if wj._pipeline_job is None:
+            raise ValueError(f"Job {job_id} can't be requeued (no scan state).")
+        wj.error = None
+        wj.progress = 0.0
+        wj.state = JobState.READY
+        wj._pipeline_job.state = JobState.READY
+        try:
+            self.store.release(job_id)  # drop a dead worker's stale claim
+        except Exception:
+            pass
+        wj.log.append(stamp_log("Requeued (was stalled) — resuming from checkpoints."))
+        self._persist(wj)
+        self.bus.publish()
+        wj._task = self._spawn(self._run_job(wj))
+
+    def requeue_stalled(self) -> int:
+        """Requeue every currently-stalled job. Returns how many were requeued."""
+        ids = [jid for jid, wj in list(self.jobs.items())
+               if self._is_stalled(wj, self._live_state(wj))]
+        done = 0
+        for jid in ids:
+            try:
+                self.requeue(jid)
+                done += 1
+            except ValueError:
+                pass
+        return done
+
     def bump_job(self, job_id: int) -> None:
         """Move a queued job to the front so it's the NEXT to encode. Raises the
         job's priority above everything currently queued; the next free worker (or

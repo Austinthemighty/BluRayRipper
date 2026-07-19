@@ -421,6 +421,19 @@ function renderStats(jobs){
     renderJobs._sig = '';                        // force a re-layout of the list
     if (renderJobs._lastSnap) renderJobs(renderJobs._lastSnap);
   });
+  const stalled = jobs.filter(j => j.stalled).length;
+  if (stalled) {
+    const b = document.createElement('button');
+    b.className = 'sec'; b.textContent = `⚠ Requeue ${stalled} stalled`;
+    b.style.marginLeft = '8px';
+    b.title = 'Reset every stalled job (worker died or the server restarted mid-step) back to the queue and re-run each from its finished rip.';
+    b.onclick = async () => {
+      if(!confirm(`Requeue ${stalled} stalled job(s)?\n\nEach resets to the queue and re-runs from its finished rip. Fix the underlying cause first (e.g. a hanging OCR tool) or they may just stall again.`)) return;
+      try { const r = await api('POST','/api/jobs/requeue-stalled'); toast(`Requeued ${r.requeued||0} stalled job(s).`); }
+      catch(e){ alert(e.message); }
+    };
+    host.appendChild(b);
+  }
 }
 
 // Bulk-remove bar shown when a terminal filter (done/failed) is active.
@@ -649,6 +662,18 @@ function liveUpdate(card, j){
     b.style.marginTop='8px';
     b.onclick=()=>api('POST','/api/jobs/'+j.id+'/retry').catch(e=>alert(e.message));
     card.querySelector('[data-body]').appendChild(b);
+  }
+  // Stalled jobs have no normal controls — give them a Requeue so they can be
+  // recovered. Remove it again once the job is no longer stalled.
+  const rq = card.querySelector('[data-requeue]');
+  if (j.stalled && !rq) {
+    const b=document.createElement('button'); b.dataset.requeue='1'; b.textContent='Requeue';
+    b.style.marginTop='8px';
+    b.title='This job stalled (its worker died or the server restarted mid-step). Reset it to the queue and re-run from its finished rip.';
+    b.onclick=()=>api('POST','/api/jobs/'+j.id+'/requeue').catch(e=>alert(e.message));
+    card.querySelector('[data-body]').appendChild(b);
+  } else if (!j.stalled && rq) {
+    rq.remove();
   }
 }
 

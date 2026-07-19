@@ -919,3 +919,52 @@ def test_done_notification_not_refired_for_startup_history(manager):
     wj = WebJob(id=7, source="disc:0", state=JobState.DONE, outputs=["/lib/x.mkv"])
     manager._maybe_notify_done(wj)
     assert notes == []
+
+
+async def test_requeue_recovers_a_stalled_job(manager):
+    from blurayripper.persistence import WorkerInfo
+    from blurayripper.pipeline import Job
+    # A job stuck in a worker state with no live worker and no local task -> stalled.
+    wj = WebJob(id=50, source="disc:0", state=JobState.EXTRACTING_SUBS)
+    wj._pipeline_job = Job(source="disc:0")
+    wj._pipeline_job.state = JobState.EXTRACTING_SUBS
+    manager.jobs[50] = wj
+    manager._workers_cache = [WorkerInfo("W1", "v", 99, "Encode", 5.0, 100.0)]  # on a diff job
+    assert manager._is_stalled(wj, manager._live_state(wj)) is True
+
+    manager.requeue(50)
+    assert wj.state is JobState.READY
+    assert wj._pipeline_job.state is JobState.READY
+    assert manager._live_state(wj) is JobState.READY   # no longer stalled/leaking
+    await _settle()
+
+
+def test_requeue_rejects_a_non_stalled_job(manager):
+    from blurayripper.pipeline import Job
+    wj = WebJob(id=51, source="disc:0", state=JobState.READY)
+    wj._pipeline_job = Job(source="disc:0")
+    manager.jobs[51] = wj
+    with pytest.raises(ValueError):
+        manager.requeue(51)   # READY isn't stalled
+
+
+async def test_requeue_stalled_bulk_counts(manager):
+    from blurayripper.persistence import WorkerInfo
+    from blurayripper.pipeline import Job
+    for jid in (60, 61, 62):
+        wj = WebJob(id=jid, source="disc:0", state=JobState.OCR_SUBS)
+        wj._pipeline_job = Job(source="disc:0")
+        wj._pipeline_job.state = JobState.OCR_SUBS
+        manager.jobs[jid] = wj
+    # A healthy encoding job (a live worker on it) must NOT be requeued.
+    healthy = WebJob(id=63, source="disc:0", state=JobState.ENCODING)
+    healthy._pipeline_job = Job(source="disc:0")
+    healthy._pipeline_job.state = JobState.ENCODING
+    manager.jobs[63] = healthy
+    manager._workers_cache = [WorkerInfo("W1", "v", 63, "Encode", 5.0, 100.0)]
+
+    n = manager.requeue_stalled()
+    assert n == 3
+    assert all(manager.jobs[j].state is JobState.READY for j in (60, 61, 62))
+    assert manager.jobs[63].state is JobState.ENCODING   # untouched
+    await _settle()
