@@ -25,6 +25,12 @@
   .wrap > * { min-width: 0; }
   /* Desktop: Drives + Workers in a left sidebar, Queue on the right. */
   .side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  /* Pin the sidebar so it stays in view while a long Queue scrolls. align-self:
+     start keeps it as tall as its content (not stretched to the Queue's height,
+     which would defeat sticky); it scrolls internally if taller than the viewport. */
+  @media (min-width: 761px) {
+    .side { position: sticky; top: 16px; align-self: start; max-height: calc(100vh - 32px); overflow: auto; }
+  }
   .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }
   /* Collapsible panel header (the collapse only takes effect on mobile). */
   .phead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
