@@ -169,7 +169,10 @@
     <div class="panel" id="workers-panel" style="display:none;">
       <div class="phead" onclick="togglePanel('workers-panel')">
         <h2>Workers</h2>
-        <span class="chev">▾</span>
+        <div class="phead-actions">
+          <button class="sec" onclick="event.stopPropagation();updateAllWorkers()" title="Tell every worker to finish its current encode, then git pull and restart. In-progress encodes are not interrupted.">↻ Update all</button>
+          <span class="chev">▾</span>
+        </div>
       </div>
       <div class="pbody"><div id="workers"></div></div>
     </div>
@@ -431,6 +434,14 @@ function renderBulkBar(count){
       catch(e){ host.querySelector('[data-msg]').textContent='⚠ '+e.message; }
     };
   } else host.innerHTML = '';
+}
+
+async function updateAllWorkers(){
+  if(!confirm('Update all workers?\n\nEach worker finishes its current encode, then git pulls and restarts. In-progress encodes are NOT interrupted — a worker updates once it drains.')) return;
+  try {
+    const r = await api('POST','/api/workers/update');
+    toast(`Update signalled — ${r.workers||0} worker(s) will drain, pull, and restart.`);
+  } catch(e){ alert(e.message); }
 }
 
 function fmtUptime(sec){

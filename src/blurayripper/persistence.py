@@ -224,6 +224,15 @@ class Store(ABC):
         """{worker_id: overlay} for every worker that has an override configured."""
         return {}
 
+    def request_worker_update(self) -> None:
+        """Bump the cluster-wide 'workers: drain + update' signal. No-op if the
+        store isn't shared (there are no remote workers to reach)."""
+
+    def worker_update_token(self) -> int:
+        """Current value of the worker-update signal (0 if never requested). A
+        worker updates when this rises above the value it saw at startup."""
+        return 0
+
     @property
     def durable(self) -> bool:
         return True
@@ -234,6 +243,13 @@ class MemoryStore(Store):
         self._rows: dict[int, dict] = {}
         self._claimed: set[int] = set()
         self._wsettings: dict[str, dict] = {}
+        self._update_token = 0
+
+    def request_worker_update(self) -> None:
+        self._update_token += 1
+
+    def worker_update_token(self) -> int:
+        return self._update_token
 
     def init(self) -> None:
         pass
@@ -313,6 +329,12 @@ CREATE TABLE IF NOT EXISTS worker_settings (
     worker_id  TEXT PRIMARY KEY,
     overlay    JSONB NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Cluster-wide signals (e.g. "all workers: drain + update"). A monotonic token
+-- per signal; workers act when it advances past the value they saw at startup.
+CREATE TABLE IF NOT EXISTS cluster_signals (
+    key   TEXT PRIMARY KEY,
+    token BIGINT NOT NULL DEFAULT 0
 );
 """
 
@@ -426,6 +448,18 @@ class PostgresStore(Store):
                 "run_token = EXCLUDED.run_token",
                 (worker_id, version, job_id, stage, run_token),
             )
+
+    def request_worker_update(self) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO cluster_signals (key, token) VALUES ('worker_update', 1) "
+                "ON CONFLICT (key) DO UPDATE SET token = cluster_signals.token + 1")
+
+    def worker_update_token(self) -> int:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT token FROM cluster_signals WHERE key = 'worker_update'")
+            row = cur.fetchone()
+        return int(row[0]) if row else 0
 
     def get_worker_settings(self, worker_id: str) -> dict:
         with self._connect() as conn, conn.cursor() as cur:
