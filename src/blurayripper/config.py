@@ -420,9 +420,16 @@ def load_settings(config_dir: Path | None = None, extra_overlay: dict | None = N
     )
 
     encode_cfg = data.get("encode", {})
+    # Prefer a gitignored presets.local.json overlay (written by the web HandBrake
+    # editor) over the tracked presets.json, mirroring settings.local.json — so
+    # web edits don't collide with `git pull`.
+    _preset_file = _resolve_path(encode_cfg.get("preset_file", "config/presets.json"), REPO_ROOT)
+    _local_preset = _preset_file.parent / "presets.local.json"
+    if _local_preset.exists():
+        _preset_file = _local_preset
     encode = EncodeSettings(
         container=encode_cfg.get("container", "mp4"),
-        preset_file=_resolve_path(encode_cfg.get("preset_file", "config/presets.json"), REPO_ROOT),
+        preset_file=_preset_file,
         preset_name=encode_cfg.get("preset_name", "Plex H265 1080p"),
         tune_grain=bool(encode_cfg.get("tune_grain", False)),
         low_priority=bool(encode_cfg.get("low_priority", True)),

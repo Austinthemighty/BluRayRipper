@@ -440,6 +440,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 }
             return {"configured": True, "error": str(exc)}
 
+    @app.get("/api/handbrake")
+    async def get_handbrake():
+        from ..handbrake_store import handbrake_ui_payload
+        try:
+            return handbrake_ui_payload(settings.encode.preset_file, settings.encode.preset_name)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.post("/api/handbrake")
+    async def post_handbrake(updates: dict = Body(...)):
+        from ..handbrake_store import save_handbrake
+        try:
+            save_handbrake(settings.encode.preset_file, settings.encode.preset_name, updates)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"ok": True, "restart_required": True}
+
     @app.get("/api/settings")
     async def get_settings(scope: str = "global"):
         return settings_ui_payload(settings.config_dir, scope, manager.store)
