@@ -9,11 +9,12 @@ makemkvcon = ""
 handbrakecli = ""
 mkvmerge = ""
 mkvextract = ""
-# SubtitleEdit launcher. On Windows this is the path to SubtitleEdit.exe.
-# On Linux/macOS, either a native "seconv"/"SubtitleEdit" binary, or leave
-# subtitleedit pointing at SubtitleEdit.exe and set subtitleedit_runner = "mono".
+# Subtitle OCR tool. Recommended: seconv (the SubtitleEdit 5.x CLI) — point this
+# at seconv/seconv.exe. (The classic SubtitleEdit.exe GUI hangs in batch mode.)
 subtitleedit = ""
-subtitleedit_runner = ""   # e.g. "mono" on Linux/macOS; blank to run directly
+# Launcher prefix for the tool above. Blank for a native seconv/exe (the norm).
+# 'dotnet' to run a seconv .dll directly; 'mono' only for the legacy SE 4.x GUI.
+subtitleedit_runner = ""
 ffmpeg = ""                # optional — grain previews + UHD/HDR encoding
 dovitool = ""              # optional — dovi_tool, for Dolby Vision UHD
 

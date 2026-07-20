@@ -1,7 +1,8 @@
 """SubtitleEdit CLI wrapper: OCR a PGS (.sup) subtitle into .srt via Tesseract.
 
 Cross-platform: on Windows ``SubtitleEdit.exe`` runs directly; on Linux/macOS it
-runs under a ``runner`` prefix (e.g. ``mono``) or as a native ``seconv`` build.
+runs under a ``runner`` prefix (``dotnet`` for a seconv .dll, or ``mono`` for the
+legacy SE 4.x GUI) or directly as a native ``seconv`` build.
 The launcher prefix is a config value so the rest of the app is OS-agnostic.
 """
 
