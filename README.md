@@ -1,98 +1,151 @@
 # BluRayRipper
 
-Automated Blu-ray/DVD → Plex pipeline. Rips a disc with **MakeMKV**, transcodes
-to **H.265** with **HandBrake**, OCRs image subtitles to **SRT sidecars** with
-**SubtitleEdit (Tesseract)**, and names everything for Plex
-(`Show - S01E09.mp4`, `Movie (Year).mp4`) using **TMDB** lookup + a confirm step.
+Automated Blu-ray / DVD / UHD → Plex pipeline with a web dashboard and optional
+multi-machine encoding.
 
-Cross-platform (Windows / Linux / macOS). This is **Phase 1**: a working
-end-to-end command-line pipeline. A local web UI is planned for Phase 2 (see
-the plan in `.claude/plans/`).
+It rips a disc with **MakeMKV**, transcodes to **H.265** (HandBrake for ≤1080p;
+**ffmpeg + x265** for UHD so HDR10 / **Dolby Vision** survive), OCRs image
+subtitles to **SRT sidecars** with **SubtitleEdit / seconv + Tesseract**, and
+names everything for Plex (`Movie (Year).mkv`, `Show - S01E09.mkv`) from a
+**TMDB** lookup with a confirm step. A shared **Postgres** gives it crash
+recovery and lets a rip box hand heavy encodes off to **worker** machines.
 
-## What it does
+Cross-platform: Windows, Linux, or a mix. Python 3.11+.
 
-1. **Scan** a disc/folder/ISO and list its titles (duration, chapters, audio &
-   subtitle languages).
-2. **Rip** the titles you choose with MakeMKV.
-3. **Name** them: looks up the movie/show on TMDB and lets you confirm/correct
-   the episode mapping. Once confirmed, the disc is **fingerprinted** so a
-   re-rip of the same disc is fully automatic.
-4. **Encode** to H.265, keeping only your configured **audio languages**
-   (e.g. English + Polish) with the default flagged.
-5. **Subtitles**: extracts each kept-language PGS track and OCRs it to a
-   `.srt` sidecar (`Show - S01E09.en.srt`, `Show - S01E09.pl.srt`).
-6. **Place** finished files into your Plex library on the configured output
-   folder (e.g. a NAS) and clean up the temp/staging folder.
+## How it works
 
-## Requirements
+1. **Scan** a disc/folder/ISO → list titles (duration, chapters, audio & sub languages).
+2. **Rip** the chosen titles with MakeMKV; the disc auto-ejects when it's done.
+3. **Name** them via TMDB (confirm/correct the match). The disc is **fingerprinted**,
+   so re-inserting the same disc later is fully automatic.
+4. **Subtitles** — extract each kept-language PGS track and OCR it to a `.srt`
+   sidecar (`Movie (Year).en.srt`, `.pl.srt`, SDH/forced disambiguated).
+5. **Encode** to H.265, keeping only your configured audio/subtitle **languages**.
+   UHD HDR/DV titles take the ffmpeg path to preserve their metadata.
+6. **Place** the finished files in your Plex library (e.g. a NAS) and clean up staging.
 
-Install these external tools and make sure they're on your PATH (or set their
-paths in `config/settings.toml`):
+Everything is driven from the **web UI**; there's also a CLI for scripted runs.
+
+## Quick setup (recommended)
+
+Provisioning scripts install every external tool, wire up the paths, and run a
+health check:
+
+```powershell
+# Windows (elevated PowerShell), from the repo root:
+powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1 -Langs pol
+```
+```bash
+# Linux (Debian/Ubuntu), from the repo root:
+./scripts/setup-linux.sh --langs pol            # rip + encode + OCR
+./scripts/setup-linux.sh --langs pol --no-makemkv   # encode-only worker
+```
+
+Then install the app itself and verify:
+
+```bash
+python3.11 -m venv .venv && . .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -e ".[web]"        # add ",postgres" for clustering, ",iso" for ISO cover art
+
+cp config/secrets.env.example config/secrets.env   # then add your TMDB key (+ DB URL if clustering)
+blurayripper check             # confirms tools, folders, preset, languages, TMDB key
+```
+
+## External tools
+
+`check` verifies all of these; the setup scripts install them.
 
 | Tool | Purpose |
 |------|---------|
 | [MakeMKV](https://www.makemkv.com/) (`makemkvcon`) | Rip disc → MKV |
-| [HandBrakeCLI](https://handbrake.fr/downloads2.php) | Transcode → H.265 |
+| [HandBrakeCLI](https://handbrake.fr/) | Transcode ≤1080p → H.265 |
+| [ffmpeg](https://ffmpeg.org/) | UHD/HDR encode (x265, preserves HDR10) + grain preview |
+| [dovi_tool](https://github.com/quietvoid/dovi_tool) | Preserve Dolby Vision (Profile 7 → 8.1) |
 | [MKVToolNix](https://mkvtoolnix.download/) (`mkvmerge`, `mkvextract`) | Identify/extract subtitle tracks |
-| [SubtitleEdit](https://www.nikse.dk/subtitleedit) + [Tesseract](https://github.com/tesseract-ocr/tesseract) | OCR PGS → SRT |
+| [SubtitleEdit `seconv`](https://github.com/SubtitleEdit/subtitleedit-cli) + [Tesseract](https://github.com/UB-Mannheim/tesseract/wiki) | OCR PGS → SRT |
 
-Plus **Python 3.11+**. On Linux, SubtitleEdit runs under `mono` — set
-`subtitleedit_runner = "mono"` in the config.
+Notes:
+- **seconv** (the SubtitleEdit 5.x CLI) is the recommended OCR tool — the classic
+  GUI `SubtitleEdit.exe` hangs in batch mode. seconv shells out to a **system
+  Tesseract on PATH** (the GUI bundles its own), so install Tesseract + your
+  language packs. Point `[tools] subtitleedit` at `seconv`.
+- ffmpeg/dovi_tool are only needed if you rip UHD and want to keep HDR/DV.
+- Tools on PATH are auto-detected by name; otherwise set explicit paths.
 
-## Setup
+## Configuration
 
-```bash
-python3.11 -m venv .venv
-. .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -e .
+Three layers, highest priority first:
 
-cp config/secrets.env.example config/secrets.env   # add your TMDB API key
-$EDITOR config/settings.toml                        # set folders + languages
-```
+- **`config/secrets.env`** (gitignored) — the DB URL, TMDB key, and any
+  machine-specific tool paths (`BLURAYRIPPER_*`). This is where per-box secrets live.
+- **`config/settings.local.json`** — the web **⚙ Settings** overlay (edit in the browser).
+- **`config/settings.toml`** — tracked defaults.
 
-Key settings in `config/settings.toml`:
+Most things are editable from **⚙ Settings** in the web UI (globally or per-worker),
+including staging/output folders, kept languages, encode options (UHD/HDR/DV),
+the seconv OCR options, and cluster settings. Every field has inline help.
 
-- `[storage] staging_dir` / `output_dir` — temp folder and final library
-  (either can point at a NAS).
-- `[languages] keep` / `default` — which audio/subtitle languages to keep and
-  which is primary.
-- `[encode] container` — `mp4` (default) or `mkv`.
-- `[tools]` — leave blank to auto-detect, or set explicit paths.
+## Web UI
 
-## Usage
-
-```bash
-# List a disc's titles (no ripping)
-blurayripper scan disc:0
-
-# Run the full pipeline (interactive naming)
-blurayripper rip disc:0
-
-# Rip several discs at once across drives. You confirm each disc's naming up
-# front, then they run concurrently. A weighted scheduler keeps two heavy UHD
-# encodes from running at the same time (they'd just split the CPU), while
-# letting a UHD overlap with a 1080p disc or several DVDs.
-blurayripper queue disc:0 disc:1
-
-# Other sources: a ripped BDMV folder or an ISO (handy for testing)
-blurayripper scan file:/path/to/BDMV_parent
-blurayripper rip  iso:/path/to/disc.iso
-```
-
-### Web UI
-
-A browser dashboard manages the whole queue: see your drives, add discs,
-confirm naming, and watch live progress — with the same smart encode
-scheduling running in the background.
+The dashboard is the primary interface: drives, add discs, confirm naming, live
+progress, and cluster status.
 
 ```bash
-pip install -e ".[web]"     # one-time: installs FastAPI + uvicorn
 blurayripper serve          # then open http://127.0.0.1:8723
 ```
 
-In the UI: click a drive's **Add**, pick the titles, search TMDB to name it,
-and **Confirm** — the job rips and encodes on its own. Load the next disc and
-repeat; heavy UHD encodes are automatically kept from doubling up.
+From the UI you can: add a disc from its drive (or **+ Add by selector** for an
+ISO / BDMV folder / .mkv), pick titles, search TMDB to name it and **Confirm**;
+watch live encode progress; **⬆ Encode next** to jump a job to the front;
+**Requeue** a stalled job; edit **Settings**; and restart/update boxes.
+
+Bind to `0.0.0.0` (in Settings → Web) to reach it on your LAN — note there's no
+login, so use it only on a trusted network.
+
+Press **`u`** (or Ctrl+U) in the `serve` console to `git pull` + restart.
+
+## Clustering (optional)
+
+For distributed encoding, a **rip box** rips + preps and enqueues jobs into a
+shared **Postgres**; separate **worker** machines claim and encode them. A shared
+NAS holds staging + output. Postgres also gives crash recovery — a job resumes
+from its last checkpoint after any box restarts.
+
+```bash
+# once, against your Postgres (set BLURAYRIPPER_DATABASE_URL in secrets.env):
+blurayripper db-init
+
+# on the rip box: enable workers in Settings, then run serve
+blurayripper serve
+
+# on each worker machine (same DB + NAS):
+blurayripper worker            # Ctrl+C drains; 'u'/Ctrl+U drains + pulls + restarts
+```
+
+- **Workers panel** shows each worker's version, current job, and uptime.
+  **↻ Update all** drains, `git pull`s, and restarts every worker.
+- **Per-worker settings**: override tool paths / encode / OCR options for one
+  machine in Settings (pick the worker in the scope dropdown).
+- `worker_does_subs` moves subtitle OCR onto the workers; `local_encode_max_height`
+  lets the rip box handle lighter (e.g. ≤1080p) encodes itself.
+
+Optional **push notifications** (ntfy-style URL in Settings) fire for: needs-input
+gates, a disc finishing its rip, and an encode completing.
+
+## CLI
+
+```bash
+blurayripper scan disc:0                 # list a disc's titles
+blurayripper rip  disc:0                  # full pipeline, interactive naming
+blurayripper queue disc:0 disc:1          # several discs at once, weighted scheduling
+blurayripper scan file:/path/to/BDMV      # a ripped folder …
+blurayripper rip  iso:/path/to/disc.iso   # … or an ISO
+blurayripper check                        # health check (tools/folders/preset/langs)
+blurayripper eject disc:0                 # tray control
+```
+
+A weighted encode scheduler keeps two heavy UHD encodes from running at once
+(they'd just split the CPU), while letting a UHD overlap a 1080p disc or several DVDs.
 
 ## Development
 
@@ -101,6 +154,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Tests cover the MakeMKV robot-output parser, HandBrake JSON progress parser,
-MKVToolNix track identification, Plex naming, disc fingerprinting/heuristics,
-and the mapping store — all without needing the external tools or a disc.
+Tests cover the MakeMKV robot-output parser, HandBrake JSON progress, MKVToolNix
+track identification, Plex naming, disc fingerprinting, the settings schema, the
+job state machine (scan → rip → subs → encode → place), crash recovery, and the
+cluster claim/queue logic — all without external tools or a disc.
