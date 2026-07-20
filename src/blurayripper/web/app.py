@@ -450,12 +450,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/handbrake")
     async def post_handbrake(updates: dict = Body(...)):
-        from ..handbrake_store import save_handbrake
+        from ..handbrake_store import SHARED_KEY, save_handbrake
         try:
-            save_handbrake(settings.encode.preset_file, settings.encode.preset_name, updates)
+            data = save_handbrake(settings.encode.preset_file, settings.encode.preset_name, updates)
         except (ValueError, OSError) as exc:
             raise HTTPException(status_code=400, detail=str(exc))
-        return {"ok": True, "restart_required": True}
+        # Share it cluster-wide so every worker picks up the same preset (no drift).
+        shared = False
+        if manager.store.durable:
+            try:
+                manager.store.set_shared_config(SHARED_KEY, data)
+                shared = True
+            except Exception:
+                pass  # the local save still succeeded
+        return {"ok": True, "restart_required": True, "shared": shared}
 
     @app.get("/api/settings")
     async def get_settings(scope: str = "global"):

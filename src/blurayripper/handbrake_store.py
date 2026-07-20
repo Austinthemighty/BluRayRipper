@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 LOCAL_PRESET_NAME = "presets.local.json"
+# Key under which the merged preset is stored cluster-wide (so every box shares it).
+SHARED_KEY = "handbrake_preset"
 
 
 @dataclass
@@ -104,9 +106,10 @@ def handbrake_ui_payload(preset_file: Path, preset_name: str) -> dict:
     return {"preset_name": preset.get("PresetName", preset_name), "fields": fields}
 
 
-def save_handbrake(preset_file: Path, preset_name: str, updates: dict) -> Path:
+def save_handbrake(preset_file: Path, preset_name: str, updates: dict) -> dict:
     """Apply updates to the active preset and write config/presets.local.json.
-    Returns the written path. Only known fields are accepted."""
+    Returns the full merged preset file (so it can be shared cluster-wide). Only
+    known fields are accepted; an invalid choice raises ValueError."""
     data = _load_file(preset_file)
     preset = _find_preset(data, preset_name)
     for key, raw in (updates or {}).items():
@@ -114,6 +117,24 @@ def save_handbrake(preset_file: Path, preset_name: str, updates: dict) -> Path:
         if field is None:
             continue  # ignore unknown keys
         preset[key] = _coerce(field, raw)
-    out = Path(preset_file).parent / LOCAL_PRESET_NAME
+    _write_local(Path(preset_file).parent, data)
+    return data
+
+
+def _write_local(config_dir: Path, data: dict) -> Path:
+    out = Path(config_dir) / LOCAL_PRESET_NAME
     out.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return out
+
+
+def apply_shared_preset(config_dir: Path, content: dict) -> bool:
+    """Write a cluster-shared preset to this box's presets.local.json if it differs
+    from what's already there. Returns True if the file changed."""
+    local = Path(config_dir) / LOCAL_PRESET_NAME
+    try:
+        if local.exists() and json.loads(local.read_text(encoding="utf-8")) == content:
+            return False
+    except (OSError, ValueError):
+        pass
+    _write_local(config_dir, content)
+    return True

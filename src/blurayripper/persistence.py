@@ -233,6 +233,15 @@ class Store(ABC):
         worker updates when this rises above the value it saw at startup."""
         return 0
 
+    def get_shared_config(self, key: str) -> dict | None:
+        """A cluster-wide config value (e.g. the HandBrake preset). None if unset
+        or the store isn't shared."""
+        return None
+
+    def set_shared_config(self, key: str, value: dict) -> None:
+        """Set a cluster-wide config value so every box picks it up. No-op if the
+        store isn't shared."""
+
     @property
     def durable(self) -> bool:
         return True
@@ -244,12 +253,21 @@ class MemoryStore(Store):
         self._claimed: set[int] = set()
         self._wsettings: dict[str, dict] = {}
         self._update_token = 0
+        self._shared_config: dict[str, dict] = {}
 
     def request_worker_update(self) -> None:
         self._update_token += 1
 
     def worker_update_token(self) -> int:
         return self._update_token
+
+    def get_shared_config(self, key: str) -> dict | None:
+        import copy
+        return copy.deepcopy(self._shared_config.get(key))
+
+    def set_shared_config(self, key: str, value: dict) -> None:
+        import copy
+        self._shared_config[key] = copy.deepcopy(value)
 
     def init(self) -> None:
         pass
@@ -335,6 +353,12 @@ CREATE TABLE IF NOT EXISTS worker_settings (
 CREATE TABLE IF NOT EXISTS cluster_signals (
     key   TEXT PRIMARY KEY,
     token BIGINT NOT NULL DEFAULT 0
+);
+-- Cluster-wide config shared by every box (e.g. the HandBrake preset), so a
+-- setting edited once on the serve UI reaches all workers instead of drifting.
+CREATE TABLE IF NOT EXISTS cluster_config (
+    key   TEXT PRIMARY KEY,
+    value JSONB NOT NULL
 );
 """
 
@@ -460,6 +484,22 @@ class PostgresStore(Store):
             cur.execute("SELECT token FROM cluster_signals WHERE key = 'worker_update'")
             row = cur.fetchone()
         return int(row[0]) if row else 0
+
+    def get_shared_config(self, key: str) -> dict | None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT value FROM cluster_config WHERE key = %s", (key,))
+            row = cur.fetchone()
+        if not row:
+            return None
+        return row[0] if isinstance(row[0], dict) else json.loads(row[0])
+
+    def set_shared_config(self, key: str, value: dict) -> None:
+        from psycopg.types.json import Jsonb
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO cluster_config (key, value) VALUES (%s, %s) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                (key, Jsonb(value)))
 
     def get_worker_settings(self, worker_id: str) -> dict:
         with self._connect() as conn, conn.cursor() as cur:

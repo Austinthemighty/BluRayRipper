@@ -1175,8 +1175,11 @@ async function saveHandbrake(){
   });
   msg.style.color = '#8b949e'; msg.textContent = 'Saving…';
   try {
-    await api('POST','/api/handbrake', updates);
-    msg.style.color = '#3fb950'; msg.textContent = 'Saved. Restart the server to apply.';
+    const r = await api('POST','/api/handbrake', updates);
+    msg.style.color = '#3fb950';
+    msg.textContent = (r && r.shared)
+      ? 'Saved + shared with all workers (they apply it on their next job). Restart the server to apply here.'
+      : 'Saved. Restart the server to apply.';
   } catch(e){ msg.style.color = '#f85149'; msg.textContent = 'Error: ' + e.message; }
 }
 

@@ -957,6 +957,22 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     from .web.app import create_app
 
     settings = load_settings(args.config)
+
+    # Pull the cluster-shared HandBrake preset (if clustered) so this box uses the
+    # same one as everyone else, then reload so preset_file resolves to the synced
+    # presets.local.json. Keeps a fresh serve box from silently running a different
+    # preset than the workers.
+    if settings.database_url:
+        try:
+            from .handbrake_store import SHARED_KEY, apply_shared_preset
+            from .persistence import make_store
+            _shared = make_store(settings.database_url).get_shared_config(SHARED_KEY)
+            if _shared and apply_shared_preset(settings.config_dir, _shared):
+                settings = load_settings(args.config)
+                console.print("[dim]Applied the cluster's shared HandBrake preset.[/dim]")
+        except Exception:
+            pass  # DB down / not set up — fall back to the local preset
+
     host = args.host or settings.web_host
     port = args.port or settings.web_port
 
