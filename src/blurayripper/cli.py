@@ -474,6 +474,58 @@ async def _cmd_check(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+async def _cmd_verify_subs(args: argparse.Namespace) -> int:
+    """Audit finished jobs: a movie whose disc had a kept-language subtitle track
+    should have a .srt sidecar. Flags the ones that don't."""
+    from pathlib import Path
+
+    from .persistence import make_store
+    from .subtitle_audit import audit_done_jobs
+
+    settings = load_settings(args.config)
+    store = make_store(settings.database_url)
+    try:
+        store.init()
+        records = store.load_all()
+    except Exception as exc:
+        console.print(f"[red]Can't read the job store: {exc}[/red]")
+        return 2
+
+    def list_sidecars(video):
+        p = Path(video)
+        if not p.parent.exists():
+            return None  # folder unreachable (e.g. the NAS isn't mapped here)
+        return sorted(p.parent.glob(p.stem + ".*.srt"))
+
+    results = audit_done_jobs(records, settings.languages.is_kept, list_sidecars)
+    missing = [r for r in results if r["status"] == "missing"]
+    unreachable = [r for r in results if r["status"] == "unreachable"]
+    ok_n = sum(1 for r in results if r["status"] == "ok")
+
+    to_show = results if args.all else missing
+    if to_show:
+        table = Table("Job", "Name", "SRTs", "Disc subs", "Status",
+                      title="Subtitle audit (finished jobs)")
+        _color = {"missing": "red", "unreachable": "yellow", "ok": "green"}
+        for r in sorted(to_show, key=lambda r: r["id"]):
+            c = _color[r["status"]]
+            table.add_row(str(r["id"]), r["name"][:48], str(r["srts"]),
+                          "yes" if r["expected"] else "no", f"[{c}]{r['status']}[/{c}]")
+        console.print(table)
+
+    console.print(
+        f"\n[bold]{ok_n} OK[/bold] · [red]{len(missing)} missing subtitles[/red] · "
+        f"[yellow]{len(unreachable)} unverifiable[/yellow]  (of {len(results)} finished jobs)")
+    if unreachable:
+        console.print("[yellow]'unverifiable' = the output folder wasn't reachable (run this on the "
+                      "box that has the library/NAS mapped).[/yellow]")
+    if missing:
+        console.print("[yellow]'missing' = the disc had a kept-language subtitle track but the movie "
+                      "has no .srt sidecar. Requeue those jobs in the web UI to re-extract + OCR "
+                      "('Re-OCR all' only helps when the .sup subs were cached).[/yellow]")
+    return 1 if missing else 0
+
+
 def _vcruntime_status() -> tuple[str, str]:
     """Check the MSVC runtime that dovi_tool.exe / mkvtoolnix need on Windows.
 
@@ -1174,6 +1226,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     check = sub.add_parser("check", help="Pre-flight: verify tools, folders, and preset config")
     check.set_defaults(func=_cmd_check)
+
+    vsub = sub.add_parser(
+        "verify-subs",
+        help="Audit finished jobs for placed movies missing their subtitle sidecars")
+    vsub.add_argument("--all", action="store_true",
+                      help="List every done job, not just those missing subtitles")
+    vsub.set_defaults(func=_cmd_verify_subs)
 
     scan = sub.add_parser("scan", help="Scan a disc/folder/ISO and list titles")
     scan.add_argument("source", help="makemkvcon source, e.g. disc:0 / file:/path / iso:/path")
