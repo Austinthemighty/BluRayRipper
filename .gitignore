@@ -16,6 +16,8 @@ config/secrets.env
 # Web-edited settings overlay (⚙ Settings in the UI). Gitignored so it survives
 # `git pull` and never clobbers the tracked settings.toml.
 config/settings.local.json
+# Web-edited HandBrake preset overlay (same reason; preferred over presets.json).
+config/presets.local.json
 
 # Runtime data
 *.db

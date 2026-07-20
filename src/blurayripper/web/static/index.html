@@ -156,6 +156,7 @@
   <button class="sec" id="refreshart" title="Re-fetch the real poster + backdrop from TMDB for every named job, overwriting wrong/generic art in each folder.">Refresh artwork</button>
   <label class="cap"><input type="checkbox" id="autoconfirm"> Auto-confirm single matches</label>
   <button class="sec" id="opensettings" title="Edit server settings (saved to config/settings.local.json; applied on next restart).">⚙ Settings</button>
+  <button class="sec" onclick="openHandbrake()" title="Edit the HandBrake encode preset (quality, encoder, speed) used for <=1080p titles.">🎬 HandBrake</button>
 </header>
 <div id="stats"></div>
 <div id="bulkbar"></div>
@@ -227,6 +228,21 @@
       <span id="settings-msg" class="muted"></span>
       <button class="sec" onclick="restartServer(false)" style="margin-left:auto;" title="Restart the server to apply saved settings. Warns if a rip/encode/OCR is running.">↻ Restart server</button>
       <button class="sec" id="clear-worker-override" onclick="clearWorkerOverride()" style="display:none; margin-left:auto;" title="Remove this worker's saved override so it follows the global settings again.">Clear worker override</button>
+    </div>
+  </div>
+</div>
+
+<div id="handbrake-modal" class="modal" onclick="if(event.target===this)closeHandbrake();">
+  <div class="sheet">
+    <div class="shead">
+      <h2>HandBrake encode preset</h2>
+      <div class="muted" style="font-size:12px;">Used for titles up to 1080p. UHD/HDR uses the ffmpeg path (in ⚙ Settings → Encode). Saved to <code>config/presets.local.json</code>; applied on restart.</div>
+    </div>
+    <div id="handbrake-body"><span class="muted">Loading…</span></div>
+    <div class="sfoot">
+      <button onclick="saveHandbrake()">Save</button>
+      <button class="sec" onclick="closeHandbrake()">Close</button>
+      <span id="handbrake-msg" class="muted"></span>
     </div>
   </div>
 </div>
@@ -1117,6 +1133,53 @@ document.getElementById('refreshart').onclick = async (e) => {
 // ---- Settings modal ----
 const esc = (s) => String(s == null ? '' : s).replace(/"/g,'&quot;').replace(/</g,'&lt;');
 let settingsScope = 'global';
+
+// ---- HandBrake preset editor ----
+async function openHandbrake(){
+  const m = document.getElementById('handbrake-modal');
+  const body = document.getElementById('handbrake-body');
+  document.getElementById('handbrake-msg').textContent = '';
+  body.innerHTML = '<span class="muted">Loading…</span>';
+  m.classList.add('open');
+  let data;
+  try { data = await api('GET','/api/handbrake'); }
+  catch(e){ body.innerHTML = '<span class="muted">Error: '+esc(e.message)+'</span>'; return; }
+  const grp = document.createElement('div'); grp.className = 'sgroup';
+  grp.innerHTML = `<h3>Preset: ${esc(data.preset_name)}</h3>`;
+  for(const f of (data.fields||[])){
+    const id = 'hb_'+f.key;
+    let ctrl;
+    if(f.type === 'choice'){
+      ctrl = `<select id="${id}">` +
+        (f.choices||[]).map(c => `<option ${String(f.value)===c?'selected':''}>${esc(c)}</option>`).join('') + `</select>`;
+    } else if(f.type === 'int' || f.type === 'number'){
+      ctrl = `<input type="number" id="${id}" ${f.type==='number'?'step="0.5"':''} value="${esc(f.value)}">`;
+    } else {
+      ctrl = `<input type="text" id="${id}" value="${esc(f.value)}">`;
+    }
+    const row = document.createElement('div');
+    row.className = 'sfield'; row.dataset.key = f.key;
+    row.innerHTML = `<label for="${id}" title="${esc(f.help)}">${esc(f.label)}</label><div>${ctrl}</div>` +
+                    (f.help ? `<div class="fhelp">${esc(f.help)}</div>` : '');
+    grp.appendChild(row);
+  }
+  body.innerHTML = ''; body.appendChild(grp);
+}
+function closeHandbrake(){ document.getElementById('handbrake-modal').classList.remove('open'); }
+async function saveHandbrake(){
+  const msg = document.getElementById('handbrake-msg');
+  const updates = {};
+  document.querySelectorAll('#handbrake-body .sfield').forEach(row => {
+    const el = row.querySelector('input, select');
+    if (el) updates[row.dataset.key] = el.value;
+  });
+  msg.style.color = '#8b949e'; msg.textContent = 'Saving…';
+  try {
+    await api('POST','/api/handbrake', updates);
+    msg.style.color = '#3fb950'; msg.textContent = 'Saved. Restart the server to apply.';
+  } catch(e){ msg.style.color = '#f85149'; msg.textContent = 'Error: ' + e.message; }
+}
+
 async function openSettings(scope){
   scope = (typeof scope === 'string' && scope) ? scope : 'global';
   settingsScope = scope;
