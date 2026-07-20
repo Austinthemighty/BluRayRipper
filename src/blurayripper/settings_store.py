@@ -44,7 +44,7 @@ SCHEMA: list[tuple[str, list[Field]]] = [
         Field("tools", "mkvmerge", "str", "mkvmerge", "", "Blank = auto-detect.", env="BLURAYRIPPER_MKVMERGE"),
         Field("tools", "mkvextract", "str", "mkvextract", "", "Blank = auto-detect.", env="BLURAYRIPPER_MKVEXTRACT"),
         Field("tools", "subtitleedit", "str", "Subtitle Edit", "", "Blank = auto-detect.", env="BLURAYRIPPER_SUBTITLEEDIT"),
-        Field("tools", "subtitleedit_runner", "str", "SE runner", "", "e.g. 'mono' on macOS/Linux; blank runs directly.", env="BLURAYRIPPER_SUBTITLEEDIT_RUNNER"),
+        Field("tools", "subtitleedit_runner", "str", "SE runner", "", "Launcher prefix for the OCR tool: blank for a native seconv/exe (the norm); 'dotnet' to run a seconv .dll; 'mono' only for the legacy SubtitleEdit 4.x GUI.", env="BLURAYRIPPER_SUBTITLEEDIT_RUNNER"),
         Field("tools", "ffmpeg", "str", "ffmpeg", "", "Grain preview + UHD/HDR encoding.", env="BLURAYRIPPER_FFMPEG"),
         Field("tools", "dovitool", "str", "dovi_tool", "", "Dolby Vision UHD re-encodes.", env="BLURAYRIPPER_DOVITOOL"),
     ]),

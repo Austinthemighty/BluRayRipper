@@ -24,11 +24,12 @@ makemkvcon = ""              # env: BLURAYRIPPER_MAKEMKVCON
 handbrakecli = ""            # env: BLURAYRIPPER_HANDBRAKECLI
 mkvmerge = ""                # env: BLURAYRIPPER_MKVMERGE
 mkvextract = ""              # env: BLURAYRIPPER_MKVEXTRACT
-# SubtitleEdit launcher. On Windows this is the path to SubtitleEdit.exe. On
-# macOS/Linux either a native "seconv"/"SubtitleEdit", or point at SubtitleEdit.exe
-# and set subtitleedit_runner = "mono".
+# Subtitle OCR tool. Recommended: seconv (SubtitleEdit 5.x CLI) — the GUI
+# SubtitleEdit.exe hangs in batch mode. Point this at seconv/seconv.exe.
 subtitleedit = ""            # env: BLURAYRIPPER_SUBTITLEEDIT
-subtitleedit_runner = ""     # e.g. "mono" on macOS/Linux; blank runs directly. env: BLURAYRIPPER_SUBTITLEEDIT_RUNNER
+# Launcher prefix: blank for a native seconv/exe; 'dotnet' for a seconv .dll;
+# 'mono' only for the legacy SE 4.x GUI. env: BLURAYRIPPER_SUBTITLEEDIT_RUNNER
+subtitleedit_runner = ""
 ffmpeg = ""                  # optional — grain previews + UHD/HDR encoding. env: BLURAYRIPPER_FFMPEG
 dovitool = ""                # optional — dovi_tool, for Dolby Vision UHD. env: BLURAYRIPPER_DOVITOOL
 
