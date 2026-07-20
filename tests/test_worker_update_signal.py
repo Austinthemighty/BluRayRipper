@@ -52,3 +52,30 @@ def test_manager_request_worker_update_needs_durable_store():
     mgr2 = JobManager(s, store=MemoryStore())   # MemoryStore is non-durable
     with pytest.raises(ValueError):
         mgr2.request_worker_update()
+
+
+def test_shared_config_round_trips_in_store():
+    store = MemoryStore()
+    assert store.get_shared_config("handbrake_preset") is None
+    store.set_shared_config("handbrake_preset", {"PresetList": [{"PresetName": "X"}]})
+    assert store.get_shared_config("handbrake_preset")["PresetList"][0]["PresetName"] == "X"
+
+
+def test_worker_syncs_shared_handbrake_preset(tmp_path, monkeypatch):
+    from blurayripper import handbrake_store
+    store = MemoryStore()
+    store.set_shared_config(handbrake_store.SHARED_KEY,
+                            {"PresetList": [{"PresetName": "Cluster", "VideoQualitySlider": 20}]})
+    s = load_settings()
+    monkeypatch.setattr(s, "config_dir", tmp_path)
+    runner = WorkerRunner(s, worker_id="w1")
+    runner.store = store
+
+    # First sync writes this box's presets.local.json from the shared value.
+    assert runner._sync_shared_preset() is True
+    local = tmp_path / "presets.local.json"
+    assert local.exists()
+    import json
+    assert json.loads(local.read_text())["PresetList"][0]["VideoQualitySlider"] == 20
+    # Idempotent — unchanged shared value doesn't rewrite/report a change.
+    assert runner._sync_shared_preset() is False

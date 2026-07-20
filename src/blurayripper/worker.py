@@ -14,6 +14,7 @@ import json
 import socket
 import uuid
 
+from . import handbrake_store
 from .config import Settings, load_settings
 from .persistence import (
     JobRecord,
@@ -237,16 +238,32 @@ class WorkerRunner:
                 return False
         return True
 
+    def _sync_shared_preset(self) -> bool:
+        """Pull the cluster-shared HandBrake preset and write it to this box's
+        presets.local.json, so every worker encodes with the SAME preset instead
+        of drifting to its own checkout's copy. Returns True if it changed."""
+        try:
+            content = self.store.get_shared_config(handbrake_store.SHARED_KEY)
+        except Exception:
+            return False
+        if not content:
+            return False
+        changed = handbrake_store.apply_shared_preset(self.settings.config_dir, content)
+        if changed:
+            print("Applied the cluster's shared HandBrake preset.", flush=True)
+        return changed
+
     def _apply_worker_settings(self) -> None:
-        """Pull this worker's central override from the store; if it changed,
-        reload settings and rebuild the pipeline so the NEXT job uses it (never
-        mid-encode). Safe on a DB blip — keeps the current settings."""
+        """Pull this worker's central override + the shared HandBrake preset from
+        the store; if either changed, reload settings and rebuild the pipeline so
+        the NEXT job uses it (never mid-encode). Safe on a DB blip — keeps current."""
+        preset_changed = self._sync_shared_preset()
         try:
             overlay = self.store.get_worker_settings(self.worker_id)
         except Exception:
             return
         sig = json.dumps(overlay, sort_keys=True)
-        if sig == getattr(self, "_wsettings_sig", None):
+        if sig == getattr(self, "_wsettings_sig", None) and not preset_changed:
             return
         self._wsettings_sig = sig
         self.settings = load_settings(self.settings.config_dir, extra_overlay=overlay or None)
