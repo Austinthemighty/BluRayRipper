@@ -1,31 +1,38 @@
 #!/usr/bin/env bash
 #
-# Install the external tools BluRayRipper needs on a Linux box, then run
-# `blurayripper check`. Aimed at a Linux WORKER (encode + subtitle OCR) — those
-# don't rip, so MakeMKV isn't installed by default (ripping stays on the box with
-# the optical drives). Pass --with-makemkv only for a Linux rip box.
+# Install the external tools BluRayRipper needs on a Linux box — a rip box, a
+# worker, or an all-in-one — then run `blurayripper check`. Works for a fully
+# Linux setup (nothing here needs Windows).
 #
 # Everything is installed onto PATH, and BluRayRipper auto-detects tools by name
-# (HandBrakeCLI, mkvmerge, mkvextract, ffmpeg, dovi_tool, seconv), so no tool
-# paths need to be written to config — a worker only needs its DB URL set
-# (BLURAYRIPPER_DATABASE_URL in config/secrets.env).
+# (makemkvcon, HandBrakeCLI, mkvmerge, mkvextract, ffmpeg, dovi_tool, seconv), so
+# no tool paths need to be written to config. For clustering, also set the DB URL
+# (BLURAYRIPPER_DATABASE_URL in config/secrets.env) on every box.
+#
+# MakeMKV is built from source (the only way it ships on Linux — no apt package).
+# Skip it with --no-makemkv on an encode-only worker that never rips.
 #
 # Debian/Ubuntu (apt). Other distros: install the equivalents by hand.
 #
 # Usage (from the repo root):
 #   ./scripts/setup-linux.sh [--langs pol,deu] [--seconv /path/to/seconv]
-#                            [--with-makemkv] [--tools-dir /opt/brr-tools]
+#                            [--no-makemkv] [--tools-dir /opt/brr-tools]
 set -euo pipefail
+
+# MakeMKV has no apt package; it's compiled from versioned tarballs. Bump this to
+# the current release (see makemkv.com/download or the forum) if a download 404s.
+MAKEMKV_VER="1.18.1"
 
 LANGS=""
 SECONV=""
-WITH_MAKEMKV=0
+WITH_MAKEMKV=1
 TOOLS_DIR="/opt/brr-tools"
 while [ $# -gt 0 ]; do
   case "$1" in
     --langs) LANGS="$2"; shift 2 ;;
     --seconv) SECONV="$2"; shift 2 ;;
-    --with-makemkv) WITH_MAKEMKV=1; shift ;;
+    --no-makemkv) WITH_MAKEMKV=0; shift ;;
+    --makemkv-version) MAKEMKV_VER="$2"; shift 2 ;;
     --tools-dir) TOOLS_DIR="$2"; shift 2 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
@@ -105,14 +112,41 @@ install_seconv() {
 }
 install_seconv
 
-# --- 4. MakeMKV (only for a Linux RIP box; workers don't need it) -------------
+# --- 4. MakeMKV (rip) — built from source; the only way it ships on Linux -----
+build_makemkv() {
+  # Build deps for the OSS component (libs + optional Qt GUI). makemkvcon itself
+  # comes precompiled in the -bin tarball.
+  $SUDO apt-get install -y build-essential pkg-config libc6-dev libssl-dev \
+    libexpat1-dev libavcodec-dev libgl1-mesa-dev qtbase5-dev zlib1g-dev || return 1
+  local d="$TOOLS_DIR/makemkv"
+  mkdir -p "$d"
+  ( set -e
+    cd "$d"
+    for part in oss bin; do
+      tgz="makemkv-$part-$MAKEMKV_VER.tar.gz"
+      [ -f "$tgz" ] || curl -fsSL "https://www.makemkv.com/download/$tgz" -o "$tgz"
+      tar -xzf "$tgz"
+    done
+    ( cd "makemkv-oss-$MAKEMKV_VER" && ./configure && make && $SUDO make install )
+    # The -bin component carries its own EULA; `make` accepts it (we feed "yes").
+    ( cd "makemkv-bin-$MAKEMKV_VER" && echo yes | make && $SUDO make install )
+  )
+}
+
 if [ "$WITH_MAKEMKV" -eq 1 ]; then
-  warn "MakeMKV on Linux has no apt package — it's compiled from the makemkv-oss +"
-  warn "makemkv-bin tarballs on the MakeMKV forum (needs build-essential, libssl-dev,"
-  warn "libexpat1-dev, qtbase5-dev, zlib1g-dev, and ffmpeg dev libs). Follow:"
-  warn "  https://forum.makemkv.com/forum/viewtopic.php?t=224  — then it's on PATH as makemkvcon."
+  if command -v makemkvcon >/dev/null 2>&1; then
+    ok "makemkvcon already on PATH: $(command -v makemkvcon)"
+  else
+    info "Building MakeMKV $MAKEMKV_VER from source (oss + bin) — accepts the MakeMKV EULA"
+    if build_makemkv && command -v makemkvcon >/dev/null 2>&1; then
+      ok "makemkvcon -> $(command -v makemkvcon)"
+    else
+      warn "MakeMKV build failed (bump --makemkv-version if the download 404'd, or check"
+      warn "build deps). Manual guide: https://forum.makemkv.com/forum/viewtopic.php?t=224"
+    fi
+  fi
 else
-  info "Skipping MakeMKV (workers don't rip). Use --with-makemkv for a Linux rip box."
+  info "Skipping MakeMKV (--no-makemkv) — encode-only worker."
 fi
 
 # --- verify -------------------------------------------------------------------
@@ -122,4 +156,5 @@ if command -v blurayripper >/dev/null 2>&1; then
 else
   warn "'blurayripper' not on PATH — run 'pip install -e .' in $REPO_ROOT, then 'blurayripper check'."
 fi
-info "For a worker, also set BLURAYRIPPER_DATABASE_URL in $REPO_ROOT/config/secrets.env."
+info "For a clustered setup, set BLURAYRIPPER_DATABASE_URL (same Postgres) in"
+info "$REPO_ROOT/config/secrets.env on every box. A single all-in-one box can skip it."
