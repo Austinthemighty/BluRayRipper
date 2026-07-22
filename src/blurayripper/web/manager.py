@@ -126,12 +126,14 @@ class _Reporter:
     def on_event(self, message: str) -> None:
         self._wj.log.append(stamp_log(message))
         del self._wj.log[:-200]  # cap log length
+        self._wj._activity_at = time.monotonic()  # feeds the rip-stall watchdog
         self._m.bus.publish()
 
     def on_progress(self, stage: str, fraction: float | None) -> None:
         self._wj.stage = stage
         if fraction is not None:
             self._wj.progress = fraction
+        self._wj._activity_at = time.monotonic()
         self._m.bus.publish()
 
     def checkpoint(self) -> None:
@@ -440,8 +442,17 @@ class JobManager:
     _ACTIVE_WORKER_STATES = (
         JobState.ENCODING, JobState.EXTRACTING_SUBS, JobState.OCR_SUBS, JobState.PLACING,
     )
+    # Local, disc-bound work (runs on THIS box). Unlike the worker states above, a
+    # hung one keeps a live task (it's awaiting a wedged makemkvcon), so .done()
+    # never catches it — a no-progress watchdog does.
+    _ACTIVE_RIP_STATES = (
+        JobState.SCANNING, JobState.SELECTING, JobState.RIPPING,
+        JobState.CONFIRMING, JobState.IDENTIFYING,
+    )
 
     def _is_stalled(self, wj: WebJob, live_state: JobState) -> bool:
+        if live_state in self._ACTIVE_RIP_STATES:
+            return self._rip_stalled(wj)
         if live_state not in self._ACTIVE_WORKER_STATES:
             return False
         task = getattr(wj, "_task", None)
@@ -452,6 +463,19 @@ class JobManager:
             if w.job_id == wj.id and w.seconds_since_seen <= stale:
                 return False  # a live remote worker is heartbeating it
         return True
+
+    def _rip_stalled(self, wj: WebJob) -> bool:
+        """A rip/scan that hasn't emitted progress or a log line for the configured
+        window — a wedged makemkvcon (bad sector / unresponsive drive) that will
+        never finish on its own. Requeue cancels it (killing the subprocess, freeing
+        the drive) and re-runs from the last checkpoint."""
+        window = self.settings.rip_stall_after_seconds
+        if window <= 0:
+            return False
+        last = getattr(wj, "_activity_at", None)
+        if last is None:
+            return False  # never started reporting yet — give it a baseline first
+        return (time.monotonic() - last) > window
 
     async def _refresh_from_store(self) -> None:
         while not self.closing:
@@ -710,6 +734,7 @@ class JobManager:
             raise ValueError(f"Job {job_id} isn't stalled — nothing to requeue.")
         if wj._pipeline_job is None:
             raise ValueError(f"Job {job_id} can't be requeued (no scan state).")
+        old_task = getattr(wj, "_task", None)  # a hung rip's live (wedged) task, if any
         wj.error = None
         wj.progress = 0.0
         wj.state = JobState.READY
@@ -721,7 +746,19 @@ class JobManager:
         wj.log.append(stamp_log("Requeued (was stalled) — resuming from checkpoints."))
         self._persist(wj)
         self.bus.publish()
-        wj._task = self._spawn(self._run_job(wj))
+        wj._task = self._spawn(self._requeue_run(wj, old_task))
+
+    async def _requeue_run(self, wj: WebJob, old_task) -> None:
+        """Cancel a wedged local rip task (which kills makemkvcon and frees the
+        drive) and wait for it to actually die before re-running — otherwise the
+        fresh rip races the old subprocess for the same drive."""
+        if old_task is not None and not old_task.done():
+            old_task.cancel()
+            try:
+                await old_task
+            except BaseException:
+                pass  # cancelled (or whatever it was stuck on) — drive is released now
+        await self._run_job(wj)
 
     def requeue_stalled(self) -> int:
         """Requeue every currently-stalled job. Returns how many were requeued."""
@@ -1185,6 +1222,7 @@ class JobManager:
 
     async def _run_job(self, wj: WebJob) -> None:
         reporter = _Reporter(self, wj)
+        wj._activity_at = time.monotonic()  # baseline for the rip-stall watchdog
         job = wj._pipeline_job
         job.selected_title_ids = wj.selected_title_ids
         job.assignments = wj.assignments

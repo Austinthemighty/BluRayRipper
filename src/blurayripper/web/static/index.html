@@ -689,6 +689,7 @@ function liveUpdate(card, j){
   card.querySelector('[data-bar]').style.width = Math.round(j.progress*100)+'%';
   card.querySelector('[data-stage]').textContent =
     j.error ? ('⚠ '+j.error)
+    : (j.stalled && j.lane==='rip') ? ('⚠ Rip stopped responding (last: '+(j.stage||'—')+') — the disc/drive may be stuck. Requeue to cancel and retry.')
     : j.stalled ? ('⚠ No worker is running this (last: '+(j.stage||'—')+') — waiting for a free worker to reclaim it.')
     : (j.stage||'');
   const logEl = card.querySelector('[data-log]');
@@ -716,7 +717,9 @@ function liveUpdate(card, j){
   if (j.stalled && !rq) {
     const b=document.createElement('button'); b.dataset.requeue='1'; b.textContent='Requeue';
     b.style.marginTop='8px';
-    b.title='This job stalled (its worker died or the server restarted mid-step). Reset it to the queue and re-run from its finished rip.';
+    b.title = j.lane==='rip'
+      ? 'The rip stopped responding (a bad disc or an unresponsive drive). Cancel the stuck makemkvcon and re-run from the last checkpoint.'
+      : 'This job stalled (its worker died or the server restarted mid-step). Reset it to the queue and re-run from its finished rip.';
     b.onclick=()=>api('POST','/api/jobs/'+j.id+'/requeue').catch(e=>alert(e.message));
     card.querySelector('[data-body]').appendChild(b);
   } else if (!j.stalled && rq) {
