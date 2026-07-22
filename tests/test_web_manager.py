@@ -579,6 +579,38 @@ def test_drives_overlay_active_rip_name(manager):
     assert drive.disc_name == "Dumbo"
 
 
+def test_lane_splits_rip_from_encode(manager):
+    """READY is overloaded: a job with a live local prep task is queued to RIP;
+    one without is ripped and queued to ENCODE. The lane drives the UI split."""
+
+    class _Task:  # _lane only inspects .done()
+        def __init__(self, done): self._d = done
+        def done(self): return self._d
+
+    # Ripping-side states -> rip lane.
+    for st in (JobState.QUEUED, JobState.SCANNING, JobState.RIPPING,
+               JobState.AWAITING_MAPPING, JobState.CONFIRMING):
+        assert manager._lane(WebJob(id=1, source="disc:0", state=st), st) == "rip"
+
+    # Encode-side states -> encode lane.
+    for st in (JobState.ENCODING, JobState.PLACING):
+        assert manager._lane(WebJob(id=2, source="disc:0", state=st), st) == "encode"
+
+    # READY with a live local task = still prepping (rip); without = awaiting worker.
+    ripping = WebJob(id=3, source="disc:0", state=JobState.READY)
+    ripping._task = _Task(done=False)
+    assert manager._lane(ripping, JobState.READY) == "rip"
+
+    idle = WebJob(id=4, source="disc:0", state=JobState.READY)
+    idle._task = _Task(done=True)  # prep finished; now waiting for a worker
+    assert manager._lane(idle, JobState.READY) == "encode"
+    assert manager._lane(WebJob(id=5, source="disc:0", state=JobState.READY),
+                         JobState.READY) == "encode"  # no task at all
+
+    # Resting jobs are laneless (shown in their own groups).
+    assert manager._lane(WebJob(id=6, source="disc:0", state=JobState.DONE), JobState.DONE) is None
+
+
 async def test_add_mkv_file_skips_rip(manager, monkeypatch, tmp_path):
     from blurayripper.tools.mkvtools import ProbedFile, SubtitleTrack
 

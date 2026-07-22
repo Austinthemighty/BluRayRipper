@@ -414,18 +414,24 @@ function editionValue(scope){
   return v || null;
 }
 
-const RIP_STATES = ['scanning','selecting','ripping'];  // actual disc read
-const IN_PROGRESS = ['confirming','encoding','extracting_subs','ocr_subs','identifying','placing'];
+const RIP_STATES = ['scanning','selecting','ripping'];  // actual disc read (stat chip)
 const AWAITING = ['awaiting_titles','awaiting_mapping','awaiting_grain','awaiting_match'];
-const GROUP_LABELS = ['Failed','Ripping disc','Needs your input','In progress','Queued','Completed'];
+// Two distinct queues: RIP (disc-side, on the rip box) above ENCODE (worker-side).
+// The `lane` a job carries ('rip' | 'encode') comes from the server, which alone
+// knows whether a READY job is pre-rip (queued to rip) or ripped (queued to encode).
+const RIP_ACTIVE = ['scanning','selecting','ripping','confirming','identifying','extracting_subs','ocr_subs'];
+const ENC_ACTIVE = ['encoding','placing','extracting_subs','ocr_subs'];
+const GROUP_LABELS = ['Failed','Needs your input','Ripping','Rip queue','Encoding','Encode queue','Completed'];
 function jobRank(j){
   const s = j.state;
   if (s==='failed') return 0;                // failures at the very top
-  if (s==='done') return 5;
-  if (AWAITING.includes(s)) return 2;        // needs you to confirm
-  if (RIP_STATES.includes(s)) return 1;      // actively ripping/scanning a disc
-  if (IN_PROGRESS.includes(s)) return 3;     // extracting subs / OCR / encoding
-  return 4;                                  // queued / ready
+  if (s==='done') return 6;                  // completed at the very bottom
+  if (AWAITING.includes(s)) return 1;        // rip-side: needs you to confirm
+  if (j.lane === 'encode')                   // ── encode queue (below the rip queue) ──
+    return ENC_ACTIVE.includes(s) ? 4 : 5;   // encoding now vs waiting for a worker
+  // ── rip queue ──
+  if (RIP_ACTIVE.includes(s)) return 2;      // actively scanning/ripping a disc
+  return 3;                                  // queued / ready-to-rip
 }
 
 const SUB_STATES = ['extracting_subs','ocr_subs','identifying'];
@@ -615,6 +621,10 @@ function renderJobs(snap) {
   if (sig === renderJobs._sig) return;
   renderJobs._sig = sig;
   for (const h of [...host.querySelectorAll('[data-hdr]')]) h.remove();
+  // Tint each group header by which queue it belongs to, so the rip section
+  // (ranks 1-3) and encode section (ranks 4-5) read as two distinct blocks.
+  const RANK_TINT = {0:'#f85149', 1:'#58a6ff', 2:'#58a6ff', 3:'#58a6ff',
+                     4:'#bc8cff', 5:'#bc8cff', 6:'#8b949e'};
   let lastRank = -1;
   for (const j of jobs) {
     const r = jobRank(j);
@@ -622,7 +632,8 @@ function renderJobs(snap) {
       const hdr = document.createElement('div');
       hdr.dataset.hdr = '';
       hdr.textContent = GROUP_LABELS[r];
-      hdr.style.cssText = 'font:600 12px system-ui;color:#8b949e;text-transform:uppercase;letter-spacing:.05em;margin:16px 2px 6px;border-bottom:1px solid #30363d;padding-bottom:3px;';
+      const tint = RANK_TINT[r] || '#8b949e';
+      hdr.style.cssText = `font:600 12px system-ui;color:${tint};text-transform:uppercase;letter-spacing:.05em;margin:16px 2px 6px;border-bottom:1px solid ${tint}55;padding-bottom:3px;`;
       host.appendChild(hdr);
       lastRank = r;
     }
