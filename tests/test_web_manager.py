@@ -968,3 +968,30 @@ async def test_requeue_stalled_bulk_counts(manager):
     assert all(manager.jobs[j].state is JobState.READY for j in (60, 61, 62))
     assert manager.jobs[63].state is JobState.ENCODING   # untouched
     await _settle()
+
+
+def test_auto_open_not_blocked_by_old_queued_job_same_selector(manager, monkeypatch):
+    """A queued job from a PREVIOUS disc in the same drive (source disc:0) must not
+    block auto-scanning a new disc — the selector is reused across discs."""
+    from blurayripper.models import DiscInfo
+    from blurayripper.tools.makemkv import Drive
+
+    # An old, still-queued job that was ripped from drive 0 (source disc:0).
+    old = WebJob(id=1, source="disc:0", state=JobState.READY)
+    old.disc = DiscInfo(source="disc:0", disc_name="Jaws")
+    old._pipeline_job = Job(source="disc:0")
+    old._pipeline_job.state = JobState.READY
+    manager.jobs[1] = old
+
+    opened = []
+    monkeypatch.setattr(manager, "add_disc", lambda src: opened.append(src))
+
+    # A DIFFERENT disc is now in drive 0 -> must be auto-scanned despite job #1.
+    manager._auto_open([Drive(index=0, name="ASUS", device="F:", disc_name="Everest")])
+    assert opened == ["disc:0"]
+
+    # But a disc matching an active job (same name) is NOT re-scanned.
+    manager._last_disc.clear()
+    opened.clear()
+    manager._auto_open([Drive(index=0, name="ASUS", device="F:", disc_name="Jaws")])
+    assert opened == []
