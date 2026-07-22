@@ -14,7 +14,7 @@ import itertools
 import json
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ..config import Settings
@@ -357,8 +357,48 @@ class JobManager:
         return await self.pipeline.makemkv.list_drives()
 
     def drives(self) -> list[Drive]:
-        """Cached drives (populated by the watcher); fast, no per-request scan."""
-        return self._drives_cache
+        """Cached drives (populated by the watcher); fast, no per-request scan.
+
+        While a rip is in flight makemkvcon can't re-probe the busy drive, so the
+        cached enumeration keeps showing the PREVIOUS disc's name. The job actively
+        ripping ``disc:N`` is authoritative about what's physically loaded there, so
+        overlay its disc name onto that drive.
+        """
+        active = self._active_drive_discs()
+        if not active:
+            return self._drives_cache
+        out = []
+        for d in self._drives_cache:
+            name = active.get(d.index)
+            out.append(replace(d, disc_name=name) if name else d)
+        return out
+
+    # States in which a job still physically holds its source drive (disc not yet
+    # released to encode/eject) — makemkvcon is using or has just used the drive.
+    _DRIVE_HELD_STATES = (
+        JobState.SCANNING, JobState.AWAITING_TITLES, JobState.AWAITING_MAPPING,
+        JobState.AWAITING_GRAIN, JobState.AWAITING_MATCH, JobState.IDENTIFYING,
+        JobState.READY, JobState.RIPPING, JobState.CONFIRMING,
+    )
+
+    def _active_drive_discs(self) -> dict[int, str]:
+        """Map ``drive index -> disc name`` for jobs currently holding an optical
+        drive, so the panel reflects the disc being worked on, not a stale probe."""
+        out: dict[int, str] = {}
+        for wj in self.jobs.values():
+            if wj.state not in self._DRIVE_HELD_STATES:
+                continue
+            src = wj.source or ""
+            if not src.startswith("disc:"):
+                continue
+            try:
+                idx = int(src.split(":", 1)[1])
+            except (ValueError, IndexError):
+                continue
+            name = (wj.disc.disc_name if wj.disc else None) or ""
+            if name.strip():
+                out[idx] = name.strip()
+        return out
 
     def _load_drives_cache(self) -> list[Drive]:
         try:
@@ -753,8 +793,6 @@ class JobManager:
         naming assignment; if the video is already placed, renames the placed files
         (video + sidecars + artwork) to the corrected name/folder and refreshes the
         TMDB artwork. Movies only."""
-        from dataclasses import replace
-
         wj = self.jobs.get(job_id)
         if wj is None:
             raise ValueError(f"No job {job_id}.")

@@ -555,6 +555,30 @@ def test_auto_open_reinsert_same_disc_after_eject(manager, monkeypatch):
     assert opened == ["disc:0", "disc:0"]
 
 
+def test_drives_overlay_active_rip_name(manager):
+    """While a rip holds a drive makemkvcon can't re-probe it, so the cached
+    enumeration shows the previous disc. The active job is authoritative."""
+    from blurayripper.tools.makemkv import Drive
+
+    # Cache still shows the disc that was ripped before (stale).
+    manager._drives_cache = [Drive(index=1, name="ASUS", device="E:", disc_name="Dumbo")]
+
+    # A job is actively ripping a different disc in that same drive now.
+    wj = WebJob(id=99, source="disc:1", state=JobState.RIPPING)
+    wj.disc = _fake_disc()
+    wj.disc.disc_name = "Disneynature Everest"
+    manager.jobs[99] = wj
+
+    (drive,) = manager.drives()
+    assert drive.disc_name == "Disneynature Everest"   # live job wins over stale cache
+    assert drive.index == 1 and drive.device == "E:"    # other fields preserved
+
+    # Once the rip finishes (disc released), the cached enumeration stands again.
+    wj.state = JobState.ENCODING
+    (drive,) = manager.drives()
+    assert drive.disc_name == "Dumbo"
+
+
 async def test_add_mkv_file_skips_rip(manager, monkeypatch, tmp_path):
     from blurayripper.tools.mkvtools import ProbedFile, SubtitleTrack
 

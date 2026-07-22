@@ -722,9 +722,20 @@ function buildTitles(card, j){
   body.innerHTML = `<div class="muted" style="font-size:12px;">Detected: ${j.kind_guess||'?'} — suggested titles pre-checked</div>
     <table><tr><th></th><th>ID</th><th>Dur</th><th>Ch</th><th>Size</th><th>Audio</th><th>Subs</th></tr>${rows}</table>
     <div class="row"><button data-go>Confirm titles</button></div>`;
-  body.querySelector('[data-go]').onclick = async () => {
+  const goBtn = body.querySelector('[data-go]');
+  goBtn.onclick = async () => {
     const ids = [...body.querySelectorAll('input[data-t]:checked')].map(c=>+c.dataset.t);
-    try { await api('POST',`/api/jobs/${j.id}/titles`,{title_ids: ids}); } catch(e){ alert(e.message);} };
+    if (!ids.length) { alert('Select at least one title.'); return; }
+    goBtn.disabled = true; goBtn.textContent = 'Confirming…';
+    try {
+      await api('POST',`/api/jobs/${j.id}/titles`,{title_ids: ids});
+      // The server has committed the transition; reflect it now instead of waiting
+      // for the next SSE frame (which can lag when the list is large / rips are busy).
+      j.selected = ids; j.state = 'awaiting_mapping';
+      renderedState[j.id] = null;                 // force a rebuild -> mapping form
+      if (renderJobs._lastSnap) renderJobs(renderJobs._lastSnap);
+    } catch(e){ goBtn.disabled = false; goBtn.textContent = 'Confirm titles'; alert(e.message); }
+  };
 }
 
 function buildMapping(card, j){
