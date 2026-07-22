@@ -280,6 +280,11 @@ class Settings:
     # Anything ambiguous (e.g. "Dumbo" -> 1941 + 2019) or multi-title still parks.
     auto_rip: bool = False
     drive_poll_seconds: int = 15    # how often the drive watcher checks
+    # Flag a rip/scan as stalled when it hasn't emitted any progress or log line for
+    # this many seconds — makemkvcon can hang indefinitely on a bad sector or an
+    # unresponsive drive, and the task never finishes on its own. Healthy rips report
+    # progress every second or so, so this only trips on a genuine hang. 0 = off.
+    rip_stall_after_seconds: int = 900
     # Copy the disc's own cover art (BDMV/META or DVD JACKET_P) to the output
     # folder as poster.jpg for Plex. Read before ripping (disc still in the drive).
     extract_cover_art: bool = True
@@ -512,6 +517,7 @@ def load_settings(config_dir: Path | None = None, extra_overlay: dict | None = N
         auto_open=bool(disc_cfg.get("auto_open", True)),
         auto_rip=bool(disc_cfg.get("auto_rip", False)),
         drive_poll_seconds=int(disc_cfg.get("poll_seconds", 15)),
+        rip_stall_after_seconds=int(disc_cfg.get("rip_stall_after_seconds", 900)),
         extract_cover_art=bool(disc_cfg.get("extract_cover_art", True)),
         rip_duration_tolerance_pct=int(disc_cfg.get("rip_duration_tolerance_pct", 3)),
         cleanup_stale_tools=bool(serve_cfg.get("cleanup_stale_tools", True)),

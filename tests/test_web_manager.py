@@ -611,6 +611,36 @@ def test_lane_splits_rip_from_encode(manager):
     assert manager._lane(WebJob(id=6, source="disc:0", state=JobState.DONE), JobState.DONE) is None
 
 
+def test_rip_stall_watchdog(manager):
+    """A rip that stops emitting progress/log lines for the window is a wedged
+    makemkvcon and gets flagged stalled — even though its task is still 'running'."""
+    import time as _time
+
+    from blurayripper.pipeline import Job
+
+    wj = WebJob(id=42, source="disc:0", state=JobState.RIPPING)
+    wj._pipeline_job = Job(source="disc:0")
+    wj._pipeline_job.state = JobState.RIPPING
+
+    # No activity baseline recorded yet -> don't flag (rip hasn't reported at all).
+    assert manager._is_stalled(wj, JobState.RIPPING) is False
+
+    # Recent activity -> healthy.
+    wj._activity_at = _time.monotonic()
+    assert manager._is_stalled(wj, JobState.RIPPING) is False
+
+    # Silent past the window -> stalled.
+    wj._activity_at = _time.monotonic() - (manager.settings.rip_stall_after_seconds + 5)
+    assert manager._is_stalled(wj, JobState.RIPPING) is True
+
+    # A queued/ready job is never a rip stall regardless of activity age.
+    assert manager._is_stalled(wj, JobState.READY) is False
+
+    # Watchdog disabled -> never flags.
+    manager.settings.rip_stall_after_seconds = 0
+    assert manager._is_stalled(wj, JobState.RIPPING) is False
+
+
 async def test_add_mkv_file_skips_rip(manager, monkeypatch, tmp_path):
     from blurayripper.tools.mkvtools import ProbedFile, SubtitleTrack
 
