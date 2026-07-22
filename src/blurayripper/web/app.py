@@ -298,6 +298,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _gate(lambda: manager.edit_job(job_id, body.grain_mode, body.tune_grain, body.edition))
         return {"ok": True}
 
+    @app.post("/api/jobs/{job_id}/rename")
+    async def rename_job(job_id: int, body: dict = Body(...)):
+        year = body.get("year")
+        _gate(lambda: manager.rename_job(job_id, body.get("title", ""),
+                                         int(year) if year not in (None, "") else None))
+        return {"ok": True}
+
     @app.post("/api/jobs/{job_id}/change-source")
     async def change_source(job_id: int, body: ChangeSource):
         try:

@@ -107,6 +107,7 @@ SCHEMA: list[tuple[str, list[Field]]] = [
     ("Disc", [
         Field("disc", "auto_eject", "bool", "Auto-eject after rip", True, "Eject the disc automatically once its last title finishes ripping, so you know it's safe to swap."),
         Field("disc", "auto_open", "bool", "Auto-scan on insert", True, "Start scanning a disc automatically when it's inserted into a drive."),
+        Field("disc", "auto_rip", "bool", "Auto-rip clear discs", False, "Fully hands-off: after an auto-scan, if the disc is a single-movie disc with exactly one exact-name TMDB match, confirm + rip it automatically. Anything ambiguous (e.g. two 'Dumbo' movies) or multi-title still stops for you. Needs Auto-scan on insert + a TMDB key."),
         Field("disc", "poll_seconds", "int", "Drive poll (s)", 15, "How often to re-check the optical drives for inserted/removed discs."),
         Field("disc", "extract_cover_art", "bool", "Extract disc cover art", True, "Pull the disc's own cover art while it's in the drive (the real TMDB poster overrides it later if available)."),
         Field("disc", "rip_duration_tolerance_pct", "int", "Rip duration tolerance (%)", 3,

@@ -232,6 +232,26 @@
   </div>
 </div>
 
+<div id="rename-modal" class="modal" onclick="if(event.target===this)closeRename();">
+  <div class="sheet" style="max-width:520px;">
+    <div class="shead"><h2>Rename movie</h2>
+      <div class="muted" style="font-size:12px;">Search TMDB and pick the right title — the placed files (video, subtitles, artwork) are renamed to match.</div>
+    </div>
+    <div style="padding:10px 0;">
+      <div class="row">
+        <input id="rename-q" placeholder="Movie title" style="flex:1;"
+               onkeydown="if(event.key==='Enter')renameSearch();" />
+        <button class="sec" onclick="renameSearch()">Search</button>
+      </div>
+      <div id="rename-results" style="margin-top:8px;"></div>
+    </div>
+    <div class="sfoot">
+      <button class="sec" onclick="closeRename()">Cancel</button>
+      <span id="rename-msg" class="muted"></span>
+    </div>
+  </div>
+</div>
+
 <div id="handbrake-modal" class="modal" onclick="if(event.target===this)closeHandbrake();">
   <div class="sheet">
     <div class="shead">
@@ -926,7 +946,9 @@ function lightbox(items, start){
 function buildResting(card, j){
   // done/failed jobs: offer a subtitle re-OCR (staged rip or cached subs).
   const body = card.querySelector('[data-body]');
-  let html = `<div class="row"><button class="sec" data-redosubs title="Re-OCR subtitles from this job's staged rip or cached subs (no re-encode).">Redo subtitles</button><span data-msg class="muted"></span></div>`;
+  let html = `<div class="row"><button class="sec" data-redosubs title="Re-OCR subtitles from this job's staged rip or cached subs (no re-encode).">Redo subtitles</button>`;
+  if (j.kind_guess === 'movie') html += `<button class="sec" data-rename title="Fix the movie name/year — e.g. if auto-rip matched the wrong one. Renames the placed files.">✎ Rename</button>`;
+  html += `<span data-msg class="muted"></span></div>`;
   // Failed disc job: let the user move the disc to another drive and rip from it
   // (a different drive can often read a sector the original couldn't).
   const isDisc = (j.source||'').startsWith('disc:');
@@ -945,6 +967,8 @@ function buildResting(card, j){
     try { await api('POST','/api/jobs/'+j.id+'/redo-subs'); }
     catch(e){ msg.textContent = '⚠ '+e.message; }
   };
+  const rn = body.querySelector('[data-rename]');
+  if (rn) rn.onclick = () => openRename(j);
   const sel = body.querySelector('[data-drivesel]');
   if (sel) {
     fetch('/api/drives').then(r=>r.json()).then(drives=>{
@@ -1133,6 +1157,47 @@ document.getElementById('refreshart').onclick = async (e) => {
 // ---- Settings modal ----
 const esc = (s) => String(s == null ? '' : s).replace(/"/g,'&quot;').replace(/</g,'&lt;');
 let settingsScope = 'global';
+
+// ---- Rename movie (fix an auto-rip that matched the wrong title) ----
+let renameJobId = null;
+function openRename(j){
+  renameJobId = j.id;
+  document.getElementById('rename-modal').classList.add('open');
+  document.getElementById('rename-msg').textContent = '';
+  document.getElementById('rename-results').innerHTML = '';
+  const q = document.getElementById('rename-q');
+  q.value = j.disc_name || '';
+  renameSearch();          // auto-search the current name
+  q.focus();
+}
+function closeRename(){ document.getElementById('rename-modal').classList.remove('open'); renameJobId = null; }
+async function renameSearch(){
+  const q = document.getElementById('rename-q').value.trim();
+  const out = document.getElementById('rename-results');
+  if(!q){ out.innerHTML=''; return; }
+  out.innerHTML = '<span class="muted">Searching TMDB…</span>';
+  try {
+    const res = await api('GET',`/api/tmdb/search?kind=movie&query=${encodeURIComponent(q)}`);
+    if(!res || !res.length){ out.innerHTML = '<span class="muted">No matches — edit the title and search again.</span>'; return; }
+    out.innerHTML = '';
+    res.slice(0,12).forEach(c => {
+      const b = document.createElement('button');
+      b.className = 'sec'; b.style.cssText = 'display:block;width:100%;text-align:left;margin:4px 0;';
+      b.textContent = `${c.title} (${c.year||'?'})`;
+      b.onclick = () => doRename(c.title, c.year);
+      out.appendChild(b);
+    });
+  } catch(e){ out.innerHTML = '<span class="muted">'+esc(e.message)+'</span>'; }
+}
+async function doRename(title, year){
+  const msg = document.getElementById('rename-msg');
+  msg.style.color = '#8b949e'; msg.textContent = `Renaming to ${title} (${year||'?'})…`;
+  try {
+    await api('POST',`/api/jobs/${renameJobId}/rename`, {title, year});
+    toast(`Renamed to ${title} (${year||'?'}).`);
+    closeRename();
+  } catch(e){ msg.style.color = '#f85149'; msg.textContent = 'Error: ' + e.message; }
+}
 
 // ---- HandBrake preset editor ----
 async function openHandbrake(){
