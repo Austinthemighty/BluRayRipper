@@ -1442,6 +1442,26 @@ class JobManager:
             return getattr(wj._pipeline_job, "state", wj.state)
         return wj.state
 
+    def _lane(self, wj: WebJob, live_state: JobState) -> str | None:
+        """Which queue a job belongs to, so the UI can split rip-side from
+        encode-side work: 'rip' = disc-bound work on the rip/serve box, 'encode' =
+        worker/encode-side. None for resting jobs (done/failed), shown separately."""
+        s = live_state
+        if s in (JobState.DONE, JobState.FAILED):
+            return None
+        if s in (JobState.ENCODING, JobState.PLACING):
+            return "encode"
+        if s in (JobState.EXTRACTING_SUBS, JobState.OCR_SUBS):
+            # Serve-side subtitle prep is part of ripping; worker-side subs is encode.
+            return "encode" if self.settings.cluster.worker_does_subs else "rip"
+        if s is JobState.READY:
+            # READY is overloaded: pre-prep (a live local rip task is queued or
+            # running here) vs post-prep (ripped, waiting for an encode worker).
+            task = getattr(wj, "_task", None)
+            return "rip" if (task is not None and not task.done()) else "encode"
+        # queued / scanning / selecting / ripping / confirming / identifying / awaiting_*
+        return "rip"
+
     def _job_dict(self, wj: WebJob) -> dict:
         live_state = self._live_state(wj)
         return {
@@ -1453,6 +1473,7 @@ class JobManager:
             # True when the state says "encoding/OCR/placing" but nothing is actually
             # working it (worker died/restarted). Lets the UI flag a frozen job.
             "stalled": self._is_stalled(wj, live_state),
+            "lane": self._lane(wj, live_state),  # 'rip' | 'encode' | None (resting)
             "priority": wj.priority,  # higher = bumped ahead in the encode queue
             "error": wj.error,
             "disc_name": wj.disc.disc_name if wj.disc else None,
