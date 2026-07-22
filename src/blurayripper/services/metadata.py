@@ -7,6 +7,8 @@ must be entered fully by hand.
 
 from __future__ import annotations
 
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +18,38 @@ _BASE = "https://api.themoviedb.org/3"
 # TMDB image CDN + the sizes we pull (portrait poster, landscape backdrop).
 _POSTER_URL = "https://image.tmdb.org/t/p/w780"
 _BACKDROP_URL = "https://image.tmdb.org/t/p/w1280"
+
+
+def _replace_bytes(dest: Path, data: bytes) -> None:
+    """Write ``data`` to ``dest`` via a sibling temp file + atomic replace, so Plex
+    never picks up a half-written image and a crash never truncates the old one.
+
+    Overwriting existing art on a Windows / SMB share (Z:) can fail with
+    PermissionError even though the folder is writable: the existing poster.jpg /
+    fanart.jpg often carries the read-only attribute (set by a prior tool, or by
+    Plex). Clear it and retry once before giving up."""
+    tmp = dest.with_name(dest.name + ".tmp")
+    try:
+        tmp.write_bytes(data)
+    except PermissionError:
+        # A stale read-only temp from an interrupted run — clear and retry.
+        if tmp.exists():
+            os.chmod(tmp, stat.S_IWRITE)
+            tmp.unlink()
+        tmp.write_bytes(data)
+    try:
+        os.replace(tmp, dest)
+    except PermissionError:
+        if dest.exists():
+            os.chmod(dest, stat.S_IWRITE)   # drop the read-only attribute, then retry
+        try:
+            os.replace(tmp, dest)
+        except OSError:
+            tmp.unlink(missing_ok=True)     # leave the good old file in place
+            raise
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _img(base: str, path: str | None) -> str | None:
@@ -142,9 +176,9 @@ class TMDBClient:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             resp = await client.get(url)
             resp.raise_for_status()
-            dest = Path(dest)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(resp.content)
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _replace_bytes(dest, resp.content)
         return True
 
     async def get_season(self, tv_id: int, season_number: int) -> list[Episode]:
