@@ -995,3 +995,85 @@ def test_auto_open_not_blocked_by_old_queued_job_same_selector(manager, monkeypa
     opened.clear()
     manager._auto_open([Drive(index=0, name="ASUS", device="F:", disc_name="Jaws")])
     assert opened == []
+
+
+async def test_auto_rip_confirms_single_exact_match(manager, monkeypatch):
+    from blurayripper.services import metadata
+    from blurayripper.web.manager import _Reporter
+    manager.settings.auto_rip = True
+    monkeypatch.setattr(manager.settings, "tmdb_api_key", "key")
+
+    async def one(self, query, year=None):
+        return [metadata.MovieCandidate(tmdb_id=1, title="Everest", year=2015, overview="")]
+    monkeypatch.setattr(metadata.TMDBClient, "search_movie", one)
+
+    wj = WebJob(id=1, source="disc:0")
+    job = Job(source="disc:0"); job.state = JobState.SCANNING
+    job.disc = DiscInfo(source="disc:0", disc_name="Everest", titles=[Title(title_id=0)])
+    wj._pipeline_job = job
+    manager.jobs[1] = wj
+
+    ok = await manager._try_auto_rip(wj, job, 0, _Reporter(manager, wj))
+    assert ok is True
+    assert wj.state is JobState.READY
+    a = wj.assignments[0]
+    assert a.kind is MediaKind.MOVIE and a.show_or_movie_title == "Everest" and a.year == 2015
+    await _settle()
+
+
+async def test_auto_rip_parks_on_ambiguous_name(manager, monkeypatch):
+    from blurayripper.services import metadata
+    from blurayripper.web.manager import _Reporter
+    manager.settings.auto_rip = True
+    monkeypatch.setattr(manager.settings, "tmdb_api_key", "key")
+
+    async def two(self, query, year=None):
+        return [metadata.MovieCandidate(1, "Dumbo", 1941, ""),
+                metadata.MovieCandidate(2, "Dumbo", 2019, "")]
+    monkeypatch.setattr(metadata.TMDBClient, "search_movie", two)
+
+    wj = WebJob(id=2, source="disc:1")
+    job = Job(source="disc:1"); job.state = JobState.SCANNING
+    job.disc = DiscInfo(source="disc:1", disc_name="Dumbo", titles=[Title(title_id=0)])
+    wj._pipeline_job = job
+    manager.jobs[2] = wj
+
+    ok = await manager._try_auto_rip(wj, job, 0, _Reporter(manager, wj))
+    assert ok is False               # ambiguous -> don't auto-pick
+    assert wj.assignments == {}      # left for the user to confirm
+
+
+async def test_auto_rip_off_by_default(manager):
+    from blurayripper.web.manager import _Reporter
+    wj = WebJob(id=3, source="disc:0")
+    job = Job(source="disc:0")
+    job.disc = DiscInfo(source="disc:0", disc_name="Everest", titles=[Title(title_id=0)])
+    wj._pipeline_job = job
+    manager.jobs[3] = wj
+    assert manager.settings.auto_rip is False
+    assert await manager._try_auto_rip(wj, job, 0, _Reporter(manager, wj)) is False
+
+
+async def test_rename_job_moves_placed_files(manager, monkeypatch, tmp_path):
+    async def _noop_art(job_id): return 0
+    monkeypatch.setattr(manager, "refresh_artwork", _noop_art)
+    wj = WebJob(id=1, source="disc:0", state=JobState.DONE)
+    wj.assignments = {0: EpisodeAssignment(0, MediaKind.MOVIE, "Dumbo", 1941)}
+    manager.jobs[1] = wj
+    old = manager.pipeline._video_path_for(wj.assignments[0])
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_text("v")
+    (old.parent / (old.stem + ".en.srt")).write_text("s")
+    (old.parent / "poster.jpg").write_text("p")
+    wj.outputs = [str(old)]
+
+    manager.rename_job(1, "Dumbo", 2019)
+
+    new = manager.pipeline._video_path_for(wj.assignments[0])
+    assert new != old and new.exists()
+    assert (new.parent / (new.stem + ".en.srt")).exists()
+    assert (new.parent / "poster.jpg").exists()
+    assert not old.exists() and not old.parent.exists()   # old folder removed
+    assert wj.outputs == [str(new)]
+    assert wj.assignments[0].year == 2019
+    await _settle()

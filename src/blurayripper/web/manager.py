@@ -506,6 +506,49 @@ class JobManager:
             if idx not in present or idx in empty:
                 self._last_disc.pop(idx, None)
 
+    async def _try_auto_rip(self, wj: WebJob, job, title_id: int, reporter) -> bool:
+        """Strict hands-off rip: proceed only for a single-movie disc whose cleaned
+        name has EXACTLY ONE exact-title TMDB match (so an ambiguous name like
+        'Dumbo' -> 1941 + 2019 never auto-picks the wrong one). Returns True if it
+        confirmed + started ripping; False to leave the job at the naming gate."""
+        if not (self.settings.auto_rip and self.settings.tmdb_api_key and job.disc):
+            return False
+        from ..services import naming
+        from ..services.metadata import TMDBClient
+        name = (job.disc.disc_name or "").strip()
+        if not name:
+            return False
+        cleaned, year, _season = naming.clean_tmdb_query(name, "movie")
+        try:
+            cands = await TMDBClient(
+                self.settings.tmdb_api_key, self.settings.metadata_language
+            ).search_movie(cleaned, year=year)
+        except Exception as exc:
+            reporter.on_event(f"Auto-rip: TMDB lookup failed ({type(exc).__name__}); "
+                              "leaving for manual naming.")
+            return False
+        norm = lambda s: (s or "").strip().casefold()
+        exact = [c for c in cands if norm(c.title) == norm(cleaned)]
+        if len(exact) != 1:
+            reporter.on_event(
+                f"Auto-rip: {len(exact)} exact matches for '{cleaned}'"
+                f"{f' ({year})' if year else ''} — ambiguous, leaving for you to confirm.")
+            return False
+        c = exact[0]
+        wj.assignments = {title_id: EpisodeAssignment(
+            title_id=title_id, kind=MediaKind.MOVIE, show_or_movie_title=c.title, year=c.year)}
+        wj.selected_title_ids = [title_id]
+        wj.state = JobState.READY
+        job.state = JobState.READY
+        reporter.on_event(f"Auto-rip: matched “{c.title} ({c.year})” — ripping automatically. "
+                          "(Use Rename if it's wrong.)")
+        self._persist(wj)
+        self.bus.publish()
+        self._notify(f"⏩ Auto-ripping: {c.title} ({c.year})",
+                     f"Job #{wj.id} matched automatically and started ripping.")
+        wj._task = self._spawn(self._run_job(wj))
+        return True
+
     def _disc_has_active_job(self, disc_name: str) -> bool:
         """Whether THIS disc is already being handled — matched by disc name, not
         the drive selector. `disc:N` is reused across discs, so a queued job from a
@@ -704,6 +747,38 @@ class JobManager:
         self._persist(wj)
         self.bus.publish()
         wj._task = self._spawn(self._run_job(wj))
+
+    def rename_job(self, job_id: int, title: str, year: int | None) -> None:
+        """Fix a movie's identity — including one auto-rip got wrong. Updates the
+        naming assignment; if the video is already placed, renames the placed files
+        (video + sidecars + artwork) to the corrected name/folder and refreshes the
+        TMDB artwork. Movies only."""
+        from dataclasses import replace
+
+        wj = self.jobs.get(job_id)
+        if wj is None:
+            raise ValueError(f"No job {job_id}.")
+        a = next(iter(wj.assignments.values()), None)
+        if a is None or a.kind is not MediaKind.MOVIE:
+            raise ValueError("Rename is supported for movies only.")
+        title = (title or "").strip()
+        if not title:
+            raise ValueError("A title is required.")
+        old_video = self.pipeline._video_path_for(a)
+        new_a = replace(a, show_or_movie_title=title, year=year)
+        wj.assignments = {a.title_id: new_a}
+        new_video = self.pipeline._video_path_for(new_a)
+        if old_video != new_video and old_video.exists():
+            try:
+                library.rename_movie(old_video, new_video)
+            except OSError as exc:
+                raise ValueError(f"Couldn't rename the placed files: {exc}")
+            wj.outputs = [str(new_video) if o == str(old_video) else o for o in wj.outputs]
+        wj.log.append(stamp_log(f"Renamed to “{title}{f' ({year})' if year else ''}”."))
+        self._persist(wj)
+        self.bus.publish()
+        # Refresh the poster/backdrop for the corrected identity (best-effort).
+        self._spawn(self.refresh_artwork(job_id))
 
     def retry(self, job_id: int) -> None:
         """Re-queue a failed job. It resumes from its checkpoints — a finished
@@ -1000,7 +1075,12 @@ class JobManager:
                 # episodes) still stop so you can pick which titles to rip.
                 suggested = self._suggested_titles(job.disc)
                 if len(suggested) == 1:
-                    wj.selected_title_ids = [next(iter(suggested))]
+                    tid = next(iter(suggested))
+                    wj.selected_title_ids = [tid]
+                    # Fully hands-off: a single-movie disc with one exact-name TMDB
+                    # match rips automatically. Ambiguous/no match -> park for naming.
+                    if await self._try_auto_rip(wj, job, tid, reporter):
+                        return  # auto-rip took over (set READY + spawned the run)
                     wj.state = JobState.AWAITING_MAPPING
                     reporter.on_event("Single title — auto-selected; confirm the name.")
                 else:
