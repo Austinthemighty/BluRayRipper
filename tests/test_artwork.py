@@ -122,3 +122,31 @@ async def test_place_tmdb_art_drops_stale_wrong_ext(tmp_path, monkeypatch):
     assert n == 1
     assert (folder / "poster.jpg").read_bytes() == b"RIGHT"
     assert not (folder / "poster.png").exists()   # stale wrong-ext art removed
+
+
+def test_replace_bytes_overwrites_readonly_file(tmp_path):
+    """Overwriting existing art on an SMB/Windows share can hit PermissionError
+    when the target carries the read-only attribute — _replace_bytes clears it."""
+    import os
+    import stat
+
+    from blurayripper.services.metadata import _replace_bytes
+
+    dest = tmp_path / "fanart.jpg"
+    dest.write_bytes(b"old")
+    os.chmod(dest, stat.S_IREAD)   # read-only, like art a prior tool/Plex left
+
+    _replace_bytes(dest, b"new-image-bytes")
+
+    assert dest.read_bytes() == b"new-image-bytes"
+    assert not (tmp_path / "fanart.jpg.tmp").exists()   # temp cleaned up
+    os.chmod(dest, stat.S_IWRITE)   # let tmp_path cleanup remove it
+
+
+def test_replace_bytes_writes_new_file_atomically(tmp_path):
+    from blurayripper.services.metadata import _replace_bytes
+
+    dest = tmp_path / "poster.jpg"
+    _replace_bytes(dest, b"poster")
+    assert dest.read_bytes() == b"poster"
+    assert not (tmp_path / "poster.jpg.tmp").exists()
