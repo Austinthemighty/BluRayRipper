@@ -495,7 +495,7 @@ class JobManager:
             if not name:
                 continue  # no disc / not yet readable
             source = f"disc:{d.index}"
-            if self._last_disc.get(d.index) == name or self._has_active_job(source):
+            if self._last_disc.get(d.index) == name or self._disc_has_active_job(name):
                 self._last_disc[d.index] = name  # already handled / in progress
                 continue
             self._last_disc[d.index] = name
@@ -506,9 +506,13 @@ class JobManager:
             if idx not in present or idx in empty:
                 self._last_disc.pop(idx, None)
 
-    def _has_active_job(self, source: str) -> bool:
+    def _disc_has_active_job(self, disc_name: str) -> bool:
+        """Whether THIS disc is already being handled — matched by disc name, not
+        the drive selector. `disc:N` is reused across discs, so a queued job from a
+        previous disc in the same drive must NOT block auto-scanning a new one."""
         return any(
-            wj.source == source and self._live_state(wj) not in (JobState.DONE, JobState.FAILED)
+            wj.disc is not None and (wj.disc.disc_name or "").strip() == disc_name
+            and self._live_state(wj) not in (JobState.DONE, JobState.FAILED)
             for wj in self.jobs.values()
         )
 
