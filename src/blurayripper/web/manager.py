@@ -37,11 +37,22 @@ from ..services.notify import notify
 from ..services.opensubtitles import OpenSubtitlesClient, gather_references
 from ..services.sub_match import identify
 from ..tools import discinfo
-from ..tools.makemkv import Drive
+from ..tools.makemkv import Drive, os_media_snapshot
 from ..version import get_version
 
 
 _STATUS_CONTROL_C_EXIT = 3221225786  # 0xC000013A — Windows process terminated
+
+
+def _drive_index(source: str | None) -> int | None:
+    """The makemkvcon drive index from a 'disc:N' selector, else None."""
+    src = source or ""
+    if not src.startswith("disc:"):
+        return None
+    try:
+        return int(src.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return None
 
 
 def _looks_interrupted(exc: Exception) -> bool:
@@ -144,6 +155,11 @@ class _Reporter:
         """Pipeline asked to push a user notification (e.g. disc finished ripping)."""
         self._m._notify(title, message)
 
+    def ejected(self, device: str | None) -> None:
+        """Pipeline auto-ejected the disc — forget the drive's cached disc name so
+        the panel doesn't keep showing it and the next disc reads as new."""
+        self._m.note_disc_ejected(device=device, index=_drive_index(self._wj.source))
+
     async def resolve_grain(self, job, preview) -> bool:
         """Park the job at the grain gate with preview assets; wait for the pick."""
         wj = self._wj
@@ -201,6 +217,9 @@ class JobManager:
         self._drives_cache: list[Drive] = self._load_drives_cache()
         self._last_disc: dict[int, str] = {}  # drive index -> last auto-opened disc name
         self._last_drive_error: str | None = None
+        # Cheap OS view of which drives hold media, so a tray closing on a new disc
+        # triggers a scan immediately instead of waiting out the full poll interval.
+        self._media_snapshot: dict[str, str] | None = None
         self._workers_cache: list = []  # WorkerInfo, refreshed by the store poll
         self._done_notified: set[int] = set()  # jobs we've pushed a "done" notify for
 
@@ -390,12 +409,13 @@ class JobManager:
         for wj in self.jobs.values():
             if wj.state not in self._DRIVE_HELD_STATES:
                 continue
-            src = wj.source or ""
-            if not src.startswith("disc:"):
+            # READY spans both "queued to rip" (disc still loaded) and "ripped,
+            # waiting for a worker" (already auto-ejected). Only the rip lane still
+            # owns the disc — otherwise an ejected disc stays pinned to the panel.
+            if self._lane(wj, wj.state) != "rip":
                 continue
-            try:
-                idx = int(src.split(":", 1)[1])
-            except (ValueError, IndexError):
+            idx = _drive_index(wj.source)
+            if idx is None:
                 continue
             name = (wj.disc.disc_name if wj.disc else None) or ""
             if name.strip():
@@ -536,6 +556,7 @@ class JobManager:
     async def _watch_drives(self) -> None:
         while not self.closing:
             try:
+                self._media_snapshot = await asyncio.to_thread(os_media_snapshot)
                 self._drives_cache = await self.list_drives()
                 self._last_drive_error = None
                 self._save_drives_cache()  # survive restarts; keep the panel warm
@@ -547,7 +568,55 @@ class JobManager:
                 if msg != self._last_drive_error:
                     print(f"[drives] scan failed: {msg}")
                     self._last_drive_error = msg
-            await asyncio.sleep(self.settings.drive_poll_seconds)
+            await self._wait_for_disc_change(self.settings.drive_poll_seconds)
+
+    # How often the cheap OS media probe runs while waiting out the poll interval.
+    _MEDIA_PROBE_SECONDS = 2
+
+    async def _wait_for_disc_change(self, timeout: float) -> None:
+        """Sleep up to ``timeout`` seconds, returning early the moment the OS says a
+        disc appeared or disappeared — i.e. the tray closed on a new disc.
+
+        Without this, inserting a disc isn't noticed until the next full poll. The
+        probe is OS-level so it still answers while makemkvcon is busy ripping; on
+        platforms where it can't tell (returns None) this is just a plain sleep."""
+        deadline = time.monotonic() + timeout
+        while not self.closing:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(self._MEDIA_PROBE_SECONDS, remaining))
+            try:
+                snap = await asyncio.to_thread(os_media_snapshot)
+            except Exception:
+                continue  # probe failed — fall back to waiting out the interval
+            if snap is None:
+                continue  # can't tell on this platform; keep the regular cadence
+            if snap != self._media_snapshot:
+                self._media_snapshot = snap
+                return  # media changed — re-enumerate now instead of waiting
+
+    def note_disc_ejected(self, device: str | None = None, index: int | None = None) -> None:
+        """Forget a drive's cached disc after ejecting it.
+
+        The cached name (and the auto-open dedupe entry) otherwise keep describing
+        the disc that just came out, so the panel shows a stale title and
+        re-inserting the SAME disc looks unchanged and never re-triggers a scan."""
+        dev = (device or "").strip().rstrip("\\/").upper() or None
+        for d in self._drives_cache:
+            if (index is not None and d.index == index) or (
+                dev is not None and (d.device or "").strip().rstrip("\\/").upper() == dev
+            ):
+                d.disc_name = None
+                self._last_disc.pop(d.index, None)
+        if index is not None:
+            self._last_disc.pop(index, None)
+        # Drop it from the media snapshot too, so re-inserting reads as a change.
+        if self._media_snapshot is not None and dev:
+            self._media_snapshot.pop(dev, None)
+            self._media_snapshot.pop(dev.rstrip(":"), None)
+        self._save_drives_cache()
+        self.bus.publish()
 
     def _auto_open(self, drives: list[Drive]) -> None:
         present = set()

@@ -201,6 +201,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await asyncio.to_thread(eject, body.device)  # off-thread: ctypes/MCI can block
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Eject failed: {exc}")
+        # Forget the disc that just came out, so the panel doesn't keep showing it
+        # and re-inserting it counts as a new disc worth scanning.
+        manager.note_disc_ejected(device=body.device)
         return {"ok": True}
 
     @app.post("/api/drives/close")

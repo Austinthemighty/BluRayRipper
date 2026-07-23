@@ -717,6 +717,7 @@ class Pipeline:
                 try:
                     eject(device)
                     ejected = True
+                    _emit_ejected(report, device)  # drop the drive's cached disc name
                     report.on_event(
                         f"Ejected disc ({device or 'default drive'}) — safe to load the next one."
                     )
@@ -1300,6 +1301,15 @@ def _checkpoint(report) -> None:
     fn = getattr(report, "checkpoint", None)
     if fn is not None:
         fn()
+
+
+def _emit_ejected(report, device: str | None) -> None:
+    """Tell the reporter a disc was ejected, if it cares. The web _Reporter forwards
+    it so the manager drops the drive's cached disc name; CLI/worker reporters don't
+    implement it."""
+    fn = getattr(report, "ejected", None)
+    if fn is not None:
+        fn(device)
 
 
 def _emit_notify(report, title: str, message: str) -> None:

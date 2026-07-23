@@ -555,6 +555,69 @@ def test_auto_open_reinsert_same_disc_after_eject(manager, monkeypatch):
     assert opened == ["disc:0", "disc:0"]
 
 
+def test_eject_clears_cached_disc_and_rearms_auto_open(manager, monkeypatch):
+    """Ejecting must forget the disc, or the panel keeps showing it and putting the
+    SAME disc back in looks unchanged to auto-open, so it never re-scans."""
+    from blurayripper.tools.makemkv import Drive
+
+    opened = []
+    monkeypatch.setattr(manager, "add_disc", lambda src: opened.append(src))
+
+    # Each poll re-enumerates, so the watcher hands _auto_open fresh Drive objects.
+    def loaded():
+        return Drive(index=0, name="ASUS", device="F:", disc_name="WarGames")
+
+    manager._drives_cache = [loaded()]
+    manager._media_snapshot = {"F:": "WarGames"}
+
+    manager._auto_open([loaded()])
+    assert opened == ["disc:0"]
+
+    # Same disc still reported -> no duplicate scan.
+    manager._auto_open([loaded()])
+    assert opened == ["disc:0"]
+
+    manager.note_disc_ejected(device="F:")
+    assert manager._drives_cache[0].disc_name is None    # panel no longer shows it
+    assert manager._media_snapshot == {}                  # re-insert reads as a change
+
+    # Re-inserting the very same disc now re-triggers a scan.
+    manager._auto_open([loaded()])
+    assert opened == ["disc:0", "disc:0"]
+
+
+def test_eject_by_index_clears_auto_open_memory(manager):
+    from blurayripper.tools.makemkv import Drive
+
+    manager._drives_cache = [Drive(index=1, name="ASUS", device="E:", disc_name="Dumbo")]
+    manager._last_disc = {1: "Dumbo"}
+    manager.note_disc_ejected(index=1)
+    assert manager._drives_cache[0].disc_name is None
+    assert 1 not in manager._last_disc
+
+
+async def test_wait_for_disc_change_returns_early_on_new_media(manager, monkeypatch):
+    """Closing the tray on a new disc should cut the poll wait short."""
+    import blurayripper.web.manager as mgr
+
+    manager._media_snapshot = {}
+    monkeypatch.setattr(manager, "_MEDIA_PROBE_SECONDS", 0.01)
+    monkeypatch.setattr(mgr, "os_media_snapshot", lambda: {"F:": "Yogi Bear"})
+
+    await asyncio.wait_for(manager._wait_for_disc_change(30), timeout=2)
+    assert manager._media_snapshot == {"F:": "Yogi Bear"}
+
+
+async def test_wait_for_disc_change_sleeps_when_os_cannot_tell(manager, monkeypatch):
+    """Where the OS probe is unavailable (returns None) it must not spin or bail —
+    it just waits out the interval so the regular poll cadence is preserved."""
+    import blurayripper.web.manager as mgr
+
+    monkeypatch.setattr(manager, "_MEDIA_PROBE_SECONDS", 0.01)
+    monkeypatch.setattr(mgr, "os_media_snapshot", lambda: None)
+    await asyncio.wait_for(manager._wait_for_disc_change(0.05), timeout=2)
+
+
 def test_drives_overlay_active_rip_name(manager):
     """While a rip holds a drive makemkvcon can't re-probe it, so the cached
     enumeration shows the previous disc. The active job is authoritative."""
@@ -575,6 +638,12 @@ def test_drives_overlay_active_rip_name(manager):
 
     # Once the rip finishes (disc released), the cached enumeration stands again.
     wj.state = JobState.ENCODING
+    (drive,) = manager.drives()
+    assert drive.disc_name == "Dumbo"
+
+    # A ripped job parked at READY for a worker has ALREADY been auto-ejected, so it
+    # must not keep pinning its disc name to the drive (encode lane, not rip lane).
+    wj.state = JobState.READY
     (drive,) = manager.drives()
     assert drive.disc_name == "Dumbo"
 
