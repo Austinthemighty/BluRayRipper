@@ -105,6 +105,19 @@ def os_optical_drives() -> list[tuple[str, str | None]]:
         return []
 
 
+def os_media_snapshot() -> dict[str, str] | None:
+    """``{drive_letter: volume_label}`` for optical drives that currently hold
+    readable media, or None where the OS can't be probed cheaply (non-Windows).
+
+    Cheap enough to poll every couple of seconds, and — unlike makemkvcon — it
+    keeps answering while a rip has a drive busy. Used to spot a tray closing on a
+    new disc right away instead of waiting for the next full enumeration. A None
+    return means "can't tell", so callers must keep doing their regular poll."""
+    if not sys.platform.startswith("win"):
+        return None
+    return dict(os_optical_drives())
+
+
 def parse_drives(lines: list[str]) -> list[Drive]:
     """Parse DRV lines from `makemkvcon -r info disc:<big>` into present drives."""
     drives: list[Drive] = []
