@@ -682,6 +682,34 @@ function removeJob(j){
   api('DELETE','/api/jobs/'+j.id).catch(e=>alert(e.message));
 }
 
+// The snapshot only carries the last ~20 log lines (to keep the SSE frame small).
+// This adds a toggle that pulls the full retained log from the server on demand.
+function wireFullLog(card, j){
+  const logEl = card.querySelector('[data-log]');
+  if (!logEl || card.querySelector('[data-fulllog]')) return;
+  const b = document.createElement('button');
+  b.dataset.fulllog = '1'; b.className = 'sec';
+  b.style.cssText = 'margin-top:6px;padding:2px 9px;font-size:12px;';
+  b.textContent = 'Full log';
+  b.onclick = async () => {
+    if (logEl._full) {                         // collapse back to the live tail
+      logEl._full = false; b.textContent = 'Full log';
+      logEl.textContent = (renderJobs._lastSnap?.jobs?.find(x=>x.id===j.id)?.log||j.log||[]).join('\n');
+      logEl.scrollTop = logEl.scrollHeight; return;
+    }
+    b.disabled = true; b.textContent = 'Loading…';
+    try {
+      const r = await api('GET','/api/jobs/'+j.id+'/log');
+      logEl._full = true;                      // stop live updates from clobbering it
+      logEl.textContent = (r.log||[]).join('\n');
+      logEl.scrollTop = logEl.scrollHeight;
+      b.textContent = 'Show less';
+    } catch(e){ alert(e.message); b.textContent = 'Full log'; }
+    finally { b.disabled = false; }
+  };
+  logEl.after(b);
+}
+
 function liveUpdate(card, j){
   // The identifying name fills in once a job is mapped (and changes on rename),
   // which is often AFTER the card was built — keep it current.
@@ -699,12 +727,15 @@ function liveUpdate(card, j){
     : (j.stage||'');
   const logEl = card.querySelector('[data-log]');
   const logText = (j.log||[]).join('\n');
-  if (logEl.textContent !== logText) {           // don't reset scroll when unchanged
+  // While the full log is expanded, don't overwrite it with the short tail the
+  // snapshot carries — the "Full log" toggle owns the content until collapsed.
+  if (!logEl._full && logEl.textContent !== logText) {   // don't reset scroll when unchanged
     const atBottom = logEl.scrollHeight - logEl.clientHeight - logEl.scrollTop < 4;
     const prevTop = logEl.scrollTop;
     logEl.textContent = logText;
     logEl.scrollTop = atBottom ? logEl.scrollHeight : prevTop;  // pin to newest, else keep place
   }
+  wireFullLog(card, j);
   if (j.state==='done' && j.outputs && j.outputs.length && !card.querySelector('[data-out]')) {
     const o=document.createElement('div'); o.className='muted'; o.dataset.out='1';
     o.style.fontSize='12px'; o.textContent = j.outputs.join('\n');

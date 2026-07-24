@@ -95,3 +95,26 @@ def test_clear_worker_override_removes_the_row(tmp_path):
     from blurayripper.persistence import MemoryStore
     app.state.manager.store = MemoryStore()
     assert c.post("/api/settings/clear", json={"scope": "w1"}).status_code == 400
+
+
+def test_job_log_endpoint_returns_full_retained_log(tmp_path):
+    """The snapshot only carries the log tail; /log returns the whole retained log
+    so a failure (e.g. a box-set disc that errored) can be read in full."""
+    from blurayripper.web.app import create_app
+    from blurayripper.config import load_settings
+    from blurayripper.web.manager import WebJob
+    from blurayripper.pipeline import JobState
+    from fastapi.testclient import TestClient
+
+    (tmp_path / "settings.toml").write_text("", encoding="utf-8")
+    app = create_app(load_settings(tmp_path))
+    mgr = app.state.manager
+    wj = WebJob(id=7, source="disc:0", state=JobState.FAILED)
+    wj.log = [f"line {i}" for i in range(120)]   # more than the snapshot tail
+    mgr.jobs[7] = wj
+    c = TestClient(app)
+
+    r = c.get("/api/jobs/7/log")
+    assert r.status_code == 200
+    assert r.json()["log"] == wj.log            # full 120 lines, not just the tail
+    assert c.get("/api/jobs/999/log").status_code == 404

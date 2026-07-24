@@ -264,7 +264,7 @@ class JobManager:
             priority=wj.priority,
             stage=wj.stage,
             progress=round(wj.progress, 4),
-            log=wj.log[-30:],
+            log=wj.log[-200:],  # keep the whole retained log so it survives a restart
             auto_identify=wj.auto_identify,
             show_tmdb_id=wj.show_tmdb_id,
             season=wj.season,
