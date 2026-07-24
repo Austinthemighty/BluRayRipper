@@ -1518,7 +1518,43 @@ class JobManager:
             f"{name} finished encoding — {n} file{'' if n == 1 else 's'} placed in your library.")
 
     def _name_of(self, wj: WebJob) -> str:
-        return (wj.disc.disc_name if wj.disc else None) or wj.source
+        return self._display_name(wj)
+
+    def _display_name(self, wj: WebJob) -> str:
+        """A name that identifies the physical DISC, not just its label.
+
+        Every disc in a box set reports the same volume label (each House DVD is
+        just "HOUSE"), so a failed job is impossible to place on the shelf from the
+        label alone. The confirmed mapping does identify it: show + season + episode
+        range for TV, title + year for a movie. Falls back to the label when a job
+        failed before it was ever mapped."""
+        assigns = [a for a in wj.assignments.values() if a is not None]
+        fallback = (wj.disc.disc_name if wj.disc else None) or wj.source
+        if not assigns:
+            # Never mapped (e.g. it failed mid-identify) — auto-identify may still
+            # have worked out the show/season, which is enough to find the disc.
+            show = (wj.show_title or "").strip()
+            if show:
+                return f"{show} S{wj.season:02d}" if wj.season is not None else show
+            return fallback
+        first = assigns[0]
+        title = (first.show_or_movie_title or "").strip()
+        if not title:
+            return fallback
+        if first.kind is not MediaKind.TV:
+            return f"{title} ({first.year})" if first.year else title
+        seasons = sorted({a.season for a in assigns if a.season is not None})
+        episodes = sorted({a.episode for a in assigns if a.episode is not None})
+        parts = []
+        if len(seasons) == 1:
+            parts.append(f"S{seasons[0]:02d}")
+        elif seasons:
+            parts.append(f"S{seasons[0]:02d}–S{seasons[-1]:02d}")
+        if len(episodes) == 1:
+            parts.append(f"E{episodes[0]:02d}")
+        elif episodes:
+            parts.append(f"E{episodes[0]:02d}–E{episodes[-1]:02d}")
+        return f"{title} {''.join(parts)}" if parts else title
 
     def artwork_path(self, job_id: int):
         """Path to a job's extracted cover art (poster preferred, else fanart),
@@ -1584,6 +1620,8 @@ class JobManager:
             "priority": wj.priority,  # higher = bumped ahead in the encode queue
             "error": wj.error,
             "disc_name": wj.disc.disc_name if wj.disc else None,
+            # Identifies WHICH disc this is (box-set labels are all identical).
+            "display_name": self._display_name(wj),
             "kind_guess": (discinfo.guess_kind(wj.disc).value if wj.disc else None),
             "titles": self._title_dict(wj) if wj.disc else [],
             "selected": wj.selected_title_ids,

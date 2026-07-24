@@ -648,6 +648,41 @@ def test_drives_overlay_active_rip_name(manager):
     assert drive.disc_name == "Dumbo"
 
 
+def test_display_name_identifies_which_boxset_disc(manager):
+    """Every disc in a box set reports the same label ("HOUSE"), so a failed job
+    can't be found on the shelf. The mapping says which season/episodes it is."""
+    def job_with(*assigns, disc_name="HOUSE"):
+        wj = WebJob(id=1, source="disc:1", state=JobState.FAILED)
+        wj.disc = _fake_disc()
+        wj.disc.disc_name = disc_name
+        wj.assignments = {a.title_id: a for a in assigns}
+        return wj
+
+    def ep(tid, season, episode):
+        return EpisodeAssignment(title_id=tid, kind=MediaKind.TV,
+                                 show_or_movie_title="House", season=season, episode=episode)
+
+    # A whole disc of one season -> season + episode range.
+    wj = job_with(ep(1, 1, 3), ep(2, 1, 4), ep(3, 1, 5), ep(4, 1, 6))
+    assert manager._display_name(wj) == "House S01E03–E06"
+
+    # A single episode.
+    assert manager._display_name(job_with(ep(1, 2, 7))) == "House S02E07"
+
+    # Movies keep title + year.
+    movie = EpisodeAssignment(title_id=0, kind=MediaKind.MOVIE,
+                              show_or_movie_title="Yogi Bear", year=2010)
+    assert manager._display_name(job_with(movie)) == "Yogi Bear (2010)"
+
+    # Unmapped but auto-identified -> show + season is still enough to find it.
+    wj = job_with(disc_name="HOUSE")
+    wj.show_title, wj.season = "House", 4
+    assert manager._display_name(wj) == "House S04"
+
+    # Nothing known -> fall back to the disc label.
+    assert manager._display_name(job_with()) == "HOUSE"
+
+
 def test_lane_splits_rip_from_encode(manager):
     """READY is overloaded: a job with a live local prep task is queued to RIP;
     one without is ripped and queued to ENCODE. The lane drives the UI split."""
