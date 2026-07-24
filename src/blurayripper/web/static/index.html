@@ -663,7 +663,7 @@ function cardHtml(j){
   return `<div class="top">
       <div style="display:flex;gap:8px;align-items:center;min-width:0;">
         <img class="thumb" loading="lazy" src="/api/jobs/${j.id}/artwork?t=${j.state}&v=${ARTV}" onerror="this.remove()" alt="">
-        <div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><b>${j.disc_name || j.source}</b> <span class="muted">#${j.id}</span></div>
+        <div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><b data-name>${j.display_name || j.disc_name || j.source}</b> <span class="muted">#${j.id}</span></div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-shrink:0;">
         <span class="badge ${badgeClass(j.state)}" data-badge>${j.state.replace(/_/g,' ')}</span>
@@ -683,6 +683,11 @@ function removeJob(j){
 }
 
 function liveUpdate(card, j){
+  // The identifying name fills in once a job is mapped (and changes on rename),
+  // which is often AFTER the card was built — keep it current.
+  const nameEl = card.querySelector('[data-name]');
+  const nm = j.display_name || j.disc_name || j.source;
+  if (nameEl && nameEl.textContent !== nm) nameEl.textContent = nm;
   const badge = card.querySelector('[data-badge]');
   badge.textContent = j.stalled ? 'stalled' : j.state.replace(/_/g,' ');
   badge.className = 'badge ' + (j.stalled ? 'failed' : badgeClass(j.state));
