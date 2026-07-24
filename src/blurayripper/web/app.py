@@ -218,6 +218,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def jobs():
         return manager.snapshot()
 
+    @app.get("/api/jobs/{job_id}/log")
+    async def job_log(job_id: int):
+        # The snapshot only carries the last few log lines (per-job, to keep the
+        # SSE frame small); this returns the full retained log for diagnosis.
+        wj = manager.jobs.get(job_id)
+        if wj is None:
+            raise HTTPException(status_code=404, detail="Job not found.")
+        return {"id": job_id, "log": list(wj.log)}
+
     @app.post("/api/jobs")
     async def add_job(body: AddDisc):
         try:
