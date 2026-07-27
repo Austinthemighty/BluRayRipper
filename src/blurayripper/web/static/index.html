@@ -234,12 +234,12 @@
 
 <div id="rename-modal" class="modal" onclick="if(event.target===this)closeRename();">
   <div class="sheet" style="max-width:520px;">
-    <div class="shead"><h2>Rename movie</h2>
-      <div class="muted" style="font-size:12px;">Search TMDB and pick the right title — the placed files (video, subtitles, artwork) are renamed to match.</div>
+    <div class="shead"><h2 id="rename-head">Rename movie</h2>
+      <div class="muted" style="font-size:12px;">Search TMDB and pick the right title — the placed files (video, subtitles, artwork) are renamed to match. For a show, episode numbers are kept.</div>
     </div>
     <div style="padding:10px 0;">
       <div class="row">
-        <input id="rename-q" placeholder="Movie title" style="flex:1;"
+        <input id="rename-q" placeholder="Title" style="flex:1;"
                onkeydown="if(event.key==='Enter')renameSearch();" />
         <button class="sec" onclick="renameSearch()">Search</button>
       </div>
@@ -938,9 +938,11 @@ function buildEdit(card, j){
       <button class="sec" data-apply>Apply</button>
       <button class="sec" data-preview>Preview grain</button>
       <button class="sec" data-redosubs title="Re-OCR subtitles from this job's staged/cached subs (no re-rip, no re-encode).">Redo subtitles</button>
-      <button class="sec" data-bump title="Move this job to the front of the encode queue — it becomes the next one encoded. Won't interrupt a job that's already encoding.">⬆ Encode next</button><span data-msg class="muted"></span></div>
+      <button class="sec" data-bump title="Move this job to the front of the encode queue — it becomes the next one encoded. Won't interrupt a job that's already encoding.">⬆ Encode next</button>
+      <button class="sec" data-rename title="Fix the title/year before it encodes — e.g. a remake mapped to the original (or vice versa). Episode numbers are kept.">✎ Rename</button><span data-msg class="muted"></span></div>
     <div data-pv></div>`;
   wireEdition(body);
+  body.querySelector('[data-rename]').onclick = () => openRename(j);
   body.querySelector('[data-bump]').onclick = async () => {
     const msg = body.querySelector('[data-msg]');
     msg.textContent = 'Moving to front…';
@@ -1008,7 +1010,7 @@ function buildResting(card, j){
   // done/failed jobs: offer a subtitle re-OCR (staged rip or cached subs).
   const body = card.querySelector('[data-body]');
   let html = `<div class="row"><button class="sec" data-redosubs title="Re-OCR subtitles from this job's staged rip or cached subs (no re-encode).">Redo subtitles</button>`;
-  if (j.kind_guess === 'movie') html += `<button class="sec" data-rename title="Fix the movie name/year — e.g. if auto-rip matched the wrong one. Renames the placed files.">✎ Rename</button>`;
+  html += `<button class="sec" data-rename title="Fix the title/year — e.g. a remake mapped to the original (or vice versa). Episode numbers are kept; placed files are renamed.">✎ Rename</button>`;
   html += `<span data-msg class="muted"></span></div>`;
   // Failed disc job: let the user move the disc to another drive and rip from it
   // (a different drive can often read a sector the original couldn't).
@@ -1221,13 +1223,20 @@ let settingsScope = 'global';
 
 // ---- Rename movie (fix an auto-rip that matched the wrong title) ----
 let renameJobId = null;
+let renameKind = 'movie';   // which TMDB catalogue to search (movie vs tv)
 function openRename(j){
   renameJobId = j.id;
+  // Search the right TMDB catalogue — a show must not be looked up as a movie.
+  renameKind = (j.kind_guess === 'tv') ? 'tv' : 'movie';
   document.getElementById('rename-modal').classList.add('open');
   document.getElementById('rename-msg').textContent = '';
   document.getElementById('rename-results').innerHTML = '';
+  document.getElementById('rename-head').textContent =
+    renameKind === 'tv' ? 'Rename show' : 'Rename movie';
   const q = document.getElementById('rename-q');
-  q.value = j.disc_name || '';
+  // Prefer the name we already resolved (minus the SxxExx part) over the raw disc
+  // label, which is usually authoring noise like "HAWAII_FIVE_O_S1_D3".
+  q.value = (j.display_name || j.disc_name || '').replace(/\s+S\d{2}(E\d{2}(–E\d{2})?)?$/, '').trim();
   renameSearch();          // auto-search the current name
   q.focus();
 }
@@ -1238,7 +1247,7 @@ async function renameSearch(){
   if(!q){ out.innerHTML=''; return; }
   out.innerHTML = '<span class="muted">Searching TMDB…</span>';
   try {
-    const res = await api('GET',`/api/tmdb/search?kind=movie&query=${encodeURIComponent(q)}`);
+    const res = await api('GET',`/api/tmdb/search?kind=${renameKind}&query=${encodeURIComponent(q)}`);
     if(!res || !res.length){ out.innerHTML = '<span class="muted">No matches — edit the title and search again.</span>'; return; }
     out.innerHTML = '';
     res.slice(0,12).forEach(c => {

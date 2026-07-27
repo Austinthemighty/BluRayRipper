@@ -1267,3 +1267,65 @@ async def test_rename_job_moves_placed_files(manager, monkeypatch, tmp_path):
     assert wj.outputs == [str(new)]
     assert wj.assignments[0].year == 2019
     await _settle()
+
+
+async def test_rename_job_fixes_a_show_keeping_episode_numbers(manager, monkeypatch, tmp_path):
+    """A show mapped to the wrong series (the 1968 'Hawaii Five-O' vs the 2010
+    reboot) must be fixable: every episode gets the corrected show/year while
+    keeping its season/episode numbers."""
+    async def _noop_art(job_id): return 0
+    monkeypatch.setattr(manager, "refresh_artwork", _noop_art)
+
+    wj = WebJob(id=5, source="disc:1", state=JobState.READY)
+    wj.assignments = {
+        t: EpisodeAssignment(t, MediaKind.TV, "Hawaii Five-0", year=2010,
+                             season=1, episode=8 + t)
+        for t in range(3)
+    }
+    wj.show_title, wj.show_year, wj.show_tmdb_id = "Hawaii Five-0", 2010, 46952
+    manager.jobs[5] = wj
+
+    manager.rename_job(5, "Hawaii Five-O", 1968)
+
+    for t in range(3):
+        a = wj.assignments[t]
+        assert a.show_or_movie_title == "Hawaii Five-O"
+        assert a.year == 1968
+        assert (a.season, a.episode) == (1, 8 + t)   # episode numbering preserved
+        assert a.kind is MediaKind.TV
+    # The stale TMDB id belongs to the WRONG show — dropped, so a later
+    # auto-identify can't fetch reference subtitles for it again.
+    assert (wj.show_title, wj.show_year, wj.show_tmdb_id) == ("Hawaii Five-O", 1968, None)
+    await _settle()
+
+
+async def test_rename_job_moves_placed_episode_files(manager, monkeypatch, tmp_path):
+    """Renaming a show that's already placed moves each episode + its sidecars."""
+    async def _noop_art(job_id): return 0
+    monkeypatch.setattr(manager, "refresh_artwork", _noop_art)
+
+    wj = WebJob(id=6, source="disc:1", state=JobState.DONE)
+    wj.assignments = {
+        0: EpisodeAssignment(0, MediaKind.TV, "Hawaii Five-0", year=2010, season=1, episode=8),
+        1: EpisodeAssignment(1, MediaKind.TV, "Hawaii Five-0", year=2010, season=1, episode=9),
+    }
+    manager.jobs[6] = wj
+    olds = []
+    for a in wj.assignments.values():
+        p = manager.pipeline._video_path_for(a)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("v")
+        (p.parent / (p.stem + ".en.srt")).write_text("s")
+        olds.append(p)
+    wj.outputs = [str(p) for p in olds]
+
+    manager.rename_job(6, "Hawaii Five-O", 1968)
+
+    for a, old in zip(wj.assignments.values(), olds):
+        new = manager.pipeline._video_path_for(a)
+        assert new != old and new.exists()
+        assert (new.parent / (new.stem + ".en.srt")).exists()
+        assert not old.exists()
+    assert wj.outputs == [str(manager.pipeline._video_path_for(a))
+                          for a in wj.assignments.values()]
+    await _settle()

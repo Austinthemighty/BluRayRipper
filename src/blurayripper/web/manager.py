@@ -895,29 +895,46 @@ class JobManager:
         wj._task = self._spawn(self._run_job(wj))
 
     def rename_job(self, job_id: int, title: str, year: int | None) -> None:
-        """Fix a movie's identity — including one auto-rip got wrong. Updates the
-        naming assignment; if the video is already placed, renames the placed files
-        (video + sidecars + artwork) to the corrected name/folder and refreshes the
-        TMDB artwork. Movies only."""
+        """Fix a job's identity — a movie OR a show whose title/year is wrong (e.g.
+        the 1968 "Hawaii Five-O" mapped to the 2010 reboot). Updates every naming
+        assignment, keeping each episode's season/episode numbers; if a video is
+        already placed, renames the placed files (video + sidecars + artwork) to the
+        corrected name/folder and refreshes the TMDB artwork."""
         wj = self.jobs.get(job_id)
         if wj is None:
             raise ValueError(f"No job {job_id}.")
-        a = next(iter(wj.assignments.values()), None)
-        if a is None or a.kind is not MediaKind.MOVIE:
-            raise ValueError("Rename is supported for movies only.")
+        assigns = {tid: a for tid, a in wj.assignments.items() if a is not None}
+        if not assigns:
+            raise ValueError("Job has no naming assignment to rename.")
         title = (title or "").strip()
         if not title:
             raise ValueError("A title is required.")
-        old_video = self.pipeline._video_path_for(a)
-        new_a = replace(a, show_or_movie_title=title, year=year)
-        wj.assignments = {a.title_id: new_a}
-        new_video = self.pipeline._video_path_for(new_a)
-        if old_video != new_video and old_video.exists():
+        renamed: dict[int, EpisodeAssignment] = {}
+        moves: list[tuple[Path, Path]] = []
+        for tid, a in assigns.items():
+            new_a = replace(a, show_or_movie_title=title, year=year)
+            renamed[tid] = new_a
+            # A TV assignment missing season/episode can't resolve a path; it just
+            # gets the corrected name (nothing is placed for it yet).
+            try:
+                old_video = self.pipeline._video_path_for(a)
+                new_video = self.pipeline._video_path_for(new_a)
+            except ValueError:
+                continue
+            if old_video != new_video and old_video.exists():
+                moves.append((old_video, new_video))
+        wj.assignments = renamed
+        for old_video, new_video in moves:
             try:
                 library.rename_movie(old_video, new_video)
             except OSError as exc:
                 raise ValueError(f"Couldn't rename the placed files: {exc}")
             wj.outputs = [str(new_video) if o == str(old_video) else o for o in wj.outputs]
+        # Keep the show identity in sync so a later auto-identify uses the RIGHT
+        # show. The old TMDB id belongs to the wrong show — drop it rather than
+        # fetch reference subtitles for it again.
+        if any(a.kind is MediaKind.TV for a in renamed.values()):
+            wj.show_title, wj.show_year, wj.show_tmdb_id = title, year, None
         wj.log.append(stamp_log(f"Renamed to “{title}{f' ({year})' if year else ''}”."))
         self._persist(wj)
         self.bus.publish()
