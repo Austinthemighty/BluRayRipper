@@ -249,10 +249,19 @@ class Pipeline:
         if include_subs:
             await self._subtitles_for_titles(job, todo, report)
 
-        # 3) Resolve grain per title (interactive; stays on the rip box).
-        for title_id, assignment, ripped, sub_dir in todo:
-            tune_grain = await self._resolve_grain(job, ripped, title_id, staging_root, report)
-            job.checkpoints[title_id]["tune_grain"] = tune_grain
+        # 3) Resolve grain — ONCE per disc, not per title. Preview mode renders a
+        #    sample and parks the UI for a pick; a disc's titles share the same
+        #    source/encode, so asking per episode just re-opens the grain gate over
+        #    and over (which reads as an endless "pick grain" loop). Decide once for
+        #    the first undecided title and apply it to every title that doesn't
+        #    already have a saved choice — so a resume never re-prompts either.
+        undecided = [t for t in todo
+                     if "tune_grain" not in job.checkpoints.setdefault(t[0], {})]
+        if undecided:
+            first_id, _a, first_ripped, _sd = undecided[0]
+            decision = await self._resolve_grain(job, first_ripped, first_id, staging_root, report)
+            for title_id, _assignment, _ripped, _sub_dir in undecided:
+                job.checkpoints[title_id]["tune_grain"] = decision
             _checkpoint(report)
 
     async def _subtitles_for_titles(
@@ -798,10 +807,12 @@ class Pipeline:
             source_video=ripped_mkv, assignment=assignment)
         self._cache_subs(video_dest, sub_jobs)
 
-        # Resolve grain (may park at an interactive preview gate — UI only).
-        tune_grain = await self._resolve_grain(job, ripped_mkv, title_id, staging_root, report)
-        cp["tune_grain"] = tune_grain
-        _checkpoint(report)
+        # Resolve grain (may park at an interactive preview gate — UI only). Skip
+        # if a prior run already decided it, so a resume doesn't re-prompt (which
+        # otherwise loops the grain gate on a box that restarts mid-job).
+        if "tune_grain" not in cp:
+            cp["tune_grain"] = await self._resolve_grain(job, ripped_mkv, title_id, staging_root, report)
+            _checkpoint(report)
         return result
 
     async def _encode_uhd(self, src: Path, dst: Path, tune_grain: bool,

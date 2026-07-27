@@ -153,3 +153,67 @@ async def test_no_rip_no_notify(tmp_path, monkeypatch):
     r = _NotifyReport()
     await pipe._ensure_ripped(job, 0, tmp_path / "job_1", r)
     assert r.notes == []
+
+
+async def _run_prep_grain(tmp_path, monkeypatch, *, decided):
+    """Drive prep_phase with every heavy step faked, spying on grain resolution.
+    ``decided`` maps title_id -> a pre-existing tune_grain checkpoint."""
+    from blurayripper.config import load_settings
+    from blurayripper.models import DiscInfo, EpisodeAssignment, MediaKind, Title
+    from blurayripper.pipeline import Job, Pipeline
+
+    s = load_settings()
+    monkeypatch.setattr(s.storage, "staging_dir", tmp_path)
+    pipe = Pipeline(s)
+
+    job = Job(source="disc:0", grain_mode="preview")
+    job.disc = DiscInfo(source="disc:0", disc_name="X",
+                        titles=[Title(title_id=i) for i in range(3)])
+    job.selected_title_ids = [0, 1, 2]
+    job.assignments = {i: EpisodeAssignment(i, MediaKind.TV, "Show", season=1, episode=i + 1)
+                       for i in range(3)}
+    for tid, val in decided.items():
+        job.checkpoints[tid] = {"tune_grain": val}
+
+    async def noop(*a, **k): return None
+    for name in ("_resolve_source_drive", "_place_cover_art", "_place_tmdb_art",
+                 "_subtitles_for_titles"):
+        monkeypatch.setattr(pipe, name, noop)
+
+    async def fake_ripped(job, title_id, staging_root, report):
+        return tmp_path / f"t{title_id}.mkv"
+    monkeypatch.setattr(pipe, "_ensure_ripped", fake_ripped)
+
+    asked = []
+    async def fake_resolve(job, ripped, title_id, staging_root, report):
+        asked.append(title_id)
+        return True
+    monkeypatch.setattr(pipe, "_resolve_grain", fake_resolve)
+
+    await pipe.prep_phase(job, tmp_path / "job_1", _Report(), include_subs=True)
+    return job, asked
+
+
+async def test_prep_phase_asks_grain_once_per_disc(tmp_path, monkeypatch):
+    """A multi-title disc must ask for grain ONCE (not once per episode, which read
+    as an endless 'pick grain' loop) and apply the choice to every title."""
+    job, asked = await _run_prep_grain(tmp_path, monkeypatch, decided={})
+    assert asked == [0]                                              # asked a single time
+    assert all(job.checkpoints[i]["tune_grain"] is True for i in range(3))  # applied to all
+
+
+async def test_prep_phase_skips_grain_already_decided(tmp_path, monkeypatch):
+    """A resume must not re-park at the grain gate for titles already decided —
+    only the remaining titles get one shared prompt."""
+    job, asked = await _run_prep_grain(tmp_path, monkeypatch, decided={0: False})
+    assert asked == [1]                                # first UNdecided title, once
+    assert job.checkpoints[0]["tune_grain"] is False   # prior pick preserved
+    assert job.checkpoints[1]["tune_grain"] is True
+    assert job.checkpoints[2]["tune_grain"] is True    # shared with title 1
+
+
+async def test_prep_phase_no_grain_prompt_when_all_decided(tmp_path, monkeypatch):
+    """Every title already decided -> a resume never opens the grain gate at all."""
+    _job, asked = await _run_prep_grain(
+        tmp_path, monkeypatch, decided={0: True, 1: False, 2: True})
+    assert asked == []
