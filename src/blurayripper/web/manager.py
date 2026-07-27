@@ -31,7 +31,7 @@ from ..persistence import (
 )
 from ..pipeline import Job, JobState, Pipeline, _resolve_path
 from ..scheduler import EncodeScheduler
-from ..services import library
+from ..services import library, naming
 from ..services.drive_names import DriveNames
 from ..services.notify import notify
 from ..services.opensubtitles import OpenSubtitlesClient, gather_references
@@ -646,7 +646,6 @@ class JobManager:
         confirmed + started ripping; False to leave the job at the naming gate."""
         if not (self.settings.auto_rip and self.settings.tmdb_api_key and job.disc):
             return False
-        from ..services import naming
         from ..services.metadata import TMDBClient
         name = (job.disc.disc_name or "").strip()
         if not name:
@@ -1622,6 +1621,17 @@ class JobManager:
         # queued / scanning / selecting / ripping / confirming / identifying / awaiting_*
         return "rip"
 
+    def _label_hints(self, wj: WebJob) -> dict:
+        """Season + disc-in-set read off the disc label, e.g.
+        ``HAWAII_FIVE_0_S1_D4`` -> season 1, disc 4. Both are hints for the mapping
+        form to pre-fill — the user still confirms, so a mislabeled disc can't
+        silently rip as the wrong episodes."""
+        label = (wj.disc.disc_name if wj.disc else None) or ""
+        if not label:
+            return {"label_season": None, "label_disc": None}
+        _title, _year, season = naming.clean_tmdb_query(label, "tv")
+        return {"label_season": season, "label_disc": naming.disc_number(label)}
+
     def _job_dict(self, wj: WebJob) -> dict:
         live_state = self._live_state(wj)
         return {
@@ -1639,6 +1649,9 @@ class JobManager:
             "disc_name": wj.disc.disc_name if wj.disc else None,
             # Identifies WHICH disc this is (box-set labels are all identical).
             "display_name": self._display_name(wj),
+            # Season / disc-in-set parsed from the label ("HAWAII_FIVE_0_S1_D4"),
+            # so the mapping form can pre-fill them instead of making you retype.
+            **self._label_hints(wj),
             "kind_guess": (discinfo.guess_kind(wj.disc).value if wj.disc else None),
             "titles": self._title_dict(wj) if wj.disc else [],
             "selected": wj.selected_title_ids,

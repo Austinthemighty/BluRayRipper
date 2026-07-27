@@ -90,3 +90,54 @@ def test_clean_tmdb_query_preserves_movie_titles():
     assert clean_tmdb_query("WarGames (1983)", "movie") == ("WarGames", 1983, None)
     # A trailing number that isn't a descriptor stays put.
     assert clean_tmdb_query("Ocean's 11", "movie") == ("Ocean's 11", None, None)
+
+
+def test_clean_tmdb_query_handles_underscore_disc_labels():
+    """ISO9660 labels can't hold spaces, so DVDs ship "HAWAII_FIVE_0_S1_D4".
+    Underscores are word chars, so every \\b failed and nothing was detected —
+    the raw label even went to TMDB as the search query."""
+    from blurayripper.services.naming import clean_tmdb_query
+
+    assert clean_tmdb_query("HAWAII_FIVE_0_S1_D4", "tv") == ("HAWAII FIVE 0", None, 1)
+    assert clean_tmdb_query("HAWAII_FIVE_0_S01_D04", "tv") == ("HAWAII FIVE 0", None, 1)
+    assert clean_tmdb_query("THE_OFFICE_S3_D2", "tv") == ("THE OFFICE", None, 3)
+    # Dot-separated (no spaces anywhere) is the same shape.
+    assert clean_tmdb_query("Breaking.Bad.S04.D2", "tv") == ("Breaking Bad", None, 4)
+    # Spaced labels keep working.
+    assert clean_tmdb_query("Silicon Valley Season 2 Disc 1", "tv") == ("Silicon Valley", None, 2)
+
+
+def test_clean_tmdb_query_keeps_real_punctuation_in_titles():
+    """Dots are only separators when the label has no spaces — a real title's
+    punctuation must survive, or the TMDB search gets worse, not better."""
+    from blurayripper.services.naming import clean_tmdb_query
+
+    assert clean_tmdb_query("Mrs. Doubtfire", "movie")[0] == "Mrs. Doubtfire"
+    assert clean_tmdb_query("Kill Bill: Vol. 1", "movie")[0] == "Kill Bill: Vol. 1"
+    assert clean_tmdb_query("Guardians of the Galaxy Vol. 3", "movie")[0] == \
+        "Guardians of the Galaxy Vol. 3"
+
+
+def test_disc_number_from_label():
+    from blurayripper.services.naming import disc_number
+
+    assert disc_number("HAWAII_FIVE_0_S1_D4") == 4
+    assert disc_number("HAWAII_FIVE_0_S01_D04") == 4
+    assert disc_number("Silicon Valley Season 2 Disc 1") == 1
+    assert disc_number("Breaking.Bad.S04.D2") == 2
+    assert disc_number("SOME_MOVIE") is None
+    assert disc_number("") is None
+    # A trailing number that isn't a disc descriptor must not be read as one.
+    assert disc_number("OCEANS_11") is None
+    assert disc_number("WALL_E") is None
+
+
+def test_episode_span_guesses_the_block_a_disc_holds():
+    from blurayripper.services.naming import episode_span
+
+    assert episode_span(1, 4) == (1, 4)      # first disc starts at E01
+    assert episode_span(4, 4) == (13, 16)    # disc 4 of 4-per-disc
+    assert episode_span(2, 3) == (4, 6)
+    assert episode_span(None, 4) is None     # unknown disc -> no guess
+    assert episode_span(0, 4) is None
+    assert episode_span(3, 0) is None        # no titles -> nothing to span

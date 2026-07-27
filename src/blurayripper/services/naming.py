@@ -49,6 +49,50 @@ def subtitle_lang_suffix(iso_639_2b: str) -> str:
     return _ISO_639_2B_TO_1.get(code, code)
 
 
+def _normalize_separators(query: str) -> str:
+    """Turn a disc volume label's separators into spaces.
+
+    ISO9660 labels can't contain spaces, so DVDs ship names like
+    ``HAWAII_FIVE_0_S1_D4``. Underscores are word characters, so every ``\\b``
+    below fails on them — the season/disc go undetected and the raw label is
+    handed to TMDB. Underscores are never part of a real title, so they always
+    become spaces. Dots are only a separator when the label has no spaces at all
+    (``Some.Show.S01.D02``); otherwise they're real punctuation (*Mrs. Doubtfire*).
+    """
+    q = (query or "").strip().replace("_", " ")
+    if "." in q and " " not in q:
+        q = q.replace(".", " ")
+    return re.sub(r"\s{2,}", " ", q).strip()
+
+
+# Disc/side descriptor: "Disc 2", "D2", "Disc2". The bare "d" form only counts
+# when it's a standalone token, so a title word can't be read as a disc number.
+_DISC_RE = re.compile(r"\b(?:disc|disk)\s*0*(\d{1,2})\b|\bd\s*0*(\d{1,2})\b", re.IGNORECASE)
+
+
+def disc_number(query: str) -> int | None:
+    """The disc number in a set from a disc label, e.g. ``HAWAII_FIVE_0_S1_D4``
+    -> 4. None when the label doesn't say. Used to suggest which block of
+    episodes a disc holds."""
+    m = _DISC_RE.search(_normalize_separators(query))
+    if not m:
+        return None
+    n = int(m.group(1) or m.group(2))
+    return n or None  # "Disc 0" isn't a real disc number
+
+
+def episode_span(disc: int | None, count: int) -> tuple[int, int] | None:
+    """Guess the (first, last) episode numbers a disc holds, from its position in
+    the set and how many episode-length titles are on it — disc 4 of 4-per-disc
+    means E13-E16. A GUESS only (disc 1 often carries extras, the last disc is
+    usually short), so callers must present it for confirmation, never auto-apply.
+    """
+    if not disc or disc < 1 or count < 1:
+        return None
+    first = (disc - 1) * count + 1
+    return first, first + count - 1
+
+
 def clean_tmdb_query(query: str, kind: str = "movie") -> tuple[str, int | None, int | None]:
     """Turn a disc name into a searchable (title, year, season) for TMDB.
 
@@ -60,7 +104,7 @@ def clean_tmdb_query(query: str, kind: str = "movie") -> tuple[str, int | None, 
     "Volume/Vol" is only stripped for TV — real movie titles use it (*Kill Bill:
     Vol. 1*, *Guardians of the Galaxy Vol. 3*), so movies keep it.
     """
-    q = (query or "").strip()
+    q = _normalize_separators(query)
 
     # Year: a parenthesized (YYYY) anywhere (disc names sometimes put it before
     # "Season N", e.g. "Breaking Bad (2008) Season 4 Disc 2").

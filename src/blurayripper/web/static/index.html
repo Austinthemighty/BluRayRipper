@@ -836,9 +836,19 @@ function buildMapping(card, j){
   async function afterChoose(){
     const tv = body.querySelector('[data-tv]');
     if (state.kind==='tv') {
-      tv.innerHTML = `<div class="row">Season <input data-season type="number" value="1" min="0" style="width:64px;">
-          First episode <input data-firstep type="number" value="1" min="0" style="width:64px;">
+      // Pre-fill from the disc label ("HAWAII_FIVE_0_S1_D4" -> season 1, disc 4).
+      // The disc's position in the set implies which block of episodes it holds:
+      // disc 4 with 4 episode titles ≈ E13-E16. A guess — the user still confirms.
+      const nSel = j.selected.length || 1;
+      const guessSeason = j.label_season || 1;
+      const guessFirst = j.label_disc ? (j.label_disc - 1) * nSel + 1 : 1;
+      const hint = j.label_disc
+        ? `<div class="muted" style="font-size:12px;">Disc label says <b>season ${guessSeason}, disc ${j.label_disc}</b> — with ${nSel} episode${nSel===1?'':'s'} on this disc that's about <b>E${String(guessFirst).padStart(2,'0')}–E${String(guessFirst+nSel-1).padStart(2,'0')}</b>. Check it: disc 1 often carries extras and the last disc is usually short.</div>`
+        : (j.label_season ? `<div class="muted" style="font-size:12px;">Disc label says <b>season ${guessSeason}</b>.</div>` : '');
+      tv.innerHTML = `<div class="row">Season <input data-season type="number" value="${guessSeason}" min="0" style="width:64px;">
+          First episode <input data-firstep type="number" value="${guessFirst}" min="0" style="width:64px;">
           <button class="sec" data-load>Load episodes</button></div>
+        ${hint}
         <div class="muted" style="font-size:12px;">DVD titles are usually in order; Blu-ray titles are often scrambled or reversed — pick each title's episode below (durations shown to help match), or use a fill button.</div>
         <div data-fill class="row" style="display:none;">
           <button class="sec" data-order>Fill in order (DVD)</button>
