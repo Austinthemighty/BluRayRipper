@@ -317,6 +317,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                          int(year) if year not in (None, "") else None))
         return {"ok": True}
 
+    @app.post("/api/jobs/{job_id}/remap")
+    async def remap_job(job_id: int):
+        # For a job that never got a naming assignment (auto-identify that didn't
+        # match, or a failure before naming) — rename has nothing to edit.
+        _gate(lambda: manager.remap(job_id))
+        return {"ok": True}
+
     @app.post("/api/jobs/{job_id}/change-source")
     async def change_source(job_id: int, body: ChangeSource):
         try:

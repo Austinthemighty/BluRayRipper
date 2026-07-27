@@ -1020,7 +1020,12 @@ function buildResting(card, j){
   // done/failed jobs: offer a subtitle re-OCR (staged rip or cached subs).
   const body = card.querySelector('[data-body]');
   let html = `<div class="row"><button class="sec" data-redosubs title="Re-OCR subtitles from this job's staged rip or cached subs (no re-encode).">Redo subtitles</button>`;
-  html += `<button class="sec" data-rename title="Fix the title/year — e.g. a remake mapped to the original (or vice versa). Episode numbers are kept; placed files are renamed.">✎ Rename</button>`;
+  // Rename edits an existing naming assignment. A job that never got one (an
+  // auto-identify disc that didn't match, or a failure before naming) has nothing
+  // to rename — it needs its naming SET, so offer the mapping form instead.
+  html += j.has_naming
+    ? `<button class="sec" data-rename title="Fix the title/year — e.g. a remake mapped to the original (or vice versa). Episode numbers are kept; placed files are renamed.">✎ Rename</button>`
+    : `<button class="sec" data-remap title="This job was never named (auto-identify found no match, or it failed before naming). Re-open the naming form to set the show/movie and episodes — the finished rip is kept.">✎ Set naming</button>`;
   html += `<span data-msg class="muted"></span></div>`;
   // Failed disc job: let the user move the disc to another drive and rip from it
   // (a different drive can often read a sector the original couldn't).
@@ -1042,6 +1047,14 @@ function buildResting(card, j){
   };
   const rn = body.querySelector('[data-rename]');
   if (rn) rn.onclick = () => openRename(j);
+  const rm = body.querySelector('[data-remap]');
+  if (rm) rm.onclick = async () => {
+    const msg = body.querySelector('[data-msg]');
+    msg.textContent = 'Re-opening the naming form…';
+    // Sends the job back to the naming gate; the card rebuilds into that form.
+    try { await api('POST','/api/jobs/'+j.id+'/remap'); }
+    catch(e){ msg.textContent = '⚠ '+e.message; }
+  };
   const sel = body.querySelector('[data-drivesel]');
   if (sel) {
     fetch('/api/drives').then(r=>r.json()).then(drives=>{

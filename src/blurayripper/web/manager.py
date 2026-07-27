@@ -940,6 +940,40 @@ class JobManager:
         # Refresh the poster/backdrop for the corrected identity (best-effort).
         self._spawn(self.refresh_artwork(job_id))
 
+    def remap(self, job_id: int) -> None:
+        """Send a resting job back to the naming gate so its identity can be set.
+
+        Rename only edits an EXISTING assignment, so a job that never got one —
+        an auto-identify disc whose subtitle match failed, or one that failed
+        before naming — had no way to be named at all ("no naming assignment to
+        rename"). This re-opens the form instead: back to the title gate when no
+        titles were ever selected, otherwise straight to naming. The finished rip
+        is kept, so confirming resumes from checkpoints rather than re-ripping."""
+        wj = self.jobs.get(job_id)
+        if wj is None:
+            raise ValueError(f"No job {job_id}.")
+        live = self._live_state(wj)
+        if live not in (JobState.DONE, JobState.FAILED):
+            raise ValueError("Only a finished or failed job can be re-named — "
+                             "adjust a running one from its own controls.")
+        if wj._pipeline_job is None or wj.disc is None:
+            raise ValueError("This job has no scanned disc to re-map.")
+        task = getattr(wj, "_task", None)
+        if task is not None and not task.done():
+            raise ValueError("Job is still running — wait for it to stop.")
+        # Auto-identify already ran (and didn't produce a mapping); re-running it
+        # would just park at the same match gate, so hand naming back to the user.
+        wj.auto_identify = False
+        wj.error = None
+        wj.progress = 0.0
+        target = (JobState.AWAITING_MAPPING if wj.selected_title_ids
+                  else JobState.AWAITING_TITLES)
+        wj.state = target
+        wj._pipeline_job.state = target
+        wj.log.append(stamp_log("Re-opened for naming."))
+        self._persist(wj)
+        self.bus.publish()
+
     def retry(self, job_id: int) -> None:
         """Re-queue a failed job. It resumes from its checkpoints — a finished
         rip is reused, so typically only the encode (and later stages) re-run."""
@@ -1655,6 +1689,9 @@ class JobManager:
             "kind_guess": (discinfo.guess_kind(wj.disc).value if wj.disc else None),
             "titles": self._title_dict(wj) if wj.disc else [],
             "selected": wj.selected_title_ids,
+            # Rename edits an existing assignment; without one the job needs its
+            # naming SET (re-map) instead, so the UI offers the right control.
+            "has_naming": bool(wj.assignments),
             "outputs": wj.outputs,
             # Whether the disc is still needed (some title left to rip). False once
             # ripping is done, so an encode/subtitle failure doesn't offer "change
