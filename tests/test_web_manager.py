@@ -1349,3 +1349,50 @@ def test_label_hints_prefill_season_and_disc(manager):
     # No disc scanned yet -> no hints, no crash.
     wj.disc = None
     assert manager._label_hints(wj) == {"label_season": None, "label_disc": None}
+
+
+def test_remap_reopens_naming_for_a_job_that_was_never_named(manager):
+    """A job with no naming assignment can't be renamed ("no naming assignment to
+    rename") — e.g. an auto-identify disc whose subtitle match failed. remap()
+    re-opens the naming form so it can be set."""
+    from blurayripper.pipeline import Job
+
+    wj = WebJob(id=247, source="disc:1", state=JobState.FAILED)
+    wj.disc = _fake_disc()
+    wj._pipeline_job = Job(source="disc:1")
+    wj._pipeline_job.state = JobState.FAILED
+    wj.selected_title_ids = [0, 1]
+    wj.auto_identify = True          # identification already ran and didn't match
+    wj.error = "no confident match"
+    manager.jobs[247] = wj
+
+    # Rename is impossible — that's the reported error.
+    with pytest.raises(ValueError, match="no naming assignment"):
+        manager.rename_job(247, "Hawaii Five-O", 1968)
+
+    manager.remap(247)
+    assert wj.state is JobState.AWAITING_MAPPING     # titles known -> straight to naming
+    assert wj._pipeline_job.state is JobState.AWAITING_MAPPING
+    assert wj.auto_identify is False                 # don't re-run the failed matcher
+    assert wj.error is None
+
+    # With no titles selected it goes back a step, to the title gate.
+    wj2 = WebJob(id=248, source="disc:1", state=JobState.FAILED)
+    wj2.disc = _fake_disc()
+    wj2._pipeline_job = Job(source="disc:1")
+    manager.jobs[248] = wj2
+    manager.remap(248)
+    assert wj2.state is JobState.AWAITING_TITLES
+
+
+def test_remap_refuses_a_running_job(manager):
+    """Re-opening naming mid-run would race the pipeline."""
+    from blurayripper.pipeline import Job
+
+    wj = WebJob(id=249, source="disc:0", state=JobState.ENCODING)
+    wj.disc = _fake_disc()
+    wj._pipeline_job = Job(source="disc:0")
+    wj._pipeline_job.state = JobState.ENCODING
+    manager.jobs[249] = wj
+    with pytest.raises(ValueError, match="finished or failed"):
+        manager.remap(249)
