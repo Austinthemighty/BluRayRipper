@@ -1329,3 +1329,23 @@ async def test_rename_job_moves_placed_episode_files(manager, monkeypatch, tmp_p
     assert wj.outputs == [str(manager.pipeline._video_path_for(a))
                           for a in wj.assignments.values()]
     await _settle()
+
+
+def test_label_hints_prefill_season_and_disc(manager):
+    """The mapping form pre-fills from the disc label instead of making you retype
+    the season for every disc in a box set."""
+    wj = WebJob(id=9, source="disc:1", state=JobState.AWAITING_MAPPING)
+    wj.disc = _fake_disc()
+    wj.disc.disc_name = "HAWAII_FIVE_0_S1_D4"
+    assert manager._label_hints(wj) == {"label_season": 1, "label_disc": 4}
+
+    wj.disc.disc_name = "Silicon Valley Season 2 Disc 1"
+    assert manager._label_hints(wj) == {"label_season": 2, "label_disc": 1}
+
+    # A movie disc says neither.
+    wj.disc.disc_name = "WALL_E"
+    assert manager._label_hints(wj) == {"label_season": None, "label_disc": None}
+
+    # No disc scanned yet -> no hints, no crash.
+    wj.disc = None
+    assert manager._label_hints(wj) == {"label_season": None, "label_disc": None}
