@@ -18,6 +18,7 @@ config/secrets.env
 config/settings.local.json
 # Web-edited HandBrake preset overlay (same reason; preferred over presets.json).
 config/presets.local.json
+config/boxsets.local.csv
 
 # Runtime data
 *.db

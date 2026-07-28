@@ -118,3 +118,50 @@ def test_job_log_endpoint_returns_full_retained_log(tmp_path):
     assert r.status_code == 200
     assert r.json()["log"] == wj.log            # full 120 lines, not just the tail
     assert c.get("/api/jobs/999/log").status_code == 404
+
+
+def _boxset_app(tmp_path):
+    from blurayripper.config import load_settings
+    from blurayripper.web.app import create_app
+
+    (tmp_path / "settings.toml").write_text("", encoding="utf-8")
+    settings = load_settings(tmp_path)
+    settings.config_dir = tmp_path        # keep the plan file out of the real config dir
+    return create_app(settings)
+
+
+def test_boxset_plan_saves_and_reloads(tmp_path):
+    from fastapi.testclient import TestClient
+
+    c = TestClient(_boxset_app(tmp_path))
+    assert c.get("/api/boxsets").json()["csv"] == ""      # nothing saved yet
+
+    csv_text = "disc_label,show,year\nHAWAII_FIVE_0_S1_*,Hawaii Five-0,2010\n"
+    r = c.post("/api/boxsets", json={"csv": csv_text}).json()
+    assert r["saved"] is True and r["errors"] == []
+    assert r["rows"][0]["show"] == "Hawaii Five-0"
+    assert (tmp_path / "boxsets.local.csv").read_text(encoding="utf-8") == csv_text
+
+    back = c.get("/api/boxsets").json()
+    assert back["csv"] == csv_text and back["rows"][0]["disc_label"] == "HAWAII_FIVE_0_S1_*"
+
+
+def test_boxset_plan_dry_run_does_not_write(tmp_path):
+    """Preview must show what would happen without changing what discs do next."""
+    from fastapi.testclient import TestClient
+
+    c = TestClient(_boxset_app(tmp_path))
+    r = c.post("/api/boxsets", json={"csv": "disc_label,show\nA_S1_D1,Show\n",
+                                     "dry_run": True}).json()
+    assert r["saved"] is False and len(r["rows"]) == 1
+    assert not (tmp_path / "boxsets.local.csv").exists()
+
+
+def test_boxset_plan_reports_bad_csv(tmp_path):
+    from fastapi.testclient import TestClient
+
+    c = TestClient(_boxset_app(tmp_path))
+    r = c.post("/api/boxsets", json={"csv": "nope,nothing\nx,y\n"}).json()
+    assert r["errors"] and any("disc_label" in e for e in r["errors"])
+    assert r["rows"] == []
+    assert c.post("/api/boxsets", json={"csv": 5}).status_code == 400

@@ -157,6 +157,7 @@
   <label class="cap"><input type="checkbox" id="autoconfirm"> Auto-confirm single matches</label>
   <button class="sec" id="opensettings" title="Edit server settings (saved to config/settings.local.json; applied on next restart).">⚙ Settings</button>
   <button class="sec" onclick="openHandbrake()" title="Edit the HandBrake encode preset (quality, encoder, speed) used for <=1080p titles.">🎬 HandBrake</button>
+  <button class="sec" onclick="openBoxsets()" title="Name TV box-set discs up front with a CSV, so inserting a disc rips it automatically with no mapping form.">📺 TV box sets</button>
 </header>
 <div id="stats"></div>
 <div id="bulkbar"></div>
@@ -205,6 +206,35 @@
       <button onclick="submitAddSelector()">Add</button>
       <button class="sec" onclick="closeAddSelector()">Cancel</button>
       <span id="addsel-msg" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<div id="boxset-modal" class="modal" onclick="if(event.target===this)closeBoxsets();">
+  <div class="sheet" style="max-width:820px;">
+    <div class="shead"><h2>TV box sets</h2>
+      <div class="muted" style="font-size:12px;margin-top:4px;">
+        One row per disc (or per set, with a <code>*</code>). A disc whose label matches
+        is named and ripped automatically — no mapping form.
+      </div>
+    </div>
+    <div style="padding:10px 0;">
+      <textarea id="boxset-csv" spellcheck="false" rows="10"
+        style="width:100%;box-sizing:border-box;font:12px ui-monospace,SFMono-Regular,Consolas,monospace;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:8px;resize:vertical;"></textarea>
+      <div class="muted" style="font-size:12px;margin-top:8px;">
+        <b>disc_label</b> and <b>show</b> are required. Leave <b>season</b> / <b>first_episode</b>
+        blank to read them off the label (<code>HAWAII_FIVE_0_S1_D4</code> → season 1, disc 4).
+        <b>episodes</b> is an optional safety check — if the disc has a different number of
+        episode-length titles, it stops and asks instead of guessing.
+      </div>
+      <div id="boxset-preview" style="margin-top:10px;"></div>
+    </div>
+    <div class="sfoot">
+      <button onclick="saveBoxsets()">Save</button>
+      <button class="sec" onclick="previewBoxsets()">Preview</button>
+      <button class="sec" onclick="insertBoxsetExample()">Insert example</button>
+      <button class="sec" onclick="closeBoxsets()">Close</button>
+      <span id="boxset-msg" class="muted"></span>
     </div>
   </div>
 </div>
@@ -1290,6 +1320,87 @@ async function doRename(title, year){
     toast(`Renamed to ${title} (${year||'?'}).`);
     closeRename();
   } catch(e){ msg.style.color = '#f85149'; msg.textContent = 'Error: ' + e.message; }
+}
+
+// ---- TV box sets (pre-name discs so they rip hands-off) ----
+let boxsetExample = '';
+async function openBoxsets(){
+  const m = document.getElementById('boxset-modal');
+  document.getElementById('boxset-msg').textContent = '';
+  document.getElementById('boxset-preview').innerHTML = '';
+  const ta = document.getElementById('boxset-csv');
+  ta.value = 'Loading…'; ta.disabled = true;
+  m.classList.add('open');
+  try {
+    const r = await api('GET','/api/boxsets');
+    boxsetExample = r.example || '';
+    ta.value = r.csv || '';
+    ta.disabled = false;
+    // Show what's already in effect, so it's clear which discs are covered.
+    if ((r.rows||[]).length || (r.errors||[]).length) showBoxsetRows(r.rows, r.errors);
+    ta.focus();
+  } catch(e){
+    ta.disabled = false; ta.value = '';
+    boxsetMsg('Error: ' + e.message, '#f85149');
+  }
+}
+function closeBoxsets(){ document.getElementById('boxset-modal').classList.remove('open'); }
+function boxsetMsg(text, color){
+  const el = document.getElementById('boxset-msg');
+  el.style.color = color || '#8b949e'; el.textContent = text;
+}
+function insertBoxsetExample(){
+  const ta = document.getElementById('boxset-csv');
+  if (!ta.value.trim()) { ta.value = boxsetExample; ta.focus(); return; }
+  if (confirm('Replace the current CSV with the example?')) { ta.value = boxsetExample; ta.focus(); }
+}
+function showBoxsetRows(rows, errors){
+  const host = document.getElementById('boxset-preview');
+  let html = '';
+  if ((errors||[]).length) {
+    html += `<div style="color:#f85149;font-size:12px;margin-bottom:8px;">` +
+      errors.map(e=>'⚠ '+esc(e)).join('<br>') + `</div>`;
+  }
+  if ((rows||[]).length) {
+    html += `<table style="width:100%;font-size:12px;"><tr>
+        <th>Disc label</th><th>Show</th><th>Year</th><th>Season</th><th>First ep</th><th>Episodes</th></tr>` +
+      rows.map(r=>`<tr><td><code>${esc(r.disc_label)}</code></td><td>${esc(r.show)}</td>
+        <td>${r.year??'<span class="muted">—</span>'}</td>
+        <td>${r.season??'<span class="muted">from label</span>'}</td>
+        <td>${r.first_episode??'<span class="muted">from disc no.</span>'}</td>
+        <td>${r.episodes??'<span class="muted">any</span>'}</td></tr>`).join('') +
+      `</table>`;
+  } else if (!(errors||[]).length) {
+    html += `<span class="muted" style="font-size:12px;">No rows — no discs are covered yet.</span>`;
+  }
+  host.innerHTML = html;
+}
+async function previewBoxsets(){
+  boxsetMsg('Checking…');
+  try {
+    const r = await api('POST','/api/boxsets',
+      {csv: document.getElementById('boxset-csv').value, dry_run: true});
+    showBoxsetRows(r.rows, r.errors);
+    const n = (r.rows||[]).length, e = (r.errors||[]).length;
+    boxsetMsg(e ? `${n} row(s), ${e} problem(s) — not saved.` : `${n} row(s) look good — not saved yet.`,
+              e ? '#f85149' : '#8b949e');
+  } catch(err){ boxsetMsg('Error: ' + err.message, '#f85149'); }
+}
+async function saveBoxsets(){
+  boxsetMsg('Saving…');
+  try {
+    const r = await api('POST','/api/boxsets',
+      {csv: document.getElementById('boxset-csv').value});
+    showBoxsetRows(r.rows, r.errors);
+    const n = (r.rows||[]).length;
+    if ((r.errors||[]).length) {
+      // Saved anyway: the good rows still work, and the user can see what to fix.
+      boxsetMsg(`Saved ${n} row(s), but check the problems above.`, '#f85149');
+    } else {
+      boxsetMsg(`Saved — ${n} row(s) in effect.`, '#3fb950');
+      toast(`Box-set plan saved (${n} row${n===1?'':'s'}).`);
+    }
+  } catch(e){ boxsetMsg('Error: ' + e.message, '#f85149'); }
 }
 
 // ---- HandBrake preset editor ----
