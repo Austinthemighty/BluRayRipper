@@ -10,6 +10,8 @@ Endpoints
   DELETE /api/jobs/{id}       -> remove a finished/parked job
   GET  /api/tmdb/search       -> TMDB search proxy {kind, query}
   GET  /api/tmdb/season       -> TMDB season episodes {tv_id, season}
+  GET  /api/boxsets           -> box-set plan CSV + parsed rows
+  POST /api/boxsets           -> save (or dry-run) the plan CSV {csv, dry_run}
   GET  /api/events            -> SSE stream of queue snapshots
 """
 
@@ -490,6 +492,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except Exception:
                 pass  # the local save still succeeded
         return {"ok": True, "restart_required": True, "shared": shared}
+
+    @app.get("/api/boxsets")
+    async def get_boxsets():
+        from .. import boxset_plan
+        text = boxset_plan.load_plan(settings)
+        rows, errors = boxset_plan.parse_csv(text)
+        return {"csv": text, "rows": [r.as_dict() for r in rows], "errors": errors,
+                "columns": list(boxset_plan.COLUMNS), "example": boxset_plan.EXAMPLE_CSV,
+                "path": str(boxset_plan.plan_path(settings))}
+
+    @app.post("/api/boxsets")
+    async def post_boxsets(body: dict = Body(...)):
+        # dry_run parses and reports without writing, so the UI can preview exactly
+        # what a paste would do before it takes effect on the next disc inserted.
+        from .. import boxset_plan
+        text = body.get("csv", "")
+        if not isinstance(text, str):
+            raise HTTPException(status_code=400, detail="csv must be text.")
+        rows, errors = boxset_plan.parse_csv(text)
+        dry_run = bool(body.get("dry_run"))
+        if not dry_run:
+            try:
+                boxset_plan.save_plan(settings, text)
+            except OSError as exc:
+                raise HTTPException(status_code=400, detail=f"Couldn't save the plan: {exc}")
+        return {"ok": True, "saved": not dry_run, "errors": errors,
+                "rows": [r.as_dict() for r in rows]}
 
     @app.get("/api/settings")
     async def get_settings(scope: str = "global"):

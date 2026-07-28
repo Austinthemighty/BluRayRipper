@@ -31,6 +31,7 @@ from ..persistence import (
 )
 from ..pipeline import Job, JobState, Pipeline, _resolve_path
 from ..scheduler import EncodeScheduler
+from .. import boxset_plan
 from ..services import library, naming
 from ..services.drive_names import DriveNames
 from ..services.notify import notify
@@ -681,6 +682,78 @@ class JobManager:
         wj._task = self._spawn(self._run_job(wj))
         return True
 
+    async def _try_planned_tv(self, wj: WebJob, job, reporter) -> bool:
+        """Apply a box-set plan row to a freshly scanned TV disc: name every
+        episode-length title and start ripping, with no naming gate.
+
+        The plan CSV is the user's up-front statement of what these discs are, so a
+        match is consent to proceed. Anything the row can't state confidently (an
+        unexpected title count, no season) parks the job at the normal gate instead
+        — a wrong auto-rip costs a whole disc. Returns True if it took over."""
+        if job.disc is None:
+            return False
+        rows = boxset_plan.load_rows(self.settings)
+        if not rows:
+            return False
+        label = (job.disc.volume_label or job.disc.disc_name or "").strip()
+        row = boxset_plan.match(rows, label)
+        if row is None:
+            return False
+        result = boxset_plan.assignments_for(row, job.disc)
+        if not result.ok:
+            reporter.on_event(
+                f"Box-set plan matched “{row.disc_label}” but didn't apply: "
+                f"{result.reason}. Confirm this one manually.")
+            return False
+        tmdb_id = await self._fill_episode_titles(result.assignments, row, result.season)
+        wj.assignments = {a.title_id: a for a in result.assignments}
+        wj.selected_title_ids = [a.title_id for a in result.assignments]
+        wj.show_title, wj.show_year, wj.season = row.show, row.year, result.season
+        wj.show_tmdb_id = tmdb_id
+        wj.state = JobState.READY
+        job.state = JobState.READY
+        last = result.assignments[-1].episode
+        span = (f"E{result.first_episode:02d}" if last == result.first_episode
+                else f"E{result.first_episode:02d}–E{last:02d}")
+        reporter.on_event(
+            f"Box-set plan: {row.show} S{result.season:02d}{span} from "
+            f"{len(result.assignments)} title(s) — ripping automatically. "
+            "(Use Rename if the show is wrong.)")
+        self._persist(wj)
+        self.bus.publish()
+        self._notify(f"⏩ Auto-ripping: {row.show} S{result.season:02d}{span}",
+                     f"Job #{wj.id} matched the box-set plan and started ripping.")
+        wj._task = self._spawn(self._run_job(wj))
+        return True
+
+    async def _fill_episode_titles(self, assignments, row, season: int | None) -> int | None:
+        """Best-effort: name each episode from TMDB so placed files read
+        'S01E13 - Episode Name'. Returns the show's TMDB id when resolved.
+
+        Numbers alone already name the file correctly, so any failure here (no key,
+        no network, unknown show) must degrade quietly and never block the rip."""
+        if not (self.settings.tmdb_api_key and season is not None):
+            return None
+        try:
+            from ..services.metadata import TMDBClient
+            client = TMDBClient(self.settings.tmdb_api_key, self.settings.metadata_language)
+            shows = await client.search_tv(row.show)
+            if not shows:
+                return None
+            # search_tv can't filter by year, so pick on it here — that's what
+            # separates a remake from the original (Hawaii Five-0 2010 vs 1968).
+            show = next((s for s in shows if s.year == row.year), None) if row.year else None
+            show = show or shows[0]
+            episodes = await client.get_season(show.tmdb_id, season)
+            by_num = {e.episode_number: e.name for e in episodes}
+            for a in assignments:
+                name = by_num.get(a.episode)
+                if name:
+                    a.episode_title = name
+            return show.tmdb_id
+        except Exception:
+            return None  # numbers-only naming is still correct
+
     def _disc_has_active_job(self, disc_name: str) -> bool:
         """Whether THIS disc is already being handled — matched by disc name, not
         the drive selector. `disc:N` is reused across discs, so a queued job from a
@@ -1264,6 +1337,10 @@ class JobManager:
                 self.bus.publish()
                 wj._task = self._spawn(self._run_job(wj))
             else:
+                # A box-set plan row naming this disc rips it hands-off — the CSV
+                # already said what it is, so there's nothing to confirm.
+                if await self._try_planned_tv(wj, job, reporter):
+                    return  # plan took over (set READY + spawned the run)
                 # A movie disc has a single main-feature title — skip the title
                 # gate and go straight to naming. TV discs (multiple candidate
                 # episodes) still stop so you can pick which titles to rip.

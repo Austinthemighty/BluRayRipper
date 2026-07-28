@@ -1396,3 +1396,81 @@ def test_remap_refuses_a_running_job(manager):
     manager.jobs[249] = wj
     with pytest.raises(ValueError, match="finished or failed"):
         manager.remap(249)
+
+
+def _plan(manager, monkeypatch, tmp_path, csv_text):
+    """Point the manager at a throwaway config dir holding this plan CSV."""
+    monkeypatch.setattr(manager.settings, "config_dir", tmp_path)
+    (tmp_path / "boxsets.local.csv").write_text(csv_text, encoding="utf-8")
+
+
+def _labelled_scan(manager, monkeypatch, label):
+    """Make scans return a 3-episode disc carrying the given volume label."""
+    async def fake_scan(source, report):
+        job = Job(source=source)
+        job.disc = _fake_disc()
+        job.disc.disc_name = job.disc.volume_label = label
+        job.fingerprint = "fp_plan"
+        return job
+    monkeypatch.setattr(manager.pipeline, "scan_disc", fake_scan)
+
+
+async def test_boxset_plan_names_a_disc_and_skips_the_gates(manager, monkeypatch, tmp_path):
+    """The whole point: a disc covered by the plan names itself and starts ripping,
+    with no title gate and no mapping form."""
+    _plan(manager, monkeypatch, tmp_path,
+          "disc_label,show,year\nHAWAII_FIVE_0_S1_*,Hawaii Five-0,2010\n")
+    _labelled_scan(manager, monkeypatch, "HAWAII_FIVE_0_S1_D4")
+
+    wj = manager.add_disc("disc:0")
+    await _settle()
+
+    assert wj.state is not JobState.AWAITING_TITLES     # never parked
+    assert wj.state is not JobState.AWAITING_MAPPING
+    # Disc 4 x 3 episode titles -> E10, E11, E12 of season 1 (both off the label).
+    assert [(a.title_id, a.season, a.episode) for a in wj.assignments.values()] == \
+        [(0, 1, 10), (1, 1, 11), (2, 1, 12)]
+    assert all(a.kind is MediaKind.TV for a in wj.assignments.values())
+    assert all(a.show_or_movie_title == "Hawaii Five-0" and a.year == 2010
+               for a in wj.assignments.values())
+    assert wj.selected_title_ids == [0, 1, 2]
+    assert any("Box-set plan" in line for line in wj.log)
+
+
+async def test_boxset_plan_ignores_a_disc_it_does_not_cover(manager, monkeypatch, tmp_path):
+    """A disc outside the plan must behave exactly as before — park at its gate."""
+    _plan(manager, monkeypatch, tmp_path,
+          "disc_label,show\nHAWAII_FIVE_0_S1_*,Hawaii Five-0\n")
+    _labelled_scan(manager, monkeypatch, "SOME_OTHER_SHOW_S2_D1")
+
+    wj = manager.add_disc("disc:0")
+    await _settle()
+
+    assert wj.state is JobState.AWAITING_TITLES
+    assert not wj.assignments
+
+
+async def test_boxset_plan_parks_on_an_unexpected_episode_count(manager, monkeypatch, tmp_path):
+    """The safety valve: the plan declares 2 episodes but the disc has 3, so it
+    stops and says why rather than shifting every episode number."""
+    _plan(manager, monkeypatch, tmp_path,
+          "disc_label,show,season,first_episode,episodes\n"
+          "HAWAII_FIVE_0_S1_D4,Hawaii Five-0,1,13,2\n")
+    _labelled_scan(manager, monkeypatch, "HAWAII_FIVE_0_S1_D4")
+
+    wj = manager.add_disc("disc:0")
+    await _settle()
+
+    assert wj.state is JobState.AWAITING_TITLES        # parked for a human
+    assert not wj.assignments
+    assert any("didn't apply" in line and "3" in line for line in wj.log)
+
+
+async def test_no_boxset_plan_file_changes_nothing(manager, monkeypatch, tmp_path):
+    """With no plan saved, scanning behaves exactly as it did before this feature."""
+    monkeypatch.setattr(manager.settings, "config_dir", tmp_path)   # empty dir
+    _labelled_scan(manager, monkeypatch, "HAWAII_FIVE_0_S1_D4")
+
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    assert wj.state is JobState.AWAITING_TITLES
