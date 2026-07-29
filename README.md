@@ -124,6 +124,21 @@ blurayripper worker            # Ctrl+C drains; 'u'/Ctrl+U drains + pulls + rest
 
 - **Workers panel** shows each worker's version, current job, and uptime.
   **↻ Update all** drains, `git pull`s, and restarts every worker.
+- **Start a worker automatically** (Windows) — run it once:
+
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File scripts\install-worker-task.ps1
+  ```
+
+  This registers a scheduled task that starts the worker at logon and restarts it
+  if it dies (`-Status` / `-Uninstall` to manage it, `schtasks /run` / `/end` to
+  start and stop). It deliberately runs **in your session, unelevated** rather
+  than as a true Windows Service: staging and output live on a **mapped drive
+  (`Z:`)**, and mapped drives don't exist in session 0 — or under an elevated
+  token — so a real service fails every job with `FileNotFoundError: Z:\`. Use
+  UNC paths (`\\nas\share\…`) instead and a real service becomes possible.
+  Pair it with VM *Start at boot* + Windows auto sign-in (`netplwiz`) to survive a
+  power-off. `scripts\run-serve-windows.bat` does the same job for the rip box.
 - **Per-worker settings**: override tool paths / encode / OCR options for one
   machine in Settings (pick the worker in the scope dropdown).
 - `worker_does_subs` moves subtitle OCR onto the workers; `local_encode_max_height`
