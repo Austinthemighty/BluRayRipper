@@ -14,7 +14,9 @@ import contextlib
 import itertools
 import json
 import re
+import socket
 import time
+import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -32,7 +34,7 @@ from ..persistence import (
 )
 from ..pipeline import Job, JobState, Pipeline, _resolve_path
 from ..scheduler import EncodeScheduler
-from .. import boxset_plan
+from .. import boxset_plan, presence
 from ..services import library, naming
 from ..services.drive_names import DriveNames
 from ..services.notify import notify
@@ -223,6 +225,13 @@ class JobManager:
         # triggers a scan immediately instead of waiting out the full poll interval.
         self._media_snapshot: dict[str, str] | None = None
         self._workers_cache: list = []  # WorkerInfo, refreshed by the store poll
+        # Presence: this box heartbeats so workers can spot the server going down,
+        # and watches the workers for the reverse. run_token distinguishes a fresh
+        # process from a heartbeat, so restarting resets the uptime clock.
+        self._hostname = socket.gethostname()
+        self._run_token = uuid.uuid4().hex
+        self._worker_watch = presence.PresenceWatch(
+            threshold_seconds=settings.cluster.offline_alert_seconds)
         self._done_notified: set[int] = set()  # jobs we've pushed a "done" notify for
 
     async def shutdown(self) -> None:
@@ -499,6 +508,32 @@ class JobManager:
             return False  # never started reporting yet — give it a baseline first
         return (time.monotonic() - last) > window
 
+    def _record_serve_presence(self) -> None:
+        """Heartbeat this box into the shared workers table.
+
+        Registering under a reserved id (rather than a new table) reuses the
+        DB-clock ``last_seen`` the workers already get, so a worker deciding
+        "the server is down" never depends on two machines' clocks agreeing.
+        The id is filtered out of the Workers panel."""
+        self.store.record_worker(
+            presence.serve_id(self._hostname), get_version(), None, "serving",
+            self._run_token)
+
+    def _check_worker_presence(self) -> None:
+        """Notify when a worker that was online stops reporting (and when it
+        returns). Only the rip box does this for workers; each worker watches the
+        rip box in turn."""
+        ages = {w.worker_id: w.seconds_since_seen
+                for w in self._workers_cache if not presence.is_serve(w.worker_id)}
+        gone, back = self._worker_watch.update(ages)
+        window = presence.describe(self.settings.cluster.offline_alert_seconds)
+        for worker_id in gone:
+            self._notify(f"🔌 Worker offline: {worker_id}",
+                         f"No heartbeat for over {window}. Encoding stops until it's back.",
+                         priority="high")
+        for worker_id in back:
+            self._notify(f"✅ Worker back: {worker_id}", "It's reporting in again.")
+
     async def _refresh_from_store(self) -> None:
         while not self.closing:
             # Run the (blocking, synchronous psycopg) reads in a thread so a slow
@@ -507,7 +542,11 @@ class JobManager:
             # off-loop execution is safe. This loop only runs with a durable store.
             tick_ok = True
             try:
+                # Prove this box is alive in the same table, so the workers can
+                # tell when the rip box drops — it can't report that itself.
+                await asyncio.to_thread(self._record_serve_presence)
                 self._workers_cache = await asyncio.to_thread(self.store.list_workers)
+                self._check_worker_presence()
             except Exception as exc:
                 tick_ok = False
                 self._log_store_error("list_workers", exc)
@@ -775,12 +814,14 @@ class JobManager:
                     "preview": None, "log": [],
                 })
         stale = self.settings.cluster.stale_after_seconds
+        # The rip box heartbeats into the same table (so workers can see IT drop);
+        # it isn't an encode worker, so keep it out of the Workers panel.
         workers = [
             {"id": w.worker_id, "version": w.version, "job_id": w.job_id,
              "stage": w.stage, "age": round(w.seconds_since_seen),
              "stale": w.seconds_since_seen > stale,
              "uptime": round(w.uptime_seconds)}
-            for w in self._workers_cache
+            for w in self._workers_cache if not presence.is_serve(w.worker_id)
         ]
         return {
             "jobs": jobs,

@@ -14,7 +14,7 @@ import json
 import socket
 import uuid
 
-from . import handbrake_store
+from . import handbrake_store, presence
 from .config import Settings, load_settings
 from .persistence import (
     JobRecord,
@@ -128,6 +128,11 @@ class WorkerRunner:
         # A per-process id so the store can tell a restart of THIS worker apart
         # from an ordinary heartbeat and reset its uptime clock accordingly.
         self._run_token = uuid.uuid4().hex
+        # Watch the rip box: an offline server can't tell you it's offline, so the
+        # workers do it. Every online worker alerts, which is deliberate — one of
+        # them may be offline too, and the whole point is that you find out.
+        self._serve_watch = presence.PresenceWatch(
+            threshold_seconds=settings.cluster.offline_alert_seconds)
 
     def request_stop(self) -> None:
         """Drain: finish the job currently encoding (if any), claim no more, exit."""
@@ -197,6 +202,7 @@ class WorkerRunner:
             if rec is None:
                 self._apply_worker_settings()  # pick up a central config change while idle
                 self._register(None, "idle")   # heartbeat presence while idle
+                self._check_serve_presence()   # is the rip box still alive?
                 await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
                 continue
             if not self._fully_ripped(rec):
@@ -272,6 +278,41 @@ class WorkerRunner:
         if overlay:
             summary = ", ".join(f"{s}.{k}={v}" for s, kv in overlay.items() for k, v in kv.items())
             print(f"Applied per-worker settings: {summary}", flush=True)
+
+    def _check_serve_presence(self) -> None:
+        """Notify if the rip box stops heartbeating (and when it returns).
+
+        The server can't report its own outage, so the workers watch it. Failing
+        to read the store is NOT treated as the server being down — that's this
+        worker's own connectivity, and guessing would cry wolf on every blip."""
+        if self.settings.cluster.offline_alert_seconds <= 0:
+            return
+        try:
+            workers = self.store.list_workers()
+        except Exception:
+            return
+        ages = {w.worker_id: w.seconds_since_seen
+                for w in workers if presence.is_serve(w.worker_id)}
+        gone, back = self._serve_watch.update(ages)
+        window = presence.describe(self.settings.cluster.offline_alert_seconds)
+        for serve in gone:
+            host = serve.split(":", 1)[1] or "rip box"
+            self._notify(f"🔌 Server offline: {host}",
+                         f"No heartbeat for over {window}. Ripping has stopped; "
+                         "queued encodes keep running.", priority="high")
+        for serve in back:
+            host = serve.split(":", 1)[1] or "rip box"
+            self._notify(f"✅ Server back: {host}", "The rip box is reporting in again.")
+
+    def _notify(self, title: str, message: str, priority: str | None = None) -> None:
+        """Fire-and-forget push. Best-effort: an alert must never break the loop."""
+        if not self.settings.notify_url:
+            return
+        from .services.notify import notify
+
+        with contextlib.suppress(Exception):
+            asyncio.get_running_loop().create_task(
+                notify(self.settings.notify_url, title, message, priority))
 
     def _register(self, job_id, stage: str) -> None:
         """Report this worker's presence to the store (for the UI's panel)."""

@@ -250,6 +250,11 @@ class ClusterSettings:
     # grain, so restarting `serve` never kills in-flight extraction/OCR/encode.
     # Requires use_workers. Best paired with local_encode_max_height=0.
     worker_does_subs: bool = False
+    # Push a notification when a box that was online stops reporting for this
+    # long — the rip box watches the workers, and each worker watches the rip box
+    # (an offline server can't report on itself). 0 = off. Needs a shared
+    # database; a single-box setup has nothing to watch it.
+    offline_alert_seconds: int = 300
 
 
 @dataclass
@@ -494,6 +499,7 @@ def load_settings(config_dir: Path | None = None, extra_overlay: dict | None = N
                       cluster_cfg.get("local_encode_max_height")) or 0),
         worker_does_subs=_bool_override(
             "BLURAYRIPPER_WORKER_DOES_SUBS", cluster_cfg.get("worker_does_subs"), False),
+        offline_alert_seconds=int(cluster_cfg.get("offline_alert_seconds", 300)),
     )
 
     scan_cfg = data.get("scan", {})

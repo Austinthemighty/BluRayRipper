@@ -132,6 +132,15 @@ blurayripper worker            # Ctrl+C drains; 'u'/Ctrl+U drains + pulls + rest
 Optional **push notifications** (ntfy-style URL in Settings) fire for: needs-input
 gates, a disc finishing its rip, and an encode completing.
 
+**Offline alerts** — when a box that was online stops reporting for
+`offline_alert_seconds` (default 5 min), you get a push, and another when it comes
+back. The rip box watches the workers; each worker watches the rip box, because a
+server that's down can't report itself. Set it to 0 to switch off. Needs a shared
+database and a Notify URL. Two caveats worth knowing: with several workers online
+you'll get one "server offline" push per worker, and if *everything* is off (a
+power cut) nothing is left to send anything — that needs an external uptime
+monitor pinging the web UI.
+
 ## Running it on boot
 
 Both roles — the rip box (`serve`) and each `worker` — can start automatically and
