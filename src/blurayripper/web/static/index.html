@@ -969,6 +969,28 @@ function buildMapping(card, j){
   doSearch();  // auto-search on the pre-filled disc name (one match auto-confirms)
 }
 
+// Rename edits an EXISTING naming assignment. A job that never got one (an
+// auto-identify disc that found no match, or one that failed before naming) has
+// nothing to rename — it needs its naming SET, so offer the mapping form instead.
+// Both the queued and the resting card show this pair; only the Rename tooltip
+// differs, since a queued job hasn't placed any files yet.
+function namingButtonHtml(j, renameTip){
+  return j.has_naming
+    ? `<button class="sec" data-rename title="${renameTip}">✎ Rename</button>`
+    : `<button class="sec" data-remap title="This job was never named (auto-identify found no match, or it failed before naming). Re-open the naming form to set the show/movie and episodes — the finished rip is kept.">✎ Set naming</button>`;
+}
+function wireNamingButton(body, j){
+  const rn = body.querySelector('[data-rename]');
+  if (rn) rn.onclick = () => openRename(j);
+  const rm = body.querySelector('[data-remap]');
+  if (rm) rm.onclick = async () => {
+    const msg = body.querySelector('[data-msg]');
+    if (msg) msg.textContent = 'Re-opening the naming form…';
+    try { await api('POST','/api/jobs/'+j.id+'/remap'); }
+    catch(e){ if (msg) msg.textContent = '⚠ '+e.message; }
+  };
+}
+
 function buildEdit(card, j){
   const body = card.querySelector('[data-body]');
   body.innerHTML = `<div class="muted" style="font-size:12px;">Queued — adjust before a worker starts encoding:</div>
@@ -979,21 +1001,11 @@ function buildEdit(card, j){
       <button class="sec" data-preview>Preview grain</button>
       <button class="sec" data-redosubs title="Re-OCR subtitles from this job's staged/cached subs (no re-rip, no re-encode).">Redo subtitles</button>
       <button class="sec" data-bump title="Move this job to the front of the encode queue — it becomes the next one encoded. Won't interrupt a job that's already encoding.">⬆ Encode next</button>
-      ${j.has_naming
-        ? `<button class="sec" data-rename title="Fix the title/year before it encodes — e.g. a remake mapped to the original (or vice versa). Episode numbers are kept.">✎ Rename</button>`
-        : `<button class="sec" data-remap title="This job was never named (auto-identify found no match, or it failed before naming). Re-open the naming form to set the show/movie and episodes — the finished rip is kept.">✎ Set naming</button>`}
+      ${namingButtonHtml(j, "Fix the title/year before it encodes — e.g. a remake mapped to the original (or vice versa). Episode numbers are kept.")}
       <span data-msg class="muted"></span></div>
     <div data-pv></div>`;
   wireEdition(body);
-  const rnEdit = body.querySelector('[data-rename]');
-  if (rnEdit) rnEdit.onclick = () => openRename(j);
-  const rmEdit = body.querySelector('[data-remap]');
-  if (rmEdit) rmEdit.onclick = async () => {
-    const msg = body.querySelector('[data-msg]');
-    msg.textContent = 'Re-opening the naming form…';
-    try { await api('POST','/api/jobs/'+j.id+'/remap'); }
-    catch(e){ msg.textContent = '⚠ '+e.message; }
-  };
+  wireNamingButton(body, j);
   body.querySelector('[data-bump]').onclick = async () => {
     const msg = body.querySelector('[data-msg]');
     msg.textContent = 'Moving to front…';
@@ -1061,12 +1073,7 @@ function buildResting(card, j){
   // done/failed jobs: offer a subtitle re-OCR (staged rip or cached subs).
   const body = card.querySelector('[data-body]');
   let html = `<div class="row"><button class="sec" data-redosubs title="Re-OCR subtitles from this job's staged rip or cached subs (no re-encode).">Redo subtitles</button>`;
-  // Rename edits an existing naming assignment. A job that never got one (an
-  // auto-identify disc that didn't match, or a failure before naming) has nothing
-  // to rename — it needs its naming SET, so offer the mapping form instead.
-  html += j.has_naming
-    ? `<button class="sec" data-rename title="Fix the title/year — e.g. a remake mapped to the original (or vice versa). Episode numbers are kept; placed files are renamed.">✎ Rename</button>`
-    : `<button class="sec" data-remap title="This job was never named (auto-identify found no match, or it failed before naming). Re-open the naming form to set the show/movie and episodes — the finished rip is kept.">✎ Set naming</button>`;
+  html += namingButtonHtml(j, "Fix the title/year — e.g. a remake mapped to the original (or vice versa). Episode numbers are kept; placed files are renamed.");
   html += `<span data-msg class="muted"></span></div>`;
   // Failed disc job: let the user move the disc to another drive and rip from it
   // (a different drive can often read a sector the original couldn't).
@@ -1086,16 +1093,7 @@ function buildResting(card, j){
     try { await api('POST','/api/jobs/'+j.id+'/redo-subs'); }
     catch(e){ msg.textContent = '⚠ '+e.message; }
   };
-  const rn = body.querySelector('[data-rename]');
-  if (rn) rn.onclick = () => openRename(j);
-  const rm = body.querySelector('[data-remap]');
-  if (rm) rm.onclick = async () => {
-    const msg = body.querySelector('[data-msg]');
-    msg.textContent = 'Re-opening the naming form…';
-    // Sends the job back to the naming gate; the card rebuilds into that form.
-    try { await api('POST','/api/jobs/'+j.id+'/remap'); }
-    catch(e){ msg.textContent = '⚠ '+e.message; }
-  };
+  wireNamingButton(body, j);   // Rename, or "Set naming" when it was never named
   const sel = body.querySelector('[data-drivesel]');
   if (sel) {
     fetch('/api/drives').then(r=>r.json()).then(drives=>{

@@ -18,6 +18,7 @@ Endpoints
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from pathlib import Path
 
@@ -237,9 +238,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc))
         return {"ids": ids}
 
-    def _gate(fn):
+    @contextlib.contextmanager
+    def _job_errors():
+        """Map the manager's exceptions onto HTTP for a job endpoint: an unknown
+        job id is 404, a rejected request (wrong state, bad input) is 400.
+
+        A context manager rather than a callback, so the same wrapper works for
+        `await`ing endpoints and for ones that need the return value — those had
+        to hand-roll this try/except before.
+        """
         try:
-            fn()
+            yield
         except KeyError:
             raise HTTPException(status_code=404, detail="Job not found.")
         except ValueError as exc:
@@ -247,7 +256,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/titles")
     async def submit_titles(job_id: int, body: SetTitles):
-        _gate(lambda: manager.set_titles(job_id, body.title_ids))
+        with _job_errors():
+            manager.set_titles(job_id, body.title_ids)
         return {"ok": True}
 
     @app.post("/api/jobs/{job_id}/mapping")
@@ -268,39 +278,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ]
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
-        _gate(lambda: manager.set_mapping(job_id, assignments, body.grain_mode, body.tune_grain))
+        with _job_errors():
+            manager.set_mapping(job_id, assignments, body.grain_mode, body.tune_grain)
         return {"ok": True}
 
     @app.post("/api/jobs/{job_id}/grain")
     async def submit_grain(job_id: int, body: SetGrain):
-        _gate(lambda: manager.set_grain(job_id, body.tune_grain))
+        with _job_errors():
+            manager.set_grain(job_id, body.tune_grain)
         return {"ok": True}
 
     @app.post("/api/jobs/{job_id}/auto-identify")
     async def auto_identify(job_id: int, body: AutoIdentify):
-        _gate(lambda: manager.set_auto_identify(
-            job_id, body.show_title, body.show_year, body.show_tmdb_id, body.season,
-            body.episodes, body.title_ids, body.grain_mode, body.tune_grain))
+        with _job_errors():
+            manager.set_auto_identify(
+                job_id, body.show_title, body.show_year, body.show_tmdb_id, body.season,
+                body.episodes, body.title_ids, body.grain_mode, body.tune_grain)
         return {"ok": True}
 
     @app.post("/api/jobs/{job_id}/confirm-match")
     async def confirm_match(job_id: int, body: ConfirmMatch):
-        _gate(lambda: manager.confirm_match(job_id, {int(k): v for k, v in body.mapping.items()}))
+        with _job_errors():
+            manager.confirm_match(job_id, {int(k): v for k, v in body.mapping.items()})
         return {"ok": True}
 
     @app.post("/api/jobs/{job_id}/retry")
     async def retry_job(job_id: int):
-        _gate(lambda: manager.retry(job_id))
+        with _job_errors():
+            manager.retry(job_id)
         return {"ok": True}
 
     @app.post("/api/jobs/{job_id}/bump")
     async def bump_job(job_id: int):
-        _gate(lambda: manager.bump_job(job_id))
+        with _job_errors():
+            manager.bump_job(job_id)
         return {"ok": True}
 
     @app.post("/api/jobs/{job_id}/requeue")
     async def requeue_job(job_id: int):
-        _gate(lambda: manager.requeue(job_id))
+        with _job_errors():
+            manager.requeue(job_id)
         return {"ok": True}
 
     @app.post("/api/jobs/requeue-stalled")
@@ -309,31 +326,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/edit")
     async def edit_job(job_id: int, body: EditJob):
-        _gate(lambda: manager.edit_job(job_id, body.grain_mode, body.tune_grain, body.edition))
+        with _job_errors():
+            manager.edit_job(job_id, body.grain_mode, body.tune_grain, body.edition)
         return {"ok": True}
 
     @app.post("/api/jobs/{job_id}/rename")
     async def rename_job(job_id: int, body: dict = Body(...)):
         year = body.get("year")
-        _gate(lambda: manager.rename_job(job_id, body.get("title", ""),
-                                         int(year) if year not in (None, "") else None))
+        with _job_errors():
+            manager.rename_job(job_id, body.get("title", ""),
+                               int(year) if year not in (None, "") else None)
         return {"ok": True}
 
     @app.post("/api/jobs/{job_id}/remap")
     async def remap_job(job_id: int):
         # For a job that never got a naming assignment (auto-identify that didn't
         # match, or a failure before naming) — rename has nothing to edit.
-        _gate(lambda: manager.remap(job_id))
+        with _job_errors():
+            manager.remap(job_id)
         return {"ok": True}
 
     @app.post("/api/jobs/{job_id}/change-source")
     async def change_source(job_id: int, body: ChangeSource):
-        try:
+        with _job_errors():
             manager.change_source(job_id, body.source)
-        except KeyError:
-            raise HTTPException(status_code=404, detail="Job not found.")
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
         return {"ok": True}
 
     @app.post("/api/jobs/redo-subs-all")
@@ -342,17 +358,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/redo-subs")
     async def redo_subs(job_id: int):
-        _gate(lambda: manager.redo_subtitles(job_id))
+        with _job_errors():
+            manager.redo_subtitles(job_id)
         return {"ok": True}
 
     @app.post("/api/jobs/{job_id}/preview-grain")
     async def preview_grain(job_id: int):
-        try:
+        # The context manager wraps an await here — the old callback form couldn't.
+        with _job_errors():
             await manager.generate_preview(job_id)
-        except KeyError:
-            raise HTTPException(status_code=404, detail="Job not found.")
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
         return {"ok": True}
 
     @app.get("/api/jobs/{job_id}/preview/{which}")

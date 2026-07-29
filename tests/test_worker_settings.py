@@ -165,3 +165,31 @@ def test_boxset_plan_reports_bad_csv(tmp_path):
     assert r["errors"] and any("disc_label" in e for e in r["errors"])
     assert r["rows"] == []
     assert c.post("/api/boxsets", json={"csv": 5}).status_code == 400
+
+
+def test_job_endpoint_errors_map_to_http(tmp_path):
+    """Every job endpoint funnels its errors through one helper: an unknown job id
+    is 404, a rejected request is 400 (with the manager's reason). Covers both a
+    sync endpoint and an awaiting one, since the helper wraps both."""
+    from blurayripper.config import load_settings
+    from blurayripper.pipeline import Job, JobState
+    from blurayripper.web.app import create_app
+    from blurayripper.web.manager import WebJob
+    from fastapi.testclient import TestClient
+
+    (tmp_path / "settings.toml").write_text("", encoding="utf-8")
+    app = create_app(load_settings(tmp_path))
+    c = TestClient(app)
+
+    # Unknown job -> 404, sync and async paths alike.
+    r = c.post("/api/jobs/999/retry")
+    assert r.status_code == 404 and r.json()["detail"] == "Job not found."
+    assert c.post("/api/jobs/999/preview-grain").status_code == 404
+
+    # Known job in the wrong state -> 400, carrying the manager's explanation.
+    wj = WebJob(id=5, source="disc:0", state=JobState.READY)
+    wj._pipeline_job = Job(source="disc:0")
+    wj._pipeline_job.state = JobState.READY
+    app.state.manager.jobs[5] = wj
+    r = c.post("/api/jobs/5/retry")          # only a FAILED job can be retried
+    assert r.status_code == 400 and "not failed" in r.json()["detail"]
