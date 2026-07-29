@@ -676,11 +676,9 @@ class JobManager:
         job.state = JobState.READY
         reporter.on_event(f"Auto-rip: matched “{c.title} ({c.year})” — ripping automatically. "
                           "(Use Rename if it's wrong.)")
-        self._persist(wj)
-        self.bus.publish()
         self._notify(f"⏩ Auto-ripping: {c.title} ({c.year})",
                      f"Job #{wj.id} matched automatically and started ripping.")
-        wj._task = self._spawn(self._run_job(wj))
+        self._start_job(wj)
         return True
 
     async def _try_planned_tv(self, wj: WebJob, job, reporter) -> bool:
@@ -720,11 +718,9 @@ class JobManager:
             f"Box-set plan: {row.show} S{result.season:02d}{span} from "
             f"{len(result.assignments)} title(s) — ripping automatically. "
             "(Use Rename if the show is wrong.)")
-        self._persist(wj)
-        self.bus.publish()
         self._notify(f"⏩ Auto-ripping: {row.show} S{result.season:02d}{span}",
                      f"Job #{wj.id} matched the box-set plan and started ripping.")
-        wj._task = self._spawn(self._run_job(wj))
+        self._start_job(wj)
         return True
 
     async def _fill_episode_titles(self, assignments, row, season: int | None) -> int | None:
@@ -963,9 +959,7 @@ class JobManager:
         wj.grain_mode = grain_mode
         wj.tune_grain = tune_grain
         wj.state = JobState.READY
-        self._persist(wj)
-        self.bus.publish()
-        wj._task = self._spawn(self._run_job(wj))
+        self._start_job(wj)
 
     def rename_job(self, job_id: int, title: str, year: int | None) -> None:
         """Fix a job's identity — a movie OR a show whose title/year is wrong (e.g.
@@ -1074,9 +1068,7 @@ class JobManager:
         # reporting "failed" and the retry looks like it did nothing.
         wj._pipeline_job.state = JobState.READY
         wj.log.append(stamp_log("Retrying…"))
-        self._persist(wj)
-        self.bus.publish()
-        wj._task = self._spawn(self._run_job(wj))
+        self._start_job(wj)
 
     def edit_job(self, job_id: int, grain_mode: str | None = None,
                  tune_grain: bool | None = None, edition: str | None = None) -> None:
@@ -1129,9 +1121,7 @@ class JobManager:
         wj.assignments = {}
         wj.grain_mode, wj.tune_grain = grain_mode, tune_grain
         wj.state = JobState.READY
-        self._persist(wj)
-        wj._task = self._spawn(self._run_job(wj))
-        self.bus.publish()
+        self._start_job(wj)
 
     def confirm_match(self, job_id: int, mapping: dict[int, int]) -> None:
         """Resolve an AWAITING_MATCH job: ``mapping`` is title_id -> episode for
@@ -1149,9 +1139,7 @@ class JobManager:
         wj.selected_title_ids = list(mapping.keys())
         wj.match_candidates = []
         wj.state = JobState.READY
-        self._persist(wj)
-        wj._task = self._spawn(self._run_job(wj))
-        self.bus.publish()
+        self._start_job(wj)
 
     async def _auto_identify(self, wj: WebJob, reporter) -> bool:
         """Rip + OCR the selected titles, fetch references, and match. Sets
@@ -1342,9 +1330,7 @@ class JobManager:
                 wj.selected_title_ids = job.selected_title_ids
                 wj.state = JobState.READY
                 job.state = JobState.READY  # sync off SCANNING (see below)
-                self._persist(wj)
-                self.bus.publish()
-                wj._task = self._spawn(self._run_job(wj))
+                self._start_job(wj)
             else:
                 # A box-set plan row naming this disc rips it hands-off — the CSV
                 # already said what it is, so there's nothing to confirm.
@@ -1634,6 +1620,17 @@ class JobManager:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
+
+    def _start_job(self, wj: WebJob) -> None:
+        """Checkpoint the job's new state, push it to the UI, and run it.
+
+        The tail every "this job is now go" path shares — the caller has already
+        set the state and any assignments. Keeping it in one place also keeps the
+        order consistent (persist before publish, so a client that reacts to the
+        tick can't read state the store hasn't got yet)."""
+        self._persist(wj)
+        self.bus.publish()
+        wj._task = self._spawn(self._run_job(wj))
 
     def _notify(self, title: str, message: str, priority: str | None = None) -> None:
         """Fire-and-forget push (if a notify_url is configured)."""

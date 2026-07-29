@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Protocol
+from typing import Iterator, Protocol
 
 from .config import Settings
 from .models import DiscInfo, EpisodeAssignment, MediaKind
@@ -234,10 +234,7 @@ class Pipeline:
         await self._place_tmdb_art(job, report)
         # 1) Rip per title (sequential — one drive).
         todo: list[tuple[int, EpisodeAssignment, Path, Path]] = []
-        for title_id in job.selected_title_ids:
-            assignment = job.assignments.get(title_id)
-            if assignment is None:
-                continue
+        for title_id, assignment in _assigned_titles(job):
             cp = job.checkpoints.setdefault(title_id, {})
             if cp.get("placed") and self._video_path_for(assignment).exists():
                 continue
@@ -428,10 +425,7 @@ class Pipeline:
         """Deferred subtitle work (extract + OCR + place) done on the worker from
         the already-ripped files, for the worker_does_subs mode."""
         todo: list[tuple[int, EpisodeAssignment, Path, Path]] = []
-        for title_id in job.selected_title_ids:
-            assignment = job.assignments.get(title_id)
-            if assignment is None:
-                continue
+        for title_id, assignment in _assigned_titles(job):
             cp = job.checkpoints.setdefault(title_id, {})
             if cp.get("placed") and self._video_path_for(assignment).exists():
                 continue
@@ -530,10 +524,7 @@ class Pipeline:
         Titles with none are skipped (those need a source MKV via ``resubtitle``)."""
         placed: list[Path] = []
         job.state = JobState.OCR_SUBS
-        for title_id in job.selected_title_ids:
-            assignment = job.assignments.get(title_id)
-            if assignment is None:
-                continue
+        for title_id, assignment in _assigned_titles(job):
             video_dest = self._video_path_for(assignment)
             cp = job.checkpoints.get(title_id, {})
             sub_dir = staging_root / "sub" / f"t{title_id:03d}"
@@ -1305,6 +1296,18 @@ def _failure_hint(exc: Exception) -> str | None:
                 "more RAM. Lowering [queue] encode_capacity / [subtitles] "
                 "ocr_concurrency also reduces peak memory.")
     return None
+
+
+def _assigned_titles(job: "Job") -> Iterator[tuple[int, EpisodeAssignment]]:
+    """The selected titles that have a naming assignment, in selection order.
+
+    A title without one can't be named or placed, so every stage skips it. Note
+    the two loops that WARN about a missing assignment don't use this — they
+    deliberately tell the user rather than skipping quietly."""
+    for title_id in job.selected_title_ids:
+        assignment = job.assignments.get(title_id)
+        if assignment is not None:
+            yield title_id, assignment
 
 
 def _checkpoint(report) -> None:
