@@ -81,3 +81,34 @@ def test_find_git_locates_github_desktop_bundle(monkeypatch, tmp_path):
     monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path / "nope2"))
     got = _find_git()
     assert got is not None and got.endswith("git.exe") and "app-3.4.3" in got
+
+
+def test_stop_handlers_cover_unattended_shutdown():
+    """A worker running as a scheduled task/service must DRAIN when something
+    tells it to stop — not just on an interactive Ctrl+C — or an hours-long
+    encode is lost every time the box shuts down."""
+    import signal
+
+    from blurayripper.cli import _STOP_SIGNALS, _install_stop_handlers
+
+    saved = {n: signal.getsignal(getattr(signal, n))
+             for n in _STOP_SIGNALS if hasattr(signal, n)}
+    calls = []
+    try:
+        installed = _install_stop_handlers(lambda signum, frame: calls.append(signum))
+
+        assert "SIGINT" in installed              # interactive Ctrl+C
+        # The supervisor signal for this platform is covered: SIGTERM on POSIX,
+        # SIGBREAK (Ctrl+Break) on Windows.
+        assert ("SIGTERM" in installed) or ("SIGBREAK" in installed)
+        for name in installed:
+            assert signal.getsignal(getattr(signal, name)) is not None
+        # Only signals this platform actually has get installed.
+        assert all(hasattr(signal, n) for n in installed)
+
+        # The handler really is wired up — raising the signal drains, not dies.
+        signal.raise_signal(signal.SIGINT)
+        assert calls == [int(signal.SIGINT)]
+    finally:
+        for name, prev in saved.items():
+            signal.signal(getattr(signal, name), prev)

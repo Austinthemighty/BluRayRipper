@@ -806,6 +806,35 @@ def _find_git() -> str | None:
     return next((str(c) for c in candidates if c.exists()), None)
 
 
+# Every "please stop" signal a worker can receive. Ctrl+C is the interactive one;
+# SIGTERM (POSIX) and SIGBREAK (Windows Ctrl+Break / GenerateConsoleCtrlEvent) are
+# what a supervisor sends. Not all exist on every platform.
+_STOP_SIGNALS = ("SIGINT", "SIGTERM", "SIGBREAK")
+
+
+def _install_stop_handlers(handler) -> list[str]:
+    """Route every available stop signal to ``handler``, and report which ones
+    were hooked.
+
+    A worker run unattended (a scheduled task, a service wrapper) must DRAIN on
+    shutdown — finish and place the current encode — rather than lose an
+    hours-long job. Handling only SIGINT would mean an unattended stop always
+    aborts. Returns the signal names actually installed, so a caller can tell
+    what coverage it has."""
+    import signal
+
+    installed: list[str] = []
+    for name in _STOP_SIGNALS:
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue  # not on this platform
+        # Signals are only settable on the main thread; ignore it if we're not on one.
+        with contextlib.suppress(ValueError, OSError, RuntimeError):
+            signal.signal(sig, handler)
+            installed.append(name)
+    return installed
+
+
 def _pull_and_restart(console) -> None:
     """git pull --ff-only in the repo, then re-exec the worker with the same args.
     Restarts on the current code even if the pull fails, so the worker stays up."""
@@ -883,8 +912,7 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
 
     keys = _KeyPress(_on_key)
 
-    with contextlib.suppress(ValueError):  # signal only settable on the main thread
-        signal.signal(signal.SIGINT, _drain)
+    _install_stop_handlers(_drain)
     keys.start()
     try:
         await runner.run()
@@ -900,6 +928,10 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
     keys.stop()
     if runner.update_requested:  # 'u' key or a server "update all workers" signal
         _pull_and_restart(console)  # git pull + os.execv — normally never returns
+        # Only reached if the re-exec failed. Exit non-zero so a supervising
+        # launcher (scripts/run-worker-windows.bat) brings the worker back up
+        # instead of reading this as an intentional drain and stopping.
+        return 75
     return 0
 
 
