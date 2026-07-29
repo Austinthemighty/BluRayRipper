@@ -1394,8 +1394,46 @@ def test_remap_refuses_a_running_job(manager):
     wj._pipeline_job = Job(source="disc:0")
     wj._pipeline_job.state = JobState.ENCODING
     manager.jobs[249] = wj
-    with pytest.raises(ValueError, match="finished or failed"):
+    with pytest.raises(ValueError, match="being worked on"):
         manager.remap(249)
+
+
+def test_remap_works_on_a_ready_job_waiting_for_a_worker(manager):
+    """The case that actually bites: an auto-identify disc finishes ripping and
+    sits at READY with no assignments. It isn't done or failed, so it must still
+    be nameable — and moving it off READY stops a worker claiming it meanwhile."""
+    from blurayripper.pipeline import Job
+
+    wj = WebJob(id=247, source="disc:1", state=JobState.READY)
+    wj.disc = _fake_disc()
+    wj._pipeline_job = Job(source="disc:1")
+    wj._pipeline_job.state = JobState.READY
+    wj.selected_title_ids = [0, 1]
+    wj.auto_identify = True
+    manager.jobs[247] = wj
+
+    with pytest.raises(ValueError, match="no naming assignment"):
+        manager.rename_job(247, "Hawaii Five-O", 1968)
+
+    manager.remap(247)
+    assert wj.state is JobState.AWAITING_MAPPING      # off READY -> unclaimable
+    assert wj._pipeline_job.state is JobState.AWAITING_MAPPING
+    assert wj.auto_identify is False
+
+
+def test_has_naming_flag_drives_the_right_button(manager):
+    """The UI picks Rename vs 'Set naming' from this flag — if it were wrong, the
+    dead Rename button comes back."""
+    from blurayripper.pipeline import Job
+
+    wj = WebJob(id=246, source="disc:1", state=JobState.READY)
+    wj.disc = _fake_disc()
+    wj._pipeline_job = Job(source="disc:1")
+    manager.jobs[246] = wj
+    assert manager._job_dict(wj)["has_naming"] is False
+
+    wj.assignments = {0: EpisodeAssignment(0, MediaKind.TV, "House", season=1, episode=1)}
+    assert manager._job_dict(wj)["has_naming"] is True
 
 
 def _plan(manager, monkeypatch, tmp_path, csv_text):

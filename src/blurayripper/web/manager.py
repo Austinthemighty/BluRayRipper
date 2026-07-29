@@ -10,6 +10,7 @@ subtitle -> place pipeline.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import json
 import re
@@ -1026,14 +1027,22 @@ class JobManager:
         if wj is None:
             raise ValueError(f"No job {job_id}.")
         live = self._live_state(wj)
-        if live not in (JobState.DONE, JobState.FAILED):
-            raise ValueError("Only a finished or failed job can be re-named — "
-                             "adjust a running one from its own controls.")
+        # READY too: a ripped job waiting for an encode worker is the common case
+        # for an auto-identify disc that never matched. Moving it off READY also
+        # makes it unclaimable, so it can't start encoding under the old naming.
+        if live not in (JobState.DONE, JobState.FAILED, JobState.READY):
+            raise ValueError("This job is being worked on right now — wait for it to "
+                             "finish or stop, then set the naming.")
         if wj._pipeline_job is None or wj.disc is None:
             raise ValueError("This job has no scanned disc to re-map.")
+        # A live local task means it's still prepping (rip/subs) on this box; only a
+        # READY job that's merely QUEUED for a worker is safe to re-open.
         task = getattr(wj, "_task", None)
         if task is not None and not task.done():
             raise ValueError("Job is still running — wait for it to stop.")
+        # Drop any stale worker claim so the job can't be picked up mid-rename.
+        with contextlib.suppress(Exception):
+            self.store.release(job_id)
         # Auto-identify already ran (and didn't produce a mapping); re-running it
         # would just park at the same match gate, so hand naming back to the user.
         wj.auto_identify = False

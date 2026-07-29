@@ -979,10 +979,21 @@ function buildEdit(card, j){
       <button class="sec" data-preview>Preview grain</button>
       <button class="sec" data-redosubs title="Re-OCR subtitles from this job's staged/cached subs (no re-rip, no re-encode).">Redo subtitles</button>
       <button class="sec" data-bump title="Move this job to the front of the encode queue — it becomes the next one encoded. Won't interrupt a job that's already encoding.">⬆ Encode next</button>
-      <button class="sec" data-rename title="Fix the title/year before it encodes — e.g. a remake mapped to the original (or vice versa). Episode numbers are kept.">✎ Rename</button><span data-msg class="muted"></span></div>
+      ${j.has_naming
+        ? `<button class="sec" data-rename title="Fix the title/year before it encodes — e.g. a remake mapped to the original (or vice versa). Episode numbers are kept.">✎ Rename</button>`
+        : `<button class="sec" data-remap title="This job was never named (auto-identify found no match, or it failed before naming). Re-open the naming form to set the show/movie and episodes — the finished rip is kept.">✎ Set naming</button>`}
+      <span data-msg class="muted"></span></div>
     <div data-pv></div>`;
   wireEdition(body);
-  body.querySelector('[data-rename]').onclick = () => openRename(j);
+  const rnEdit = body.querySelector('[data-rename]');
+  if (rnEdit) rnEdit.onclick = () => openRename(j);
+  const rmEdit = body.querySelector('[data-remap]');
+  if (rmEdit) rmEdit.onclick = async () => {
+    const msg = body.querySelector('[data-msg]');
+    msg.textContent = 'Re-opening the naming form…';
+    try { await api('POST','/api/jobs/'+j.id+'/remap'); }
+    catch(e){ msg.textContent = '⚠ '+e.message; }
+  };
   body.querySelector('[data-bump]').onclick = async () => {
     const msg = body.querySelector('[data-msg]');
     msg.textContent = 'Moving to front…';
