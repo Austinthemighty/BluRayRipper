@@ -124,21 +124,6 @@ blurayripper worker            # Ctrl+C drains; 'u'/Ctrl+U drains + pulls + rest
 
 - **Workers panel** shows each worker's version, current job, and uptime.
   **↻ Update all** drains, `git pull`s, and restarts every worker.
-- **Start a worker automatically** (Windows) — run it once:
-
-  ```powershell
-  powershell -ExecutionPolicy Bypass -File scripts\install-worker-task.ps1
-  ```
-
-  This registers a scheduled task that starts the worker at logon and restarts it
-  if it dies (`-Status` / `-Uninstall` to manage it, `schtasks /run` / `/end` to
-  start and stop). It deliberately runs **in your session, unelevated** rather
-  than as a true Windows Service: staging and output live on a **mapped drive
-  (`Z:`)**, and mapped drives don't exist in session 0 — or under an elevated
-  token — so a real service fails every job with `FileNotFoundError: Z:\`. Use
-  UNC paths (`\\nas\share\…`) instead and a real service becomes possible.
-  Pair it with VM *Start at boot* + Windows auto sign-in (`netplwiz`) to survive a
-  power-off. `scripts\run-serve-windows.bat` does the same job for the rip box.
 - **Per-worker settings**: override tool paths / encode / OCR options for one
   machine in Settings (pick the worker in the scope dropdown).
 - `worker_does_subs` moves subtitle OCR onto the workers; `local_encode_max_height`
@@ -146,6 +131,46 @@ blurayripper worker            # Ctrl+C drains; 'u'/Ctrl+U drains + pulls + rest
 
 Optional **push notifications** (ntfy-style URL in Settings) fire for: needs-input
 gates, a disc finishing its rip, and an encode completing.
+
+## Running it on boot
+
+Both roles — the rip box (`serve`) and each `worker` — can start automatically and
+come back after a crash or a power-off. Run the installer once per machine.
+
+**Linux** — a real systemd service:
+
+```bash
+./scripts/install-service-linux.sh --role serve  --requires-mount /mnt/nas
+./scripts/install-service-linux.sh --role worker --requires-mount /mnt/nas
+```
+
+Defaults to a *user* service plus `loginctl enable-linger`, so it starts at boot
+with nobody logged in, needs no root, and can see a NAS you mount as your user
+(this also suits immutable distros like SteamOS). Pass `--system` (with
+`--user-name`) for a system-wide unit when the NAS is in `/etc/fstab`. Pass
+`--requires-mount` for each NAS mount so systemd waits for it instead of failing
+every job on a reboot race; `--print` shows the unit without installing, and
+`--status` / `--uninstall` manage it. `serve` also needs its user in the `cdrom`
+group. Stopping **drains**: the worker finishes and places the current encode
+first (allow up to `--stop-timeout`, default 1h).
+
+**Windows** — a scheduled task, not a service:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install-task-windows.ps1 -Role serve
+powershell -ExecutionPolicy Bypass -File scripts\install-task-windows.ps1 -Role worker
+```
+
+It starts at logon and restarts on failure (`-Status` / `-Uninstall`, or
+`schtasks /run` / `/end`). It deliberately runs **in your session, unelevated**:
+staging and output live on a **mapped drive (`Z:`)**, and mapped drives don't
+exist in session 0 — nor under an elevated token — so a real Windows Service
+would fail every job with `FileNotFoundError: Z:\`. Switch those paths to UNC
+(`\\nas\share\…`) and a real service becomes possible. Pair it with VM *Start at
+boot* + Windows auto sign-in (`netplwiz`) to survive a power-off.
+
+Headless means no `u` keypress to update — use **↻ Update all** in the web UI, or
+`git pull` then restart the service/task.
 
 ## CLI
 

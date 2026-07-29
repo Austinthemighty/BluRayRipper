@@ -48,6 +48,10 @@ set "RC=%errorlevel%"
 REM Exit codes that mean "you asked for this" -- don't fight the user by
 REM restarting. 0 = drained cleanly, 130 = aborted with a second Ctrl+C,
 REM 2 = missing tool / no database (a config problem a restart can't fix).
+REM (An 'u'/web update re-execs the worker rather than returning here. On Windows
+REM  that re-exec starts a fresh process and this one exits, so the launcher may
+REM  stop while the updated worker keeps running -- it is still up, just no longer
+REM  supervised by this window until the next logon restarts the task.)
 if "%RC%"=="0"   ( echo [%date% %time%] Worker drained and exited cleanly. Stopping. & goto :eof )
 if "%RC%"=="130" ( echo [%date% %time%] Worker aborted by Ctrl+C. Stopping. & goto :eof )
 if "%RC%"=="2"   (
