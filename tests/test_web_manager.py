@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from blurayripper import presence
 from blurayripper.config import load_settings
 from blurayripper.models import DiscInfo, EpisodeAssignment, MediaKind, Title
 from blurayripper.pipeline import Job, JobState, TitleResult
@@ -1512,3 +1513,85 @@ async def test_no_boxset_plan_file_changes_nothing(manager, monkeypatch, tmp_pat
     wj = manager.add_disc("disc:0")
     await _settle()
     assert wj.state is JobState.AWAITING_TITLES
+
+
+def _wi(worker_id, age, **kw):
+    from blurayripper.persistence import WorkerInfo
+    return WorkerInfo(worker_id=worker_id, version="v1", job_id=None,
+                      stage="idle", seconds_since_seen=age, **kw)
+
+
+def test_notifies_when_a_worker_goes_offline_and_returns(manager, monkeypatch):
+    """Encoding silently stops when a worker dies; the point of the alert is that
+    you find out without watching the panel."""
+    manager.settings.cluster.offline_alert_seconds = 300
+    manager._worker_watch = presence.PresenceWatch(threshold_seconds=300)
+    sent = []
+    monkeypatch.setattr(manager, "_notify",
+                        lambda t, m, priority=None: sent.append((t, m, priority)))
+
+    manager._workers_cache = [_wi("SteamMachine", 5)]
+    manager._check_worker_presence()
+    assert sent == []                                    # healthy -> silence
+
+    manager._workers_cache = [_wi("SteamMachine", 400)]
+    manager._check_worker_presence()
+    assert len(sent) == 1
+    assert "Worker offline" in sent[0][0] and "SteamMachine" in sent[0][0]
+    assert sent[0][2] == "high"
+
+    manager._check_worker_presence()                     # still gone
+    assert len(sent) == 1                                # ...but not nagged about
+
+    manager._workers_cache = [_wi("SteamMachine", 2)]
+    manager._check_worker_presence()
+    assert len(sent) == 2 and "Worker back" in sent[1][0]
+
+
+def test_worker_presence_ignores_the_servers_own_heartbeat(manager, monkeypatch):
+    """The rip box shares the workers table; it must not alert about itself."""
+    manager.settings.cluster.offline_alert_seconds = 300
+    manager._worker_watch = presence.PresenceWatch(threshold_seconds=300)
+    sent = []
+    monkeypatch.setattr(manager, "_notify",
+                        lambda t, m, priority=None: sent.append((t, m, priority)))
+
+    manager._workers_cache = [_wi(presence.serve_id("RIPBOX"), 5)]
+    manager._check_worker_presence()
+    manager._workers_cache = [_wi(presence.serve_id("RIPBOX"), 9999)]
+    manager._check_worker_presence()
+    assert sent == []
+
+
+def test_snapshot_hides_the_servers_presence_row(manager):
+    manager._workers_cache = [_wi(presence.serve_id("RIPBOX"), 1), _wi("SteamMachine", 1)]
+    assert [w["id"] for w in manager.snapshot()["workers"]] == ["SteamMachine"]
+
+
+def test_offline_alerts_can_be_switched_off(manager, monkeypatch):
+    manager.settings.cluster.offline_alert_seconds = 0
+    manager._worker_watch = presence.PresenceWatch(threshold_seconds=0)
+    sent = []
+    monkeypatch.setattr(manager, "_notify",
+                        lambda t, m, priority=None: sent.append(t))
+    manager._workers_cache = [_wi("SteamMachine", 5)]
+    manager._check_worker_presence()
+    manager._workers_cache = [_wi("SteamMachine", 99999)]
+    manager._check_worker_presence()
+    assert sent == []
+
+
+def test_server_registers_its_own_presence_under_a_reserved_id(manager):
+    """Workers can only spot the rip box going down if it heartbeats somewhere
+    they can see — the same table, under an id the panel filters out."""
+    calls = []
+    manager.store.record_worker = lambda *a, **k: calls.append(a)
+
+    manager._record_serve_presence()
+
+    assert len(calls) == 1
+    worker_id, version, job_id, stage = calls[0][:4]
+    assert presence.is_serve(worker_id)          # reserved prefix -> hidden in the UI
+    assert manager._hostname in worker_id
+    assert job_id is None and stage == "serving"
+    assert version                                # so the panel/logs show what's running

@@ -103,6 +103,7 @@ SCHEMA: list[tuple[str, list[Field]]] = [
         Field("cluster", "stale_after_seconds", "int", "Stale reclaim (s)", 180, "Reclaim a job for another worker if its worker goes silent this long (crash/restart/power-off)."),
         Field("cluster", "local_encode_max_height", "int", "Local encode max height", 0, "In clustered mode, the rip box encodes a job itself if every title is <= this height (e.g. 1080). 0 = rip box never encodes (workers do all).", env="BLURAYRIPPER_LOCAL_ENCODE_MAX_HEIGHT"),
         Field("cluster", "worker_does_subs", "bool", "Workers do subtitles", False, "Move subtitle extraction + OCR off the rip box onto the workers (so restarting serve never kills that work). Needs Use workers.", env="BLURAYRIPPER_WORKER_DOES_SUBS"),
+        Field("cluster", "offline_alert_seconds", "int", "Offline alert (s)", 300, "Push a notification when a box that was online stops reporting for this long. The rip box watches the workers; each worker watches the rip box (an offline server can't report itself). 0 = off. Needs a shared database and a Notify URL."),
     ]),
     ("Disc", [
         Field("disc", "auto_eject", "bool", "Auto-eject after rip", True, "Eject the disc automatically once its last title finishes ripping, so you know it's safe to swap."),
