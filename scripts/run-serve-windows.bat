@@ -28,6 +28,20 @@ cd /d "%~dp0.."
 echo(
 echo [%date% %time%] Starting: blurayripper serve
 blurayripper serve
-echo [%date% %time%] serve exited (code %errorlevel%). Restarting in 5s... (Ctrl+C to stop)
+set "RC=%errorlevel%"
+
+REM Exit 2 = a config problem (missing tool, bad settings) that a restart can't
+REM fix -- stop and show it instead of spamming the same error every 5s. Every
+REM other code restarts: serve runs under uvicorn, which handles Ctrl+C itself and
+REM exits 0, and the 'u'/web restart re-execs, so 0 does NOT mean "stop serving".
+REM To stop the loop: Ctrl+C, then answer Y to "Terminate batch job?".
+if "%RC%"=="2" (
+  echo [%date% %time%] serve can't start ^(exit 2^) -- fix the error above, then rerun.
+  echo Press any key to close.
+  pause >nul
+  goto :eof
+)
+
+echo [%date% %time%] serve exited (code %RC%). Restarting in 5s... (Ctrl+C to stop)
 timeout /t 5 /nobreak >nul
 goto loop
