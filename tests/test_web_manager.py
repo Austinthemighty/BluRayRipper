@@ -1595,3 +1595,88 @@ def test_server_registers_its_own_presence_under_a_reserved_id(manager):
     assert manager._hostname in worker_id
     assert job_id is None and stage == "serving"
     assert version                                # so the panel/logs show what's running
+
+
+def test_disc_is_not_queued_twice_while_its_scan_is_running(manager, monkeypatch):
+    """Regression: makemkvcon holds the drive during a scan, so the watcher's probe
+    reads that drive as EMPTY. That made auto-open forget the disc, and the
+    half-scanned job has no disc name yet to recognise it by — so the moment the
+    name came back the same disc was queued a second time."""
+    from blurayripper.tools.makemkv import Drive
+
+    added = []
+
+    def fake_add(src):
+        wj = WebJob(id=263 + len(added), source=src, state=JobState.SCANNING)
+        wj.disc = None                      # the scan hasn't produced a disc yet
+        manager.jobs[wj.id] = wj
+        added.append(src)
+        return wj
+    monkeypatch.setattr(manager, "add_disc", fake_add)
+
+    loaded = Drive(index=1, name="ASUS", device="F:", disc_name="HAWAII_FIVE_0_S1_D6")
+    busy = Drive(index=1, name="ASUS", device="F:", disc_name=None)  # busy scanning
+
+    manager._auto_open([loaded])
+    manager._auto_open([busy])
+    manager._auto_open([loaded])
+    manager._auto_open([busy])
+    manager._auto_open([loaded])
+    assert added == ["disc:1"]               # queued exactly once
+
+    # Once the scan finishes, the disc name takes over as the guard.
+    manager.jobs[263].disc = _fake_disc()
+    manager.jobs[263].disc.disc_name = "HAWAII_FIVE_0_S1_D6"
+    manager.jobs[263].state = JobState.RIPPING
+    manager._auto_open([loaded])
+    assert added == ["disc:1"]
+
+
+def test_ejecting_still_lets_the_same_disc_be_reinserted(manager, monkeypatch):
+    """The dedupe must not overshoot: a genuinely removed-and-reinserted disc has
+    to queue again (that's what note_disc_ejected is for)."""
+    from blurayripper.tools.makemkv import Drive
+
+    added = []
+    monkeypatch.setattr(manager, "add_disc", lambda src: added.append(src))
+
+    def loaded():
+        return Drive(index=1, name="ASUS", device="F:", disc_name="WarGames")
+    empty = Drive(index=1, name="ASUS", device="F:", disc_name=None)
+
+    manager._drives_cache = [loaded()]
+    manager._auto_open([loaded()])
+    assert added == ["disc:1"]
+
+    manager.note_disc_ejected(device="F:")   # popped out
+    manager._auto_open([empty])              # drive genuinely empty, no pending scan
+    manager._auto_open([loaded()])           # same disc back in -> scan it again
+    assert added == ["disc:1", "disc:1"]
+
+
+async def test_boxset_plan_says_why_it_did_not_apply(manager, monkeypatch, tmp_path):
+    """"The CSV isn't working" was indistinguishable from "no row matched this
+    disc" — both fell through silently. The log now names the label and the count."""
+    _plan(manager, monkeypatch, tmp_path,
+          "disc_label,show\nHAWAII_FIVE_0_S1_*,Hawaii Five-0\n")
+    _labelled_scan(manager, monkeypatch, "THE_SOPRANOS_S2_D3")
+
+    wj = manager.add_disc("disc:0")
+    await _settle()
+
+    log = "\n".join(wj.log)
+    assert "1 row(s) loaded but none match" in log
+    assert "THE_SOPRANOS_S2_D3" in log          # so you can fix the pattern
+    assert wj.state is JobState.AWAITING_TITLES  # still parks normally
+
+
+async def test_boxset_plan_says_when_no_rows_loaded(manager, monkeypatch, tmp_path):
+    """An empty/unparseable plan must say where it looked, not stay quiet."""
+    _plan(manager, monkeypatch, tmp_path, "")     # file exists but has no rows
+    _labelled_scan(manager, monkeypatch, "HAWAII_FIVE_0_S1_D4")
+
+    wj = manager.add_disc("disc:0")
+    await _settle()
+
+    log = "\n".join(wj.log)
+    assert "no rows loaded from" in log and "boxsets.local.csv" in log
