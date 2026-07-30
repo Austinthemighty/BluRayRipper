@@ -1708,3 +1708,66 @@ async def test_removing_a_job_does_not_block_the_event_loop(manager, monkeypatch
     assert on_thread == [False]        # off the main (event loop) thread
     assert not staging.exists()       # and it still actually cleaned up
     assert 77 not in manager.jobs
+
+
+async def test_boxset_row_without_a_year_warns_about_remakes(manager, monkeypatch, tmp_path):
+    """A yearless row names the Plex folder just "Show", so Plex picks whichever
+    series it likes — the 2010 remake for Hawaii Five-O. Say so on the job."""
+    _plan(manager, monkeypatch, tmp_path,
+          "disc_label,show,season,first_episode\nHAWAII_FIVE_0_*,Hawaii Five-O,4,13\n")
+    _labelled_scan(manager, monkeypatch, "HAWAII_FIVE_0_S4_D5")
+
+    wj = manager.add_disc("disc:0")
+    await _settle()
+
+    log = "\n".join(wj.log)
+    assert "has no year" in log and "remake" in log
+    assert all(a.year is None for a in wj.assignments.values())
+
+
+async def test_boxset_row_with_a_year_carries_it_into_naming(manager, monkeypatch, tmp_path):
+    """With the year present it reaches the assignment — that's what puts
+    "Hawaii Five-O (1968)" on the folder instead of letting Plex guess."""
+    _plan(manager, monkeypatch, tmp_path,
+          "disc_label,show,year,season,first_episode\n"
+          "HAWAII_FIVE_0_*,Hawaii Five-O,1968,4,13\n")
+    _labelled_scan(manager, monkeypatch, "HAWAII_FIVE_0_S4_D5")
+
+    wj = manager.add_disc("disc:0")
+    await _settle()
+
+    assert all(a.year == 1968 for a in wj.assignments.values())
+    assert "has no year" not in "\n".join(wj.log)
+
+
+async def test_ambiguous_show_without_a_year_skips_episode_titles(manager, monkeypatch):
+    """Two shows share the name and the row has no year: taking TMDB's most popular
+    hit would apply the WRONG series' episode titles. Number them instead."""
+    from blurayripper.boxset_plan import PlanRow
+    import blurayripper.services.metadata as md
+
+    class Show:
+        def __init__(self, tmdb_id, name, year):
+            self.tmdb_id, self.name, self.year = tmdb_id, name, year
+
+    async def fake_search_tv(self, q):
+        return [Show(1, "Hawaii Five-0", 2010), Show(2, "Hawaii Five-0", 1968)]
+
+    async def fake_season(self, tv_id, season):
+        raise AssertionError("must not fetch episodes for a guessed show")
+
+    monkeypatch.setattr(md.TMDBClient, "search_tv", fake_search_tv)
+    monkeypatch.setattr(md.TMDBClient, "get_season", fake_season)
+    manager.settings.tmdb_api_key = "x"
+
+    events = []
+    class Rep:
+        def on_event(self, m): events.append(m)
+
+    assigns = [EpisodeAssignment(0, MediaKind.TV, "Hawaii Five-0", season=4, episode=13)]
+    got = await manager._fill_episode_titles(
+        assigns, PlanRow(disc_label="X", show="Hawaii Five-0"), 4, Rep())
+
+    assert got is None
+    assert assigns[0].episode_title is None          # numbers only, not a wrong name
+    assert any("Several shows are called" in e and "1968" in e for e in events)

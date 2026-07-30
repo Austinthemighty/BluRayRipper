@@ -219,20 +219,29 @@
       </div>
     </div>
     <div style="padding:10px 0;">
-      <textarea id="boxset-csv" spellcheck="false" rows="10"
-        style="width:100%;box-sizing:border-box;font:12px ui-monospace,SFMono-Regular,Consolas,monospace;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:8px;resize:vertical;"></textarea>
+      <div id="boxset-rows"></div>
+      <div class="row" style="margin-top:8px;">
+        <button class="sec" onclick="addBoxsetRow()">+ Add row</button>
+        <button class="sec" onclick="addBoxsetExampleRow()">+ Example row</button>
+        <button class="sec" onclick="toggleBoxsetCsv()" id="boxset-csv-toggle">Edit as CSV</button>
+      </div>
       <div class="muted" style="font-size:12px;margin-top:8px;">
-        <b>disc_label</b> and <b>show</b> are required. Leave <b>season</b> / <b>first_episode</b>
+        <b>Disc label</b> and <b>Show</b> are required. Leave <b>Season</b> / <b>First ep</b>
         blank to read them off the label (<code>HAWAII_FIVE_0_S1_D4</code> → season 1, disc 4).
-        <b>episodes</b> is an optional safety check — if the disc has a different number of
+        <b>Episodes</b> is an optional safety check — if the disc has a different number of
         episode-length titles, it stops and asks instead of guessing.
+        A trailing <code>*</code> in the label covers a whole set.
+      </div>
+      <div id="boxset-csv-wrap" style="display:none;margin-top:10px;">
+        <textarea id="boxset-csv" spellcheck="false" rows="10"
+          style="width:100%;box-sizing:border-box;font:12px ui-monospace,SFMono-Regular,Consolas,monospace;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:8px;resize:vertical;"></textarea>
+        <div class="muted" style="font-size:12px;margin-top:4px;">Paste or hand-edit the raw CSV. Switching back to the table re-reads what's here.</div>
       </div>
       <div id="boxset-preview" style="margin-top:10px;"></div>
     </div>
     <div class="sfoot">
       <button onclick="saveBoxsets()">Save</button>
-      <button class="sec" onclick="previewBoxsets()">Preview</button>
-      <button class="sec" onclick="insertBoxsetExample()">Insert example</button>
+      <button class="sec" onclick="previewBoxsets()">Check</button>
       <button class="sec" onclick="closeBoxsets()">Close</button>
       <span id="boxset-msg" class="muted"></span>
     </div>
@@ -1334,64 +1343,129 @@ async function doRename(title, year){
 }
 
 // ---- TV box sets (pre-name discs so they rip hands-off) ----
-let boxsetExample = '';
+// The table is the editor; the CSV textarea is the same data for pasting/bulk work.
+// Both serialise to CSV before saving, so the server contract never changes.
+const BOXSET_COLS = [
+  {key:'disc_label',   label:'Disc label', ph:'HAWAII_FIVE_0_S1_*', w:'22%'},
+  {key:'show',         label:'Show',       ph:'Hawaii Five-O',      w:'22%'},
+  {key:'year',         label:'Year',       ph:'1968',   w:'9%',  num:true},
+  {key:'season',       label:'Season',     ph:'auto',   w:'9%',  num:true},
+  {key:'first_episode',label:'First ep',   ph:'auto',   w:'9%',  num:true},
+  {key:'episodes',     label:'Episodes',   ph:'any',    w:'9%',  num:true},
+];
+let boxsetRows = [];
+
 async function openBoxsets(){
   const m = document.getElementById('boxset-modal');
-  document.getElementById('boxset-msg').textContent = '';
-  document.getElementById('boxset-preview').innerHTML = '';
-  const ta = document.getElementById('boxset-csv');
-  ta.value = 'Loading…'; ta.disabled = true;
+  boxsetMsg(''); document.getElementById('boxset-preview').innerHTML = '';
+  document.getElementById('boxset-csv-wrap').style.display = 'none';
+  document.getElementById('boxset-csv-toggle').textContent = 'Edit as CSV';
+  boxsetRows = [];
+  renderBoxsetRows();
   m.classList.add('open');
   try {
     const r = await api('GET','/api/boxsets');
-    boxsetExample = r.example || '';
-    ta.value = r.csv || '';
-    ta.disabled = false;
-    // Show what's already in effect, so it's clear which discs are covered.
-    if ((r.rows||[]).length || (r.errors||[]).length) showBoxsetRows(r.rows, r.errors);
-    ta.focus();
-  } catch(e){
-    ta.disabled = false; ta.value = '';
-    boxsetMsg('Error: ' + e.message, '#f85149');
-  }
+    boxsetRows = (r.rows||[]).map(row => {
+      const o = {}; BOXSET_COLS.forEach(c => o[c.key] = row[c.key] == null ? '' : String(row[c.key]));
+      return o;
+    });
+    document.getElementById('boxset-csv').value = r.csv || '';
+    renderBoxsetRows();
+    if ((r.errors||[]).length) showBoxsetErrors(r.errors);
+  } catch(e){ boxsetMsg('Error: ' + e.message, '#f85149'); }
 }
 function closeBoxsets(){ document.getElementById('boxset-modal').classList.remove('open'); }
 function boxsetMsg(text, color){
   const el = document.getElementById('boxset-msg');
-  el.style.color = color || '#8b949e'; el.textContent = text;
+  el.style.color = color || '#8b949e'; el.textContent = text || '';
 }
-function insertBoxsetExample(){
-  const ta = document.getElementById('boxset-csv');
-  if (!ta.value.trim()) { ta.value = boxsetExample; ta.focus(); return; }
-  if (confirm('Replace the current CSV with the example?')) { ta.value = boxsetExample; ta.focus(); }
+
+function renderBoxsetRows(){
+  const host = document.getElementById('boxset-rows');
+  if (!boxsetRows.length){
+    host.innerHTML = '<span class="muted" style="font-size:12px;">No rows yet — "+ Add row" to cover a disc or a whole set.</span>';
+    return;
+  }
+  const head = BOXSET_COLS.map(c=>`<th style="width:${c.w};text-align:left;">${c.label}</th>`).join('');
+  const body = boxsetRows.map((row,i)=>
+    '<tr>' + BOXSET_COLS.map(c=>
+      `<td><input data-r="${i}" data-k="${c.key}" value="${esc(row[c.key]||'')}"
+        placeholder="${esc(c.ph)}" ${c.num?'inputmode="numeric"':''}
+        style="width:100%;box-sizing:border-box;font-size:12px;"></td>`).join('')
+    + `<td style="width:5%;"><button class="sec" data-del="${i}" title="Remove this row" style="padding:2px 8px;">✕</button></td></tr>`
+  ).join('');
+  host.innerHTML = `<table style="width:100%;font-size:12px;"><tr>${head}<th></th></tr>${body}</table>`;
+  // Edit in place: keep the model in step so Save/CSV always see what's on screen.
+  host.querySelectorAll('input[data-r]').forEach(inp => {
+    inp.oninput = () => { boxsetRows[+inp.dataset.r][inp.dataset.k] = inp.value; };
+  });
+  host.querySelectorAll('button[data-del]').forEach(b => {
+    b.onclick = () => { boxsetRows.splice(+b.dataset.del, 1); renderBoxsetRows(); boxsetMsg('Removed — Save to apply.'); };
+  });
 }
-function showBoxsetRows(rows, errors){
+function addBoxsetRow(){
+  const o = {}; BOXSET_COLS.forEach(c => o[c.key] = '');
+  boxsetRows.push(o); renderBoxsetRows();
+  const inputs = document.querySelectorAll('#boxset-rows input[data-k="disc_label"]');
+  if (inputs.length) inputs[inputs.length-1].focus();
+}
+function addBoxsetExampleRow(){
+  boxsetRows.push({disc_label:'HAWAII_FIVE_0_S1_*', show:'Hawaii Five-O', year:'1968',
+                   season:'', first_episode:'', episodes:''});
+  renderBoxsetRows();
+}
+
+// Proper CSV: a show title containing a comma or quote must survive the round trip.
+function csvCell(v){
+  const s = String(v == null ? '' : v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
+}
+function boxsetRowsToCsv(){
+  const keys = BOXSET_COLS.map(c=>c.key);
+  const rows = boxsetRows.filter(r => keys.some(k => (r[k]||'').trim()));
+  return [keys.join(',')].concat(rows.map(r => keys.map(k => csvCell((r[k]||'').trim())).join(','))).join('\n') + '\n';
+}
+function boxsetCsvShown(){
+  return document.getElementById('boxset-csv-wrap').style.display !== 'none';
+}
+// Whichever view is open is the source of truth when saving.
+function currentBoxsetCsv(){
+  return boxsetCsvShown() ? document.getElementById('boxset-csv').value : boxsetRowsToCsv();
+}
+async function toggleBoxsetCsv(){
+  const wrap = document.getElementById('boxset-csv-wrap');
+  const btn = document.getElementById('boxset-csv-toggle');
+  if (!boxsetCsvShown()){
+    document.getElementById('boxset-csv').value = boxsetRowsToCsv();
+    wrap.style.display = ''; btn.textContent = 'Back to table';
+    document.getElementById('boxset-csv').focus();
+    return;
+  }
+  // Coming back: re-parse on the server so the table shows exactly what it read.
+  try {
+    const r = await api('POST','/api/boxsets',
+      {csv: document.getElementById('boxset-csv').value, dry_run: true});
+    boxsetRows = (r.rows||[]).map(row => {
+      const o = {}; BOXSET_COLS.forEach(c => o[c.key] = row[c.key] == null ? '' : String(row[c.key]));
+      return o;
+    });
+    renderBoxsetRows();
+    showBoxsetErrors(r.errors);
+  } catch(e){ boxsetMsg('Error: ' + e.message, '#f85149'); return; }
+  wrap.style.display = 'none'; btn.textContent = 'Edit as CSV';
+}
+
+function showBoxsetErrors(errors){
   const host = document.getElementById('boxset-preview');
-  let html = '';
-  if ((errors||[]).length) {
-    html += `<div style="color:#f85149;font-size:12px;margin-bottom:8px;">` +
-      errors.map(e=>'⚠ '+esc(e)).join('<br>') + `</div>`;
-  }
-  if ((rows||[]).length) {
-    html += `<table style="width:100%;font-size:12px;"><tr>
-        <th>Disc label</th><th>Show</th><th>Year</th><th>Season</th><th>First ep</th><th>Episodes</th></tr>` +
-      rows.map(r=>`<tr><td><code>${esc(r.disc_label)}</code></td><td>${esc(r.show)}</td>
-        <td>${r.year??'<span class="muted">—</span>'}</td>
-        <td>${r.season??'<span class="muted">from label</span>'}</td>
-        <td>${r.first_episode??'<span class="muted">from disc no.</span>'}</td>
-        <td>${r.episodes??'<span class="muted">any</span>'}</td></tr>`).join('') +
-      `</table>`;
-  } else if (!(errors||[]).length) {
-    html += `<span class="muted" style="font-size:12px;">No rows — no discs are covered yet.</span>`;
-  }
-  host.innerHTML = html;
+  host.innerHTML = (errors||[]).length
+    ? `<div style="color:#f85149;font-size:12px;">` + errors.map(e=>'⚠ '+esc(e)).join('<br>') + `</div>`
+    : '';
 }
 async function previewBoxsets(){
   boxsetMsg('Checking…');
   try {
-    const r = await api('POST','/api/boxsets',
-      {csv: document.getElementById('boxset-csv').value, dry_run: true});
-    showBoxsetRows(r.rows, r.errors);
+    const r = await api('POST','/api/boxsets',{csv: currentBoxsetCsv(), dry_run: true});
+    showBoxsetErrors(r.errors);
     const n = (r.rows||[]).length, e = (r.errors||[]).length;
     boxsetMsg(e ? `${n} row(s), ${e} problem(s) — not saved.` : `${n} row(s) look good — not saved yet.`,
               e ? '#f85149' : '#8b949e');
@@ -1400,12 +1474,11 @@ async function previewBoxsets(){
 async function saveBoxsets(){
   boxsetMsg('Saving…');
   try {
-    const r = await api('POST','/api/boxsets',
-      {csv: document.getElementById('boxset-csv').value});
-    showBoxsetRows(r.rows, r.errors);
+    const r = await api('POST','/api/boxsets',{csv: currentBoxsetCsv()});
+    showBoxsetErrors(r.errors);
     const n = (r.rows||[]).length;
-    if ((r.errors||[]).length) {
-      // Saved anyway: the good rows still work, and the user can see what to fix.
+    if ((r.errors||[]).length){
+      // Saved anyway: the good rows still work, and the problems are listed above.
       boxsetMsg(`Saved ${n} row(s), but check the problems above.`, '#f85149');
     } else {
       boxsetMsg(`Saved — ${n} row(s) in effect.`, '#3fb950');
@@ -1413,6 +1486,7 @@ async function saveBoxsets(){
     }
   } catch(e){ boxsetMsg('Error: ' + e.message, '#f85149'); }
 }
+
 
 // ---- HandBrake preset editor ----
 async function openHandbrake(){
