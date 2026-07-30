@@ -133,6 +133,7 @@ class WorkerRunner:
         # them may be offline too, and the whole point is that you find out.
         self._serve_watch = presence.PresenceWatch(
             threshold_seconds=settings.cluster.offline_alert_seconds)
+        self._notify_tasks: set = set()   # strong refs; see _notify
 
     def request_stop(self) -> None:
         """Drain: finish the job currently encoding (if any), claim no more, exit."""
@@ -305,14 +306,20 @@ class WorkerRunner:
             self._notify(f"✅ Server back: {host}", "The rip box is reporting in again.")
 
     def _notify(self, title: str, message: str, priority: str | None = None) -> None:
-        """Fire-and-forget push. Best-effort: an alert must never break the loop."""
+        """Fire-and-forget push. Best-effort: an alert must never break the loop.
+
+        The task is kept in a set until it finishes: asyncio only holds a weak
+        reference, so a fire-and-forget task with no strong reference can be
+        garbage-collected mid-flight and the notification silently lost."""
         if not self.settings.notify_url:
             return
         from .services.notify import notify
 
         with contextlib.suppress(Exception):
-            asyncio.get_running_loop().create_task(
+            task = asyncio.get_running_loop().create_task(
                 notify(self.settings.notify_url, title, message, priority))
+            self._notify_tasks.add(task)
+            task.add_done_callback(self._notify_tasks.discard)
 
     def _register(self, job_id, stage: str) -> None:
         """Report this worker's presence to the store (for the UI's panel)."""

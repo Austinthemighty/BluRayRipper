@@ -1382,7 +1382,12 @@ class JobManager:
                     raise
             except Exception:
                 pass  # the job's task errored on its way down — fine, we're removing it
-        library.cleanup(self.settings.storage.staging_dir / f"job_{wj.id}")
+        # Off-thread: this is an rmtree, and staging lives on the NAS. Run inline it
+        # blocks the event loop — so every client's SSE stalls — and remove_many
+        # loops this once per job, which is how a bulk "remove completed" froze the
+        # UI. Unlike the store calls below there's no circuit breaker to bound it.
+        await asyncio.to_thread(
+            library.cleanup, self.settings.storage.staging_dir / f"job_{wj.id}")
         self.jobs.pop(job_id, None)
         try:
             self.store.delete(job_id)

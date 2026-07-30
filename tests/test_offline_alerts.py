@@ -97,3 +97,34 @@ def test_alerts_off_when_window_is_zero(monkeypatch, tmp_path):
     r.store.workers = [_serve(99999)]
     r._check_serve_presence()
     assert sent == []
+
+
+async def test_notification_task_is_not_garbage_collected(monkeypatch, tmp_path):
+    """asyncio only weak-references tasks, so a fire-and-forget push with no strong
+    reference can be collected mid-flight and the alert silently lost."""
+    import asyncio
+    import gc
+
+    settings = load_settings()
+    monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    settings.database_url = "postgresql://x/y"
+    settings.notify_url = "https://ntfy.example/brr"
+    r = WorkerRunner(settings, worker_id="SteamMachine")
+
+    delivered = []
+
+    async def fake_notify(url, title, message, priority=None):
+        await asyncio.sleep(0)          # yield, so a lost task never resumes
+        delivered.append(title)
+        return True
+
+    import blurayripper.services.notify as notify_mod
+    monkeypatch.setattr(notify_mod, "notify", fake_notify)
+
+    r._notify("🔌 Server offline: RIPBOX", "gone")
+    assert r._notify_tasks                # held while in flight
+    gc.collect()                          # would drop an unreferenced task
+    await asyncio.gather(*list(r._notify_tasks))
+
+    assert delivered == ["🔌 Server offline: RIPBOX"]
+    assert not r._notify_tasks            # and cleaned up after
