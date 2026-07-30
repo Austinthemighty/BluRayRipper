@@ -150,3 +150,40 @@ def test_replace_bytes_writes_new_file_atomically(tmp_path):
     _replace_bytes(dest, b"poster")
     assert dest.read_bytes() == b"poster"
     assert not (tmp_path / "poster.jpg.tmp").exists()
+
+
+def test_explicit_year_outranks_an_exact_title_match():
+    """A remake often OWNS the exact title: "Hawaii Five-0" (zero) is the 2010
+    show, while the 1968 original is "Hawaii Five-O" (letter O). Ranking title
+    above year handed back the remake's artwork even when 1968 was asked for."""
+    cands = [
+        ShowCandidate(1, "Hawaii Five-0", 2010, "remake", poster_path="/remake2010.jpg"),
+        ShowCandidate(2, "Hawaii Five-O", 1968, "original", poster_path="/original1968.jpg"),
+    ]
+    poster, _ = _pick_art(cands, "Hawaii Five-0", 1968, "name")
+    assert poster.endswith("/original1968.jpg")
+
+    # The same query with the other year still resolves to the other show.
+    poster, _ = _pick_art(cands, "Hawaii Five-0", 2010, "name")
+    assert poster.endswith("/remake2010.jpg")
+
+
+def test_year_preference_degrades_to_title_when_it_cannot_help():
+    """No year, or a year no candidate has, must lose nothing — fall back to the
+    previous exact-title behaviour rather than picking arbitrarily."""
+    cands = [
+        ShowCandidate(1, "Hawaii Five-0", 2010, "remake", poster_path="/remake2010.jpg"),
+        ShowCandidate(2, "Hawaii Five-O", 1968, "original", poster_path="/original1968.jpg"),
+    ]
+    assert _pick_art(cands, "Hawaii Five-0", None, "name")[0].endswith("/remake2010.jpg")
+    assert _pick_art(cands, "Hawaii Five-0", 1999, "name")[0].endswith("/remake2010.jpg")
+
+
+def test_identical_titles_still_separated_by_year():
+    """The Dumbo case: titles match exactly, so only the year can tell them apart."""
+    cands = [
+        MovieCandidate(1, "Dumbo", 2019, "remake", poster_path="/d2019.jpg"),
+        MovieCandidate(2, "Dumbo", 1941, "orig", poster_path="/d1941.jpg"),
+    ]
+    assert _pick_art(cands, "Dumbo", 1941, "title")[0].endswith("/d1941.jpg")
+    assert _pick_art(cands, "Dumbo", 2019, "title")[0].endswith("/d2019.jpg")

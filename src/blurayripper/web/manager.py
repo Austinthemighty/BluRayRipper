@@ -821,6 +821,18 @@ class JobManager:
             # search_tv can't filter by year, so pick on it here — that's what
             # separates a remake from the original (Hawaii Five-O 1968 vs 2010).
             show = next((s for s in shows if s.year == row.year), None) if row.year else None
+            if show is None and row.year is not None:
+                # An explicit year that matches nothing TMDB returned. Falling back
+                # to the most popular hit is how a 1968 disc got the 2010 remake's
+                # episode titles — the years on offer are the useful thing to report.
+                years = ", ".join(str(s.year) for s in shows[:5] if s.year)
+                if reporter is not None:
+                    reporter.on_event(
+                        f"No “{row.show}” from {row.year} on TMDB"
+                        + (f" (found: {years})" if years else "")
+                        + " — using episode numbers only. Check the show/year in the "
+                          "box-set row; TMDB may spell the title differently.")
+                return None
             if show is None:
                 same_name = [s for s in shows
                              if (s.name or "").strip().casefold() == row.show.strip().casefold()]

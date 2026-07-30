@@ -1771,3 +1771,37 @@ async def test_ambiguous_show_without_a_year_skips_episode_titles(manager, monke
     assert got is None
     assert assigns[0].episode_title is None          # numbers only, not a wrong name
     assert any("Several shows are called" in e and "1968" in e for e in events)
+
+
+async def test_explicit_year_with_no_tmdb_match_skips_episode_titles(manager, monkeypatch):
+    """The row says 1968 but TMDB has no 1968 show under that spelling. Falling back
+    to the most popular hit is how a 1968 disc got the 2010 remake's episode names."""
+    from blurayripper.boxset_plan import PlanRow
+    import blurayripper.services.metadata as md
+
+    class Show:
+        def __init__(self, tmdb_id, name, year):
+            self.tmdb_id, self.name, self.year = tmdb_id, name, year
+
+    async def fake_search_tv(self, q):
+        return [Show(1, "Hawaii Five-0", 2010)]        # only the remake comes back
+
+    async def fake_season(self, tv_id, season):
+        raise AssertionError("must not fetch episodes for a year that didn't match")
+
+    monkeypatch.setattr(md.TMDBClient, "search_tv", fake_search_tv)
+    monkeypatch.setattr(md.TMDBClient, "get_season", fake_season)
+    manager.settings.tmdb_api_key = "x"
+
+    events = []
+    class Rep:
+        def on_event(self, m): events.append(m)
+
+    assigns = [EpisodeAssignment(0, MediaKind.TV, "Hawaii Five-0", year=1968,
+                                 season=1, episode=1)]
+    got = await manager._fill_episode_titles(
+        assigns, PlanRow(disc_label="X", show="Hawaii Five-0", year=1968), 1, Rep())
+
+    assert got is None
+    assert assigns[0].episode_title is None
+    assert any("from 1968" in e and "2010" in e for e in events)
