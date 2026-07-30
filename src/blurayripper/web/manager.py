@@ -669,16 +669,39 @@ class JobManager:
             if not name:
                 continue  # no disc / not yet readable
             source = f"disc:{d.index}"
-            if self._last_disc.get(d.index) == name or self._disc_has_active_job(name):
+            if (self._last_disc.get(d.index) == name
+                    or self._disc_has_active_job(name)
+                    or self._scan_pending_for(source)):
                 self._last_disc[d.index] = name  # already handled / in progress
                 continue
             self._last_disc[d.index] = name
             self.add_disc(source)  # new disc -> scan it
         # Forget drives that are gone or now empty, so reinserting re-triggers.
+        # EXCEPT a drive whose disc we're still scanning: makemkvcon holds the
+        # drive during a scan, so the watcher's probe reads it as empty. Forgetting
+        # it there made the disc look new again the moment the name came back, and
+        # the half-scanned job has no disc name yet for _disc_has_active_job to
+        # recognise — which added the same disc a second time.
         empty = {d.index for d in drives if not (d.disc_name or "").strip()}
         for idx in list(self._last_disc):
+            if idx in present and idx in empty and self._scan_pending_for(f"disc:{idx}"):
+                continue
             if idx not in present or idx in empty:
                 self._last_disc.pop(idx, None)
+
+    def _scan_pending_for(self, source: str) -> bool:
+        """Whether a live job for this drive hasn't finished scanning yet.
+
+        Between add_disc and the scan completing, the job has no ``disc`` — so
+        ``_disc_has_active_job`` (which matches on disc name) can't see it. This
+        covers that window so a disc can't be queued twice."""
+        for wj in self.jobs.values():
+            if wj.source != source or wj.disc is not None:
+                continue
+            if self._live_state(wj) in (JobState.DONE, JobState.FAILED):
+                continue
+            return True
+        return False
 
     async def _try_auto_rip(self, wj: WebJob, job, title_id: int, reporter) -> bool:
         """Strict hands-off rip: proceed only for a single-movie disc whose cleaned
@@ -731,11 +754,21 @@ class JobManager:
         if job.disc is None:
             return False
         rows = boxset_plan.load_rows(self.settings)
-        if not rows:
-            return False
         label = (job.disc.volume_label or job.disc.disc_name or "").strip()
+        if not rows:
+            # Say so rather than silently falling through: "the CSV isn't working"
+            # is otherwise indistinguishable from "no row matched this disc".
+            if label:
+                reporter.on_event(
+                    "Box-set plan: no rows loaded from "
+                    f"{boxset_plan.plan_path(self.settings)} — naming this one manually.")
+            return False
         row = boxset_plan.match(rows, label)
         if row is None:
+            reporter.on_event(
+                f"Box-set plan: {len(rows)} row(s) loaded but none match the disc "
+                f"label “{label}” — naming this one manually. "
+                "(Check the disc_label column; a trailing * covers a whole set.)")
             return False
         result = boxset_plan.assignments_for(row, job.disc)
         if not result.ok:
