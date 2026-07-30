@@ -776,7 +776,15 @@ class JobManager:
                 f"Box-set plan matched “{row.disc_label}” but didn't apply: "
                 f"{result.reason}. Confirm this one manually.")
             return False
-        tmdb_id = await self._fill_episode_titles(result.assignments, row, result.season)
+        if row.year is None:
+            # Without a year the Plex folder is just "Show", so Plex picks whichever
+            # series it thinks likeliest — the 2010 remake for Hawaii Five-O.
+            reporter.on_event(
+                f"Box-set plan row for “{row.show}” has no year — the library folder "
+                "will have none either, so Plex may match a remake instead of the "
+                "original. Add a year column to pin it.")
+        tmdb_id = await self._fill_episode_titles(
+            result.assignments, row, result.season, reporter)
         wj.assignments = {a.title_id: a for a in result.assignments}
         wj.selected_title_ids = [a.title_id for a in result.assignments]
         wj.show_title, wj.show_year, wj.season = row.show, row.year, result.season
@@ -795,7 +803,8 @@ class JobManager:
         self._start_job(wj)
         return True
 
-    async def _fill_episode_titles(self, assignments, row, season: int | None) -> int | None:
+    async def _fill_episode_titles(self, assignments, row, season: int | None,
+                                   reporter=None) -> int | None:
         """Best-effort: name each episode from TMDB so placed files read
         'S01E13 - Episode Name'. Returns the show's TMDB id when resolved.
 
@@ -810,9 +819,23 @@ class JobManager:
             if not shows:
                 return None
             # search_tv can't filter by year, so pick on it here — that's what
-            # separates a remake from the original (Hawaii Five-0 2010 vs 1968).
+            # separates a remake from the original (Hawaii Five-O 1968 vs 2010).
             show = next((s for s in shows if s.year == row.year), None) if row.year else None
-            show = show or shows[0]
+            if show is None:
+                same_name = [s for s in shows
+                             if (s.name or "").strip().casefold() == row.show.strip().casefold()]
+                if len(same_name) > 1:
+                    # A remake shares its name with the original. Taking TMDB's most
+                    # popular result would confidently apply the WRONG show's episode
+                    # titles, so number them instead and say why.
+                    years = ", ".join(str(s.year) for s in same_name if s.year)
+                    if reporter is not None:
+                        reporter.on_event(
+                            f"Several shows are called “{row.show}” ({years}) and the plan "
+                            "row has no year — using episode numbers only. Add a year "
+                            "column to get episode titles and the right Plex folder.")
+                    return None
+                show = shows[0]
             episodes = await client.get_season(show.tmdb_id, season)
             by_num = {e.episode_number: e.name for e in episodes}
             for a in assignments:
