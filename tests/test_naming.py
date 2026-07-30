@@ -141,3 +141,29 @@ def test_episode_span_guesses_the_block_a_disc_holds():
     assert episode_span(None, 4) is None     # unknown disc -> no guess
     assert episode_span(0, 4) is None
     assert episode_span(3, 0) is None        # no titles -> nothing to span
+
+
+def test_strips_the_ntsc_pal_video_standard_from_disc_labels():
+    """DVDs stamp the video standard on the label (HAWAII_FIVE_0_S4_D5_NTSC).
+    It blocked the whole tail-stripping loop, which only peels from the END — so
+    an unrecognised trailing token left "S4 D5" on the title too."""
+    from blurayripper.services.naming import clean_tmdb_query, disc_number
+
+    assert clean_tmdb_query("HAWAII_FIVE_0_S4_D5_NTSC", "tv") == ("HAWAII FIVE 0", None, 4)
+    assert clean_tmdb_query("HAWAII_FIVE_0_S4_D5_PAL", "tv") == ("HAWAII FIVE 0", None, 4)
+    assert clean_tmdb_query("THE_OFFICE_S3_D2_NTSC", "tv")[0] == "THE OFFICE"
+    assert disc_number("HAWAII_FIVE_0_S4_D5_NTSC") == 5      # still finds the disc
+
+    # Movie discs carry it too.
+    assert clean_tmdb_query("SOME_MOVIE_NTSC", "movie")[0] == "SOME MOVIE"
+    assert clean_tmdb_query("SOME_MOVIE_PAL", "movie")[0] == "SOME MOVIE"
+
+
+def test_ntsc_pal_stripping_does_not_eat_real_titles():
+    """Only a TRAILING standard is peeled, and a label that is nothing else keeps
+    its text — so the common cases can't be destroyed by the rule above."""
+    from blurayripper.services.naming import clean_tmdb_query
+
+    assert clean_tmdb_query("Pal Joey", "movie")[0] == "Pal Joey"   # not trailing
+    assert clean_tmdb_query("PAL", "movie")[0] == "PAL"             # nothing left -> keep
+    assert clean_tmdb_query("Kill Bill: Vol. 1", "movie")[0] == "Kill Bill: Vol. 1"

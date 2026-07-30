@@ -121,7 +121,16 @@ def clean_tmdb_query(query: str, kind: str = "movie") -> tuple[str, int | None, 
     # Peel trailing authoring descriptors: "Season 2", "Disc 1", "S01", "D2".
     # "Volume/Vol" and the Sxx/Dxx short forms are TV-only — real movie titles use
     # them (*Kill Bill: Vol. 1*, *Guardians of the Galaxy Vol. 3*).
-    words = "season|seasons|disc|disk"
+    #
+    # NTSC/PAL are the TV video standard the disc was authored for, stamped on the
+    # label (HAWAII_FIVE_0_S4_D5_NTSC). They apply to movie and TV discs alike, and
+    # they matter beyond their own text: this loop only strips from the END, so an
+    # unrecognised trailing token stops it dead — leaving "S4 D5" on the title too.
+    # Tradeoff: a real title whose LAST word is "Pal" loses it ("My Pal" -> "My").
+    # That's rare, it only degrades a TMDB search (naming is still confirmable by
+    # hand), and every PAL-region disc gains — but it is why "Pal Joey" is safe
+    # (not trailing) and a disc labelled just "PAL" survives via the fallback below.
+    words = r"season|seasons|disc|disk|ntsc|pal"
     if kind == "tv":
         words += r"|volume|vol\.?|s0*\d+|d0*\d+"
     tail = re.compile(rf"[\s:_.\-]*\b(?:{words})\b\s*\d*\s*$", re.IGNORECASE)
