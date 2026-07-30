@@ -167,3 +167,43 @@ def test_ntsc_pal_stripping_does_not_eat_real_titles():
     assert clean_tmdb_query("Pal Joey", "movie")[0] == "Pal Joey"   # not trailing
     assert clean_tmdb_query("PAL", "movie")[0] == "PAL"             # nothing left -> keep
     assert clean_tmdb_query("Kill Bill: Vol. 1", "movie")[0] == "Kill Bill: Vol. 1"
+
+
+def test_quoted_query_is_searched_exactly():
+    """The escape hatch for a title the cleaning would damage: quote it and nothing
+    is peeled or rewritten."""
+    from blurayripper.services.naming import clean_tmdb_query
+
+    assert clean_tmdb_query('"my pal"', "movie") == ("my pal", None, None)
+    assert clean_tmdb_query('  "My Pal"  ', "movie")[0] == "My Pal"      # outer space ok
+    # Nothing is stripped inside the quotes — that's the whole point.
+    assert clean_tmdb_query('"Silicon Valley Season 2"', "tv")[0] == "Silicon Valley Season 2"
+    assert clean_tmdb_query('"HAWAII_FIVE_0_S4_D5_NTSC"', "tv")[0] == "HAWAII_FIVE_0_S4_D5_NTSC"
+    assert clean_tmdb_query('"Kill Bill: Vol. 1"', "tv")[0] == "Kill Bill: Vol. 1"
+
+
+def test_quoting_rescues_a_title_the_cleaner_would_damage():
+    """Unquoted, a trailing "Pal" is treated as the PAL video standard. Quoting is
+    how you say "no, that's the title"."""
+    from blurayripper.services.naming import clean_tmdb_query
+
+    assert clean_tmdb_query("My Pal", "movie")[0] == "My"       # stripped as noise
+    assert clean_tmdb_query('"My Pal"', "movie")[0] == "My Pal"  # ...unless quoted
+
+
+def test_curly_quotes_work_too():
+    """Phones autocorrect " into “ ”; a search typed on one must behave the same."""
+    from blurayripper.services.naming import clean_tmdb_query
+
+    assert clean_tmdb_query('“my pal”', "movie") == ("my pal", None, None)
+
+
+def test_only_a_fully_wrapped_query_counts_as_quoted():
+    """A stray or embedded quote must not turn cleaning off by accident, and an
+    apostrophe-led title can't be mistaken for a quoted one."""
+    from blurayripper.services.naming import clean_tmdb_query
+
+    assert clean_tmdb_query("'Salem's Lot", "tv")[0] == "'Salem's Lot"   # single quotes
+    assert clean_tmdb_query('He said "hi" loudly', "tv")[0] == 'He said "hi" loudly'
+    # Unclosed quote -> normal cleaning still applies.
+    assert clean_tmdb_query('"Breaking Bad Season 4', "tv")[2] == 4
