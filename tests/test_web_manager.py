@@ -1,6 +1,7 @@
 """JobManager state-machine flow, with the pipeline's tool calls stubbed out."""
 
 import asyncio
+import threading
 
 import pytest
 
@@ -1680,3 +1681,30 @@ async def test_boxset_plan_says_when_no_rows_loaded(manager, monkeypatch, tmp_pa
 
     log = "\n".join(wj.log)
     assert "no rows loaded from" in log and "boxsets.local.csv" in log
+
+
+async def test_removing_a_job_does_not_block_the_event_loop(manager, monkeypatch, tmp_path):
+    """Staging cleanup is an rmtree on the NAS. Run inline it stalls every client's
+    SSE, and remove_many does it once per job — that's how bulk remove froze the UI."""
+    import blurayripper.web.manager as mgr
+
+    staging = tmp_path / "job_77"
+    staging.mkdir(parents=True)
+    (staging / "big.mkv").write_text("x")
+    monkeypatch.setattr(manager.settings.storage, "staging_dir", tmp_path)
+
+    on_thread = []
+    real_cleanup = mgr.library.cleanup
+
+    def spy(path):
+        # to_thread runs this in a worker thread, never the loop's thread.
+        on_thread.append(threading.current_thread() is threading.main_thread())
+        return real_cleanup(path)
+    monkeypatch.setattr(mgr.library, "cleanup", spy)
+
+    manager.jobs[77] = WebJob(id=77, source="disc:0", state=JobState.DONE)
+    await manager.remove(77)
+
+    assert on_thread == [False]        # off the main (event loop) thread
+    assert not staging.exists()       # and it still actually cleaned up
+    assert 77 not in manager.jobs
