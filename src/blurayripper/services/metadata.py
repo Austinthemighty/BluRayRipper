@@ -93,7 +93,16 @@ def _year_from(date: str | None) -> int | None:
 
 def _pick_art(candidates, title, year, name_attr):
     """Choose the candidate whose title (+year) best matches, preferring an exact
-    title+year hit, then falling back to TMDB's own relevance order (first result)."""
+    title+year hit, then falling back to TMDB's own relevance order (first result).
+
+    A YEAR the caller supplied outranks an exact title, because the year is the
+    deliberate disambiguator and titles drift between a show and its remake.
+    "Hawaii Five-0" (zero) is exactly the 2010 remake's title while the 1968
+    original is "Hawaii Five-O" (letter O) — ranking title first handed back the
+    remake's artwork even when the caller had explicitly asked for 1968. When no
+    candidate carries the wanted year this falls straight back to title matching,
+    so a typo'd or missing year loses nothing.
+    """
     if not candidates:
         return (None, None)
     want = (title or "").strip().lower()
@@ -101,7 +110,7 @@ def _pick_art(candidates, title, year, name_attr):
     def score(c):
         exact_title = getattr(c, name_attr, "").strip().lower() == want
         exact_year = year is not None and c.year == year
-        return (exact_title and exact_year, exact_title, exact_year)
+        return (exact_title and exact_year, exact_year, exact_title)
 
     best = max(candidates, key=score)
     return (_img(_POSTER_URL, best.poster_path), _img(_BACKDROP_URL, best.backdrop_path))
