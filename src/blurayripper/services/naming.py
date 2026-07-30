@@ -93,6 +93,29 @@ def episode_span(disc: int | None, count: int) -> tuple[int, int] | None:
     return first, first + count - 1
 
 
+# Straight and curly double quotes — phones autocorrect " into “ ”, and a search
+# typed on one shouldn't silently behave differently. Single quotes are NOT a
+# delimiter: apostrophes start real titles (*'Salem's Lot*).
+_QUOTE_PAIRS = (('"', '"'), ('“', '”'), ('“', '“'), ('”', '”'))
+
+
+def _unquote(query: str) -> str | None:
+    """The inner text of a fully quoted query, or None if it isn't one.
+
+    Only a query wrapped end-to-end counts, so a title containing a quoted phrase
+    is still cleaned normally. Empty quotes ("") aren't a search — treated as not
+    quoted, so the caller falls back to the usual handling instead of asking TMDB
+    for nothing."""
+    q = (query or "").strip()
+    if len(q) < 2:
+        return None
+    for open_q, close_q in _QUOTE_PAIRS:
+        if q.startswith(open_q) and q.endswith(close_q):
+            inner = q[len(open_q):-len(close_q)].strip()
+            return inner or None
+    return None
+
+
 def clean_tmdb_query(query: str, kind: str = "movie") -> tuple[str, int | None, int | None]:
     """Turn a disc name into a searchable (title, year, season) for TMDB.
 
@@ -103,7 +126,17 @@ def clean_tmdb_query(query: str, kind: str = "movie") -> tuple[str, int | None, 
 
     "Volume/Vol" is only stripped for TV — real movie titles use it (*Kill Bill:
     Vol. 1*, *Guardians of the Galaxy Vol. 3*), so movies keep it.
+
+    Wrapping the whole thing in double quotes searches for it EXACTLY: ``"my pal"``
+    goes to TMDB as ``my pal``, with no peeling and no separator rewriting. That's
+    the escape hatch for a title the cleaning would otherwise damage — one ending
+    in a word this function treats as noise ("Pal", "Vol"), or one that genuinely
+    contains something like "Season".
     """
+    literal = _unquote(query)
+    if literal is not None:
+        return literal, None, None
+
     q = _normalize_separators(query)
 
     # Year: a parenthesized (YYYY) anywhere (disc names sometimes put it before

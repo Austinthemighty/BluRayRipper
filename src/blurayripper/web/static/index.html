@@ -269,10 +269,11 @@
     </div>
     <div style="padding:10px 0;">
       <div class="row">
-        <input id="rename-q" placeholder="Title" style="flex:1;"
+        <input id="rename-q" placeholder='Title — or "exact title"' style="flex:1;"
                onkeydown="if(event.key==='Enter')renameSearch();" />
         <button class="sec" onclick="renameSearch()">Search</button>
       </div>
+      <div class="muted" style="font-size:12px; margin-top:6px;">Wrap the title in <b>"quotes"</b> to search it exactly — disc-label noise (Season, Disc, NTSC/PAL) is otherwise stripped.</div>
       <div id="rename-results" style="margin-top:8px;"></div>
     </div>
     <div class="sfoot">
@@ -826,8 +827,9 @@ function buildMapping(card, j){
       <label><input type="radio" name="k${j.id}" value="movie" ${movie?'checked':''}> Movie</label>
       <label><input type="radio" name="k${j.id}" value="tv" ${!movie?'checked':''}> TV</label>
     </div>
-    <div class="row"><input data-q placeholder="Title to search" value="${(j.disc_name||'').replace(/_/g,' ')}" style="flex:1;">
+    <div class="row"><input data-q placeholder='Title to search — or "exact title"' value="${(j.disc_name||'').replace(/_/g,' ')}" style="flex:1;">
       <button class="sec" data-search>Search TMDB</button></div>
+    <div class="muted" style="font-size:12px;">Disc-label noise (Season/Disc/NTSC) is stripped automatically. Wrap the title in <b>"quotes"</b> to search it exactly, for a name that stripping would damage.</div>
     <div data-results class="row"></div>
     <div data-tv></div>
     <div class="row">Film grain:

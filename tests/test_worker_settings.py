@@ -193,3 +193,30 @@ def test_job_endpoint_errors_map_to_http(tmp_path):
     app.state.manager.jobs[5] = wj
     r = c.post("/api/jobs/5/retry")          # only a FAILED job can be retried
     assert r.status_code == 400 and "not failed" in r.json()["detail"]
+
+
+def test_search_endpoint_honours_quoted_exact_queries(tmp_path, monkeypatch):
+    """The search box is where quoting matters — guard that the endpoint keeps
+    routing through the cleaner (and so keeps honouring quotes)."""
+    import blurayripper.services.metadata as md
+    from blurayripper.config import load_settings
+    from fastapi.testclient import TestClient
+
+    seen = []
+
+    async def fake_search(self, query, year=None):
+        seen.append(query)
+        return []
+    monkeypatch.setattr(md.TMDBClient, "search_movie", fake_search)
+
+    from blurayripper.web.app import create_app
+    (tmp_path / "settings.toml").write_text("", encoding="utf-8")
+    settings = load_settings(tmp_path)
+    settings.tmdb_api_key = "x"
+    c = TestClient(create_app(settings))
+
+    c.get("/api/tmdb/search", params={"kind": "movie", "query": "My Pal"})
+    assert seen[-1] == "My"                    # cleaned: trailing PAL looks like noise
+
+    c.get("/api/tmdb/search", params={"kind": "movie", "query": '"My Pal"'})
+    assert seen[-1] == "My Pal"                # quoted: sent exactly as typed
