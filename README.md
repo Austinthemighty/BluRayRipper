@@ -170,6 +170,10 @@ powershell -ExecutionPolicy Bypass -File scripts\install-task-windows.ps1 -Role 
 powershell -ExecutionPolicy Bypass -File scripts\install-task-windows.ps1 -Role worker
 ```
 
+The launcher finds the CLI in `.venv\Scripts\` before falling back to `PATH`, so
+it works from a scheduled task (which never activates your venv) — you don't need
+`blurayripper` on the system PATH.
+
 It starts at logon and restarts on failure (`-Status` / `-Uninstall`, or
 `schtasks /run` / `/end`). It deliberately runs **in your session, unelevated**:
 staging and output live on a **mapped drive (`Z:`)**, and mapped drives don't
