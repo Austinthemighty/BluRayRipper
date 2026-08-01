@@ -32,6 +32,32 @@ REM ============================================================================
 REM Run from the repo root (this file lives in scripts\).
 cd /d "%~dp0.."
 
+REM Resolve the CLI WITHOUT relying on PATH. A scheduled task (and a double-click)
+REM gets a plain environment with no venv activated, and the documented install is
+REM `python -m venv .venv` -- so blurayripper.exe lives in .venv\Scripts and is
+REM invisible unless you activated it. Prefer the venv, then fall back to PATH.
+set "BRR="
+if exist ".venv\Scripts\blurayripper.exe" set BRR=".venv\Scripts\blurayripper.exe"
+if not defined BRR if exist "venv\Scripts\blurayripper.exe" set BRR="venv\Scripts\blurayripper.exe"
+if not defined BRR if exist ".venv\Scripts\python.exe" set BRR=".venv\Scripts\python.exe" -m blurayripper
+if not defined BRR if exist "venv\Scripts\python.exe" set BRR="venv\Scripts\python.exe" -m blurayripper
+if not defined BRR (
+  REM Parenthesised so && binds to `where`. Left bare, cmd treats && as a
+  REM line-level separator and the set runs even when BRR is already the
+  REM venv path -- silently clobbering it back to a bare PATH lookup.
+  where blurayripper >nul 2>&1 && set BRR=blurayripper
+)
+if not defined BRR (
+  echo(
+  echo [ERROR] Can't find blurayripper.
+  echo   Looked in .venv\Scripts\, venv\Scripts\, and on PATH, from:
+  echo   %CD%
+  echo   Create it with:  python -m venv .venv ^&^& .venv\Scripts\pip install -e ".[web]"
+  echo Press any key to close.
+  pause >nul
+  exit /b 2
+)
+
 set "WORKER_NAME=%~1"
 if defined WORKER_NAME (
   set "NAME_ARG=--name %WORKER_NAME%"
@@ -41,8 +67,8 @@ if defined WORKER_NAME (
 
 :loop
 echo(
-echo [%date% %time%] Starting: blurayripper worker %NAME_ARG%
-blurayripper worker %NAME_ARG%
+echo [%date% %time%] Starting: %BRR% worker %NAME_ARG%
+%BRR% worker %NAME_ARG%
 set "RC=%errorlevel%"
 
 REM Exit codes that mean "you asked for this" -- don't fight the user by

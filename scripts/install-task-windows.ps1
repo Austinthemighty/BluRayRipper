@@ -106,11 +106,28 @@ if ($Uninstall) {
 
 if (-not (Test-Path $launcher)) { throw "Can't find the launcher at $launcher" }
 
-# `blurayripper` must resolve for the user this task runs as -- the task inherits
-# that user's PATH, so catch a not-installed CLI now rather than at 3am.
-if (-not (Get-Command blurayripper -ErrorAction SilentlyContinue)) {
-    Warn "'blurayripper' isn't on PATH in this shell."
-    Warn "Install it first (pip install -e .) -- the task would fail the same way."
+# Check the CLI the same way the launcher does. PATH alone is the WRONG test: the
+# documented install is `python -m venv .venv`, so blurayripper.exe sits in
+# .venv\Scripts and is only on PATH while that venv is activated -- which a
+# scheduled task never does. The launcher therefore prefers the venv, and so does
+# this check, or it would cry wolf on a perfectly good install.
+$cliPath = $null
+foreach ($rel in @(".venv\Scripts\blurayripper.exe", "venv\Scripts\blurayripper.exe",
+                   ".venv\Scripts\python.exe", "venv\Scripts\python.exe")) {
+    $candidate = Join-Path $repoRoot $rel
+    if (Test-Path $candidate) { $cliPath = $candidate; break }
+}
+if ($cliPath) {
+    Ok "Found the CLI at $cliPath"
+} elseif (Get-Command blurayripper -ErrorAction SilentlyContinue) {
+    Ok "Found 'blurayripper' on PATH ($((Get-Command blurayripper).Source))"
+    Warn "It is not in a .venv beside the repo, so the task depends on it staying"
+    Warn "on the PATH of the account that runs it."
+} else {
+    Warn "Can't find blurayripper in $repoRoot\.venv\Scripts\, venv\Scripts\, or on PATH."
+    Warn "The task would fail at logon. Create it first:"
+    Warn "  python -m venv .venv"
+    Warn "  .venv\Scripts\pip install -e `".[web]`""
 }
 
 $argument = "`"$launcher`""
