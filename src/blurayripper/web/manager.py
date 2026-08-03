@@ -1453,6 +1453,17 @@ class JobManager:
                 # A movie disc has a single main-feature title — skip the title
                 # gate and go straight to naming. TV discs (multiple candidate
                 # episodes) still stop so you can pick which titles to rip.
+                if not job.disc.titles:
+                    # Nothing to choose from. Parking at the title gate would show
+                    # an empty table and a Confirm button that can only ever error,
+                    # with no way forward. Fail instead: that surfaces Retry (and
+                    # "rip from another drive" for a disc), which are the actual
+                    # fixes. MakeMKV's own MSG lines are already in the log above.
+                    raise RuntimeError(
+                        "The scan found no titles on this disc. Usually an unreadable "
+                        "or dirty disc, a drive that can't read it, or a protection "
+                        "MakeMKV couldn't handle — see the log above for its reason. "
+                        "Clean the disc, or use another drive and Retry.")
                 suggested = self._suggested_titles(job.disc)
                 if len(suggested) == 1:
                     tid = next(iter(suggested))
