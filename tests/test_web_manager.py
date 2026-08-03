@@ -1805,3 +1805,35 @@ async def test_explicit_year_with_no_tmdb_match_skips_episode_titles(manager, mo
     assert got is None
     assert assigns[0].episode_title is None
     assert any("from 1968" in e and "2010" in e for e in events)
+
+
+async def test_scan_with_no_titles_fails_instead_of_a_dead_gate(manager, monkeypatch):
+    """A disc MakeMKV opens but gets nothing usable from used to park at the title
+    gate: an empty table and a Confirm button that could only ever error, with no
+    way forward. Failing surfaces Retry and the change-drive picker instead."""
+    async def scan(source, report):
+        job = Job(source=source)
+        job.disc = DiscInfo(source=source, disc_name="BAD_DISC", titles=[])
+        job.fingerprint = "fp"
+        report.on_event("Failed to open disc — read error")
+        return job
+    monkeypatch.setattr(manager.pipeline, "scan_disc", scan)
+
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    d = manager.snapshot()["jobs"][0]
+
+    assert d["state"] == "failed"
+    assert "no titles" in d["error"]
+    assert d["needs_disc"] is True        # so the card offers "rip from another drive"
+    # MakeMKV's own reason is still there to read.
+    assert any("read error" in line for line in wj.log)
+
+
+async def test_a_disc_with_titles_still_reaches_the_title_gate(manager):
+    """The guard must be narrow: titles present but none auto-selectable is a
+    normal manual pick, not a failure."""
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    d = manager.snapshot()["jobs"][0]
+    assert d["state"] == "awaiting_titles" and len(d["titles"]) == 3
