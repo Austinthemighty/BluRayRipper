@@ -122,8 +122,13 @@ blurayripper serve
 blurayripper worker            # Ctrl+C drains; 'u'/Ctrl+U drains + pulls + restarts
 ```
 
-- **Workers panel** shows each worker's version, current job, and uptime.
-  **↻ Update all** drains, `git pull`s, and restarts every worker.
+- **Workers panel** shows each worker's version, current job, and uptime, with
+  **Drain / Restart / Update** per worker and **Drain all / Update all** for the
+  lot. Every action drains first — the current encode finishes and is *placed*,
+  so nothing in flight is lost. They differ in what follows: drain stops, restart
+  re-execs the code already on that box, update `git pull`s first. The server has
+  its own **↻ Restart** and **⬆ Update** in Settings, so you can move one box at a
+  time instead of the whole cluster.
 - **Per-worker settings**: override tool paths / encode / OCR options for one
   machine in Settings (pick the worker in the scope dropdown).
 - `worker_does_subs` moves subtitle OCR onto the workers; `local_encode_max_height`

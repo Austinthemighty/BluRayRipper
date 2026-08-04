@@ -30,6 +30,17 @@ from .models import DiscInfo, EpisodeAssignment, MediaKind, Stream, StreamType, 
 _STAMPED_RE = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2}:\d{2}\] ")
 
 
+# What the serve box can ask a worker to do. Ordered least to most disruptive;
+# a worker that sees several at once takes the last one listed.
+WORKER_ACTIONS = ("drain", "restart", "update")
+ALL_WORKERS = "*"
+
+
+def signal_key(action: str, target: str = ALL_WORKERS) -> str:
+    """The cluster_signals row for an action aimed at one worker (or all)."""
+    return f"{action}:{target}"
+
+
 def stamp_log(message: str) -> str:
     """Prefix a job-log line with the local date + wall-clock time it occurred,
     so the UI shows when each step (disc scan, naming, encode, …) actually
@@ -227,11 +238,24 @@ class Store(ABC):
     def request_worker_update(self) -> None:
         """Bump the cluster-wide 'workers: drain + update' signal. No-op if the
         store isn't shared (there are no remote workers to reach)."""
+        self.request_cluster_signal("update", "*")
 
     def worker_update_token(self) -> int:
         """Current value of the worker-update signal (0 if never requested). A
         worker updates when this rises above the value it saw at startup."""
-        return 0
+        return self.cluster_signals().get(signal_key("update", "*"), 0)
+
+    def request_cluster_signal(self, action: str, target: str = "*") -> None:
+        """Ask one worker (or all, with target ``*``) to drain / restart / update.
+
+        Rides the same counter table as the original update signal, keyed
+        ``action:target`` — a worker acts when a key addressed to it rises above
+        what it saw at startup, so a signal sent while it was down doesn't fire
+        later. No-op if the store isn't shared."""
+
+    def cluster_signals(self) -> dict[str, int]:
+        """Every signal key -> its current token. Empty for non-durable stores."""
+        return {}
 
     def get_shared_config(self, key: str) -> dict | None:
         """A cluster-wide config value (e.g. the HandBrake preset). None if unset
@@ -252,14 +276,15 @@ class MemoryStore(Store):
         self._rows: dict[int, dict] = {}
         self._claimed: set[int] = set()
         self._wsettings: dict[str, dict] = {}
-        self._update_token = 0
+        self._signals: dict[str, int] = {}
         self._shared_config: dict[str, dict] = {}
 
-    def request_worker_update(self) -> None:
-        self._update_token += 1
+    def request_cluster_signal(self, action: str, target: str = ALL_WORKERS) -> None:
+        key = signal_key(action, target)
+        self._signals[key] = self._signals.get(key, 0) + 1
 
-    def worker_update_token(self) -> int:
-        return self._update_token
+    def cluster_signals(self) -> dict[str, int]:
+        return dict(self._signals)
 
     def get_shared_config(self, key: str) -> dict | None:
         import copy
@@ -473,17 +498,17 @@ class PostgresStore(Store):
                 (worker_id, version, job_id, stage, run_token),
             )
 
-    def request_worker_update(self) -> None:
+    def request_cluster_signal(self, action: str, target: str = ALL_WORKERS) -> None:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO cluster_signals (key, token) VALUES ('worker_update', 1) "
-                "ON CONFLICT (key) DO UPDATE SET token = cluster_signals.token + 1")
+                "INSERT INTO cluster_signals (key, token) VALUES (%s, 1) "
+                "ON CONFLICT (key) DO UPDATE SET token = cluster_signals.token + 1",
+                (signal_key(action, target),))
 
-    def worker_update_token(self) -> int:
+    def cluster_signals(self) -> dict[str, int]:
         with self._connect() as conn, conn.cursor() as cur:
-            cur.execute("SELECT token FROM cluster_signals WHERE key = 'worker_update'")
-            row = cur.fetchone()
-        return int(row[0]) if row else 0
+            cur.execute("SELECT key, token FROM cluster_signals")
+            return {k: int(t) for k, t in cur.fetchall()}
 
     def get_shared_config(self, key: str) -> dict | None:
         with self._connect() as conn, conn.cursor() as cur:

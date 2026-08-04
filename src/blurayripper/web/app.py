@@ -10,6 +10,7 @@ Endpoints
   DELETE /api/jobs/{id}       -> remove a finished/parked job
   GET  /api/tmdb/search       -> TMDB search proxy {kind, query}
   GET  /api/tmdb/season       -> TMDB season episodes {tv_id, season}
+  POST /api/workers/{id}/action -> drain/restart/update one worker ("*" = all)
   GET  /api/boxsets           -> box-set plan CSV + parsed rows
   POST /api/boxsets           -> save (or dry-run) the plan CSV {csv, dry_run}
   GET  /api/events            -> SSE stream of queue snapshots
@@ -49,6 +50,7 @@ class RemoveByState(BaseModel):
 
 class RestartServer(BaseModel):
     force: bool = False
+    pull: bool = False   # git pull before re-execing (i.e. "update" vs "restart")
 
 
 class SetTitles(BaseModel):
@@ -421,6 +423,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc))
         return {"ok": True, "workers": n}
 
+    @app.post("/api/workers/{worker_id}/action")
+    async def worker_action(worker_id: int | str, body: dict = Body(...)):
+        # One named worker, or "*" for all. Every action drains first, so a job in
+        # flight is finished and placed rather than thrown away.
+        try:
+            n = manager.request_worker_action(str(body.get("action", "")), str(worker_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"ok": True, "workers": n}
+
     @app.post("/api/server/restart")
     async def restart_server(body: RestartServer):
         srv = getattr(app.state, "uvicorn_server", None)
@@ -437,6 +449,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "active": active,
             })
         app.state.restart_requested = True
+        app.state.restart_pull = bool(body.pull)   # serve pulls before re-execing
 
         async def _shutdown_soon():
             await asyncio.sleep(0.4)   # let this response flush first
