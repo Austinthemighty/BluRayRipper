@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import json
 import socket
+import time
 import uuid
 
 from . import handbrake_store, presence
@@ -30,6 +31,7 @@ from .persistence import (
     stamp_log,
 )
 from .pipeline import Job, JobState, Pipeline
+from .version import commit_count
 from .scheduler import EncodeScheduler
 
 # States a worker may always claim: a freshly-queued job (READY), plus the
@@ -140,6 +142,7 @@ class WorkerRunner:
         self._serve_watch = presence.PresenceWatch(
             threshold_seconds=settings.cluster.offline_alert_seconds)
         self._notify_tasks: set = set()   # strong refs; see _notify
+        self._started_monotonic = time.monotonic()  # for the periodic restart
 
     def request_stop(self) -> None:
         """Drain: finish the job currently encoding (if any), claim no more, exit."""
@@ -155,6 +158,55 @@ class WorkerRunner:
         """Drain, then restart on the CURRENT code — no pull."""
         self.restart_requested = True
         self._stop = True
+
+    # Don't auto-update again until the process has been up this long. If a pull
+    # can't actually reach the server's version (serve is on an unpushed commit,
+    # or the pull fails), the worker would otherwise drain-pull-restart in a hot
+    # loop and never encode anything.
+    _AUTO_UPDATE_MIN_UPTIME = 900
+
+    def _uptime_seconds(self) -> float:
+        return time.monotonic() - self._started_monotonic
+
+    def _maybe_periodic_restart(self) -> None:
+        """Restart once this worker has been up longer than the configured age.
+
+        Called between jobs, so it is always drain-first: a running encode
+        finishes and is placed before the restart. A worker that stays busy past
+        the deadline simply restarts at its next idle moment."""
+        days = self.settings.cluster.worker_restart_after_days
+        if days <= 0 or self._stop:
+            return
+        if self._uptime_seconds() < days * 86400:
+            return
+        print(f"Up for over {days} day(s) — restarting (nothing is in flight).",
+              flush=True)
+        self.request_restart()
+
+    def _maybe_auto_update(self) -> None:
+        """Follow the rip box: if it reports a NEWER build, pull up to it.
+
+        The server's version is the reference, so updating serve rolls out to
+        every worker without visiting them. Only ever moves FORWARD — a worker
+        ahead of the server is left alone rather than downgraded."""
+        if not self.settings.cluster.worker_auto_update or self._stop:
+            return
+        if self._uptime_seconds() < self._AUTO_UPDATE_MIN_UPTIME:
+            return
+        mine = commit_count(getattr(self, "_version", None))
+        if mine is None:
+            return  # version built without git — can't compare, don't guess
+        try:
+            workers = self.store.list_workers()
+        except Exception:
+            return
+        serve = next((w for w in workers if presence.is_serve(w.worker_id)), None)
+        theirs = commit_count(serve.version) if serve else None
+        if theirs is None or theirs <= mine:
+            return
+        print(f"Rip box is on build {theirs}, this worker is on {mine} — "
+              "draining, then git pull + restart.", flush=True)
+        self.request_update()
 
     def _check_update_signal(self) -> None:
         """Act on a signal the serve box aimed at this worker (or at all of them),
@@ -216,7 +268,9 @@ class WorkerRunner:
         print(f"Worker {self.worker_id} ready (v{self._version}) — polling for jobs…", flush=True)
         last_error = None
         while not self._stop:
-            self._check_update_signal()  # server-triggered drain / restart / update?
+            self._check_update_signal()   # server-triggered drain / restart / update?
+            self._maybe_periodic_restart()  # been up too long?
+            self._maybe_auto_update()       # rip box on a newer build?
             if self._stop:
                 break
             try:

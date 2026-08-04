@@ -129,6 +129,12 @@ blurayripper worker            # Ctrl+C drains; 'u'/Ctrl+U drains + pulls + rest
   re-execs the code already on that box, update `git pull`s first. The server has
   its own **↻ Restart** and **⬆ Update** in Settings, so you can move one box at a
   time instead of the whole cluster.
+- **Workers look after themselves**: `worker_restart_after_days` restarts a worker
+  once it has been up that long (hygiene for long-lived encoders), and
+  `worker_auto_update` makes a worker follow the rip box — when serve reports a
+  newer build, the worker drains, `git pull`s, and restarts on its own, so you
+  update one box and the cluster converges. Both act **between jobs**, so a
+  running encode always finishes and is placed first; neither ever downgrades.
 - **Per-worker settings**: override tool paths / encode / OCR options for one
   machine in Settings (pick the worker in the scope dropdown).
 - `worker_does_subs` moves subtitle OCR onto the workers; `local_encode_max_height`

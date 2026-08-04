@@ -104,6 +104,8 @@ SCHEMA: list[tuple[str, list[Field]]] = [
         Field("cluster", "local_encode_max_height", "int", "Local encode max height", 0, "In clustered mode, the rip box encodes a job itself if every title is <= this height (e.g. 1080). 0 = rip box never encodes (workers do all).", env="BLURAYRIPPER_LOCAL_ENCODE_MAX_HEIGHT"),
         Field("cluster", "worker_does_subs", "bool", "Workers do subtitles", False, "Move subtitle extraction + OCR off the rip box onto the workers (so restarting serve never kills that work). Needs Use workers.", env="BLURAYRIPPER_WORKER_DOES_SUBS"),
         Field("cluster", "offline_alert_seconds", "int", "Offline alert (s)", 300, "Push a notification when a box that was online stops reporting for this long. The rip box watches the workers; each worker watches the rip box (an offline server can't report itself). 0 = off. Needs a shared database and a Notify URL."),
+        Field("cluster", "worker_restart_after_days", "float", "Worker restart after (days)", 0, "Restart a worker once it has been up this long, for hygiene. It drains first — the restart happens between jobs, never mid-encode — so it can take longer if a job is running. 0 = off."),
+        Field("cluster", "worker_auto_update", "bool", "Workers auto-update", False, "When the rip box reports a NEWER version than a worker, that worker drains, git pulls, and restarts by itself. Update serve and the workers follow. Needs a shared database.", env="BLURAYRIPPER_WORKER_AUTO_UPDATE"),
     ]),
     ("Disc", [
         Field("disc", "auto_eject", "bool", "Auto-eject after rip", True, "Eject the disc automatically once its last title finishes ripping, so you know it's safe to swap."),

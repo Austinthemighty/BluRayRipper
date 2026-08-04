@@ -255,6 +255,14 @@ class ClusterSettings:
     # (an offline server can't report on itself). 0 = off. Needs a shared
     # database; a single-box setup has nothing to watch it.
     offline_alert_seconds: int = 300
+    # Restart a worker once it has been up this long, for hygiene (long-lived
+    # encoders leak). It drains first — the restart happens between jobs, never
+    # mid-encode — so it can take longer than this if a job is running. 0 = off.
+    worker_restart_after_days: float = 0
+    # Follow the rip box: when it reports a NEWER version than this worker, drain,
+    # git pull, and restart. Keeps the cluster on one version without visiting each
+    # box — you update serve, the workers follow. 0 = off.
+    worker_auto_update: bool = False
 
 
 @dataclass
@@ -500,6 +508,9 @@ def load_settings(config_dir: Path | None = None, extra_overlay: dict | None = N
         worker_does_subs=_bool_override(
             "BLURAYRIPPER_WORKER_DOES_SUBS", cluster_cfg.get("worker_does_subs"), False),
         offline_alert_seconds=int(cluster_cfg.get("offline_alert_seconds", 300)),
+        worker_restart_after_days=float(cluster_cfg.get("worker_restart_after_days", 0)),
+        worker_auto_update=_bool_override(
+            "BLURAYRIPPER_WORKER_AUTO_UPDATE", cluster_cfg.get("worker_auto_update"), False),
     )
 
     scan_cfg = data.get("scan", {})
