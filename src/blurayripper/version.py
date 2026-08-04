@@ -12,6 +12,8 @@ package version.
 
 from __future__ import annotations
 
+import re
+
 import shutil
 import subprocess
 from functools import lru_cache
@@ -89,6 +91,16 @@ def _sha_from_git_dir() -> str | None:
     except OSError:
         pass
     return None
+
+
+def commit_count(version: str | None) -> int | None:
+    """The commit number out of a version like ``0.1.0+242.bc2d392``, or None.
+
+    That count is monotonic, so it's the one part of the string that can say which
+    of two boxes is NEWER. None when git wasn't available to build the version
+    (``0.1.0+gabc1234``), in which case callers must not guess."""
+    m = re.match(r"^\d+\.\d+\.\d+\+(\d+)\.", version or "")
+    return int(m.group(1)) if m else None
 
 
 @lru_cache(maxsize=1)
