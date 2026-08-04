@@ -17,6 +17,9 @@ import uuid
 from . import handbrake_store, presence
 from .config import Settings, load_settings
 from .persistence import (
+    ALL_WORKERS,
+    WORKER_ACTIONS,
+    signal_key,
     JobRecord,
     Store,
     assignment_from_dict,
@@ -123,8 +126,11 @@ class WorkerRunner:
         self._stop = False
         # Set when a drain should be followed by a git-pull + restart (from the
         # 'u' key OR a cluster-wide "update all workers" signal from the server).
-        self.update_requested = False
-        self._update_token = 0  # cluster update signal value seen at startup
+        self.update_requested = False   # pull before restarting
+        self.restart_requested = False  # re-exec after draining (update implies this)
+        # Signal tokens seen at startup, so a request sent while this worker was
+        # down doesn't fire when it comes back.
+        self._signal_tokens: dict[str, int] = {}
         # A per-process id so the store can tell a restart of THIS worker apart
         # from an ordinary heartbeat and reset its uptime clock accordingly.
         self._run_token = uuid.uuid4().hex
@@ -142,18 +148,45 @@ class WorkerRunner:
     def request_update(self) -> None:
         """Drain, then git-pull + restart (the CLI does the pull/re-exec on exit)."""
         self.update_requested = True
+        self.restart_requested = True
+        self._stop = True
+
+    def request_restart(self) -> None:
+        """Drain, then restart on the CURRENT code — no pull."""
+        self.restart_requested = True
         self._stop = True
 
     def _check_update_signal(self) -> None:
-        """Act on a server-triggered 'update all workers' once, when the shared
-        signal rises above what we saw at startup."""
-        if self.update_requested:
+        """Act on a signal the serve box aimed at this worker (or at all of them),
+        once, when its token rises above what we saw at startup.
+
+        Startup-relative so a signal sent while this worker was down doesn't fire
+        the moment it comes back. Keys are ``action:target``; a worker reads both
+        its own name and the ``*`` broadcast."""
+        if self._stop:
             return
         try:
-            tok = self.store.worker_update_token()
+            tokens = self.store.cluster_signals()
         except Exception:
             return  # DB blip — try again next poll
-        if tok > self._update_token:
+        fired = None
+        for action in WORKER_ACTIONS:            # least to most disruptive
+            for target in (ALL_WORKERS, self.worker_id):
+                key = signal_key(action, target)
+                if tokens.get(key, 0) > self._signal_tokens.get(key, 0):
+                    fired = action
+        self._signal_tokens = tokens             # consume every key we just saw
+        if fired is None:
+            return
+        if fired == "drain":
+            print("Drain requested from the server — finishing the current job, then "
+                  "exiting.", flush=True)
+            self.request_stop()
+        elif fired == "restart":
+            print("Restart requested from the server — draining, then restarting on "
+                  "the current code.", flush=True)
+            self.request_restart()
+        else:
             print("Update requested from the server — draining, then git pull + restart.",
                   flush=True)
             self.request_update()
@@ -179,11 +212,11 @@ class WorkerRunner:
         self._version = get_version()
         self._apply_worker_settings()  # central per-worker override, if any
         with contextlib.suppress(Exception):
-            self._update_token = self.store.worker_update_token()  # only newer signals count
+            self._signal_tokens = self.store.cluster_signals()  # only newer signals count
         print(f"Worker {self.worker_id} ready (v{self._version}) — polling for jobs…", flush=True)
         last_error = None
         while not self._stop:
-            self._check_update_signal()  # server-triggered "update all workers"?
+            self._check_update_signal()  # server-triggered drain / restart / update?
             if self._stop:
                 break
             try:

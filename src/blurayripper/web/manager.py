@@ -23,6 +23,8 @@ from pathlib import Path
 from ..config import Settings
 from ..models import DiscInfo, EpisodeAssignment, MediaKind, Stream, StreamType, Title
 from ..persistence import (
+    ALL_WORKERS,
+    WORKER_ACTIONS,
     JobRecord,
     Store,
     assignment_from_dict,
@@ -1036,14 +1038,29 @@ class JobManager:
 
     def request_worker_update(self) -> int:
         """Signal every worker to drain (finish its current encode), git pull, and
-        restart — the cluster-wide version of a worker's 'u' key. Returns how many
-        workers are currently connected (for the confirmation message)."""
+        restart — the cluster-wide version of a worker's 'u' key."""
+        return self.request_worker_action("update", ALL_WORKERS)
+
+    def request_worker_action(self, action: str, target: str = ALL_WORKERS) -> int:
+        """Ask one worker (or all, with ``*``) to drain / restart / update.
+
+        Every action drains first — the current encode is finished and placed, so
+        nothing in flight is ever thrown away. They differ in what happens next:
+        drain exits, restart re-execs the code on disk, update pulls then re-execs.
+        Returns how many workers the request addresses (for the confirmation)."""
+        if action not in WORKER_ACTIONS:
+            raise ValueError(f"Unknown worker action “{action}”.")
         if not self.store.durable:
             raise ValueError(
-                "Updating workers needs the shared Postgres store "
+                "Controlling workers needs the shared Postgres store "
                 "(set BLURAYRIPPER_DATABASE_URL) — there are no remote workers otherwise.")
-        self.store.request_worker_update()
-        return len(self._workers_cache)
+        known = [w.worker_id for w in self._workers_cache
+                 if not presence.is_serve(w.worker_id)]
+        if target != ALL_WORKERS and target not in known:
+            # A typo'd or long-gone name would just sit in the table unread.
+            raise ValueError(f"No worker named “{target}” is connected.")
+        self.store.request_cluster_signal(action, target)
+        return len(known) if target == ALL_WORKERS else 1
 
     def set_titles(self, job_id: int, title_ids: list[int]) -> None:
         wj = self.jobs[job_id]

@@ -835,16 +835,21 @@ def _install_stop_handlers(handler) -> list[str]:
     return installed
 
 
-def _pull_and_restart(console) -> None:
-    """git pull --ff-only in the repo, then re-exec the worker with the same args.
-    Restarts on the current code even if the pull fails, so the worker stays up."""
+def _pull_and_restart(console, pull: bool = True) -> None:
+    """Re-exec with the same args, optionally `git pull --ff-only` first.
+
+    ``pull=False`` is a plain restart on the current code — what the server's
+    per-worker Restart asks for, as distinct from Update. Restarts even if the
+    pull fails, so the worker never stays down over a network hiccup."""
     import os
     import subprocess
 
     from .config import REPO_ROOT
 
-    git = _find_git()
-    if not git:
+    git = _find_git() if pull else None
+    if not pull:
+        console.print("[bold cyan]Restarting on the current code…[/bold cyan]")
+    elif not git:
         console.print(
             "[yellow]git not found — GitHub Desktop bundles git but doesn't add it to "
             "PATH. Set BLURAYRIPPER_GIT to your git.exe, or install Git for Windows. "
@@ -926,8 +931,9 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
         console.print(f"[red]{exc}[/red]")
         return 2
     keys.stop()
-    if runner.update_requested:  # 'u' key or a server "update all workers" signal
-        _pull_and_restart(console)  # git pull + os.execv — normally never returns
+    if runner.restart_requested:  # 'u' key, or a server restart/update signal
+        # update pulls first; a plain restart re-execs the code already on disk.
+        _pull_and_restart(console, pull=runner.update_requested)  # os.execv — no return
         # Only reached if the re-exec failed. Exit non-zero so a supervising
         # launcher (scripts/run-worker-windows.bat) brings the worker back up
         # instead of reading this as an intentional drain and stopping.
@@ -1191,6 +1197,10 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     if getattr(app.state, "restart_requested", False):
         import os
 
+        if getattr(app.state, "restart_pull", False):
+            # "Update server" from the UI: same as pressing u at the console.
+            _pull_and_restart(console, pull=True)   # os.execv — normally no return
+            return 1                                 # only if the re-exec failed
         console.print("[bold yellow]Restarting BluRayRipper…[/bold yellow]")
         sys.stdout.flush()
         sys.stderr.flush()

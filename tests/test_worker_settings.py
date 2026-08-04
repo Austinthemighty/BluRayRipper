@@ -220,3 +220,32 @@ def test_search_endpoint_honours_quoted_exact_queries(tmp_path, monkeypatch):
 
     c.get("/api/tmdb/search", params={"kind": "movie", "query": '"My Pal"'})
     assert seen[-1] == "My Pal"                # quoted: sent exactly as typed
+
+
+def test_worker_action_endpoint_targets_one_worker(tmp_path):
+    """Per-worker control over HTTP: name a worker, or "*" for all."""
+    from blurayripper.config import load_settings
+    from blurayripper.persistence import WorkerInfo, signal_key
+    from blurayripper.web.app import create_app
+    from fastapi.testclient import TestClient
+
+    (tmp_path / "settings.toml").write_text("", encoding="utf-8")
+    app = create_app(load_settings(tmp_path))
+    store = DurableMem()
+    app.state.manager.store = store
+    app.state.manager._workers_cache = [
+        WorkerInfo("SteamMachine", "v1", None, "idle", 1.0),
+        WorkerInfo("DESKTOP-S1SQ57I", "v1", None, "idle", 1.0),
+    ]
+    c = TestClient(app)
+
+    r = c.post("/api/workers/SteamMachine/action", json={"action": "drain"})
+    assert r.status_code == 200 and r.json()["workers"] == 1
+    assert store.cluster_signals()[signal_key("drain", "SteamMachine")] == 1
+
+    r = c.post("/api/workers/*/action", json={"action": "update"})
+    assert r.status_code == 200 and r.json()["workers"] == 2
+
+    # Bad action and unknown worker are rejected, not silently queued.
+    assert c.post("/api/workers/*/action", json={"action": "explode"}).status_code == 400
+    assert c.post("/api/workers/TYPO/action", json={"action": "drain"}).status_code == 400
