@@ -788,6 +788,62 @@ async def test_add_mkv_folder_creates_a_job_each(manager, monkeypatch, tmp_path)
     assert all(manager.jobs[i].state is JobState.AWAITING_MAPPING for i in ids)
 
 
+async def test_add_missing_file_says_so_instead_of_scanning_it_as_a_disc(manager, tmp_path):
+    """A path that doesn't resolve used to fall through to a disc scan, and
+    makemkvcon can't parse a bare path — so "the file isn't where you said"
+    surfaced as a MakeMKV error on a job that never involved a disc."""
+    with pytest.raises(ValueError, match="Nothing at"):
+        manager.add_source(str(tmp_path / "gone" / "WarGames.mkv"))
+    assert not manager.jobs
+
+
+async def test_add_non_mkv_file_is_rejected_by_name(manager, tmp_path):
+    mp4 = tmp_path / "WarGames.mp4"
+    mp4.write_bytes(b"x")
+    with pytest.raises(ValueError, match="isn't a .mkv"):
+        manager.add_source(str(mp4))
+    assert not manager.jobs
+
+
+async def test_add_source_tolerates_quotes_and_mkv_prefix(manager, monkeypatch, tmp_path):
+    """Explorer's "Copy as path" wraps the path in quotes; the trailing quote
+    made the .mkv suffix check miss and routed the job to MakeMKV."""
+    from blurayripper.tools.mkvtools import ProbedFile
+
+    mkv = tmp_path / "WarGames.mkv"
+    mkv.write_bytes(b"data")
+
+    async def fake_probe(path):
+        return ProbedFile(0, None, [], [])
+
+    monkeypatch.setattr(manager.pipeline.mkvtools, "probe", fake_probe)
+    ids = manager.add_source(f'"{mkv}"') + manager.add_source(f"mkv:{mkv}")
+    await _settle()
+    assert len(ids) == 2
+    assert all(manager.jobs[i].source == str(mkv) for i in ids)
+
+
+async def test_add_bare_iso_and_disc_folder_get_a_selector(manager, tmp_path):
+    """A bare .iso / BDMV folder is what the Add-by-selector hint invites; both
+    need a makemkvcon prefix, and the folder used to die on "no .mkv files"."""
+    added = []
+
+    def fake_add_disc(source):  # don't spawn a real scan
+        added.append(source)
+        return WebJob(id=len(added), source=source)
+
+    manager.add_disc = fake_add_disc
+
+    iso = tmp_path / "WarGames.iso"
+    iso.write_bytes(b"x")
+    bdmv = tmp_path / "WarGames_disc"
+    (bdmv / "BDMV").mkdir(parents=True)
+
+    manager.add_source(str(iso))
+    manager.add_source(str(bdmv))
+    assert added == [f"iso:{iso}", f"file:{bdmv}"]
+
+
 async def test_grain_preview_gate(manager, monkeypatch, tmp_path):
     async def exec_with_grain(job, scheduler, report, job_name=None):
         from blurayripper.pipeline import GrainPreview

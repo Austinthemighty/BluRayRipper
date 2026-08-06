@@ -1,6 +1,8 @@
 """Drive enumeration: OS-detected discs makemkvcon can't see (blind drives)."""
 import asyncio
 
+import pytest
+
 from blurayripper.config import load_settings
 from blurayripper.tools import makemkv
 from blurayripper.tools.makemkv import Drive, MakeMKV, parse_drives
@@ -155,6 +157,33 @@ def test_ensure_ripped_clears_stale_partial(tmp_path, monkeypatch):
     assert seen["at_rip"] == []            # the stale partial was cleared first
     assert not stale.exists()
     assert ripped.name == "new_t05.mkv"    # the fresh rip is what gets used
+
+
+def test_ensure_ripped_on_a_file_job_reports_the_missing_file_not_makemkv(tmp_path, monkeypatch):
+    """A job added from an existing .mkv has a file path as its source, not a
+    disc selector. If that file disappears there's nothing to re-rip — it must
+    say so rather than hand a bare path to makemkvcon, which only ever errors."""
+    from blurayripper.config import load_settings
+    from blurayripper.pipeline import Pipeline, Job
+    from blurayripper.models import DiscInfo, Title
+
+    s = load_settings()
+    monkeypatch.setattr(s.storage, "staging_dir", tmp_path)
+    pipe = Pipeline(s)
+
+    gone = tmp_path / "WarGames.mkv"          # never created
+    job = Job(source=str(gone))
+    job.disc = DiscInfo(source=str(gone), titles=[Title(title_id=0, duration_seconds=6700)])
+    job.selected_title_ids = [0]
+    job.checkpoints = {0: {"ripped_path": str(gone)}}
+
+    async def boom(*a, **k):
+        raise AssertionError("MakeMKV must not run for a file-sourced job")
+
+    monkeypatch.setattr(pipe.makemkv, "rip_title", boom)
+
+    with pytest.raises(RuntimeError, match="source file is gone"):
+        asyncio.run(pipe._ensure_ripped(job, 0, tmp_path / "job_307", _report()))
 
 
 def test_eject_device_resolves_from_current_source(monkeypatch):

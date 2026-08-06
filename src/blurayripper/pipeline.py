@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath
 from typing import Iterator, Protocol
 
 from .config import Settings
-from .models import DiscInfo, EpisodeAssignment, MediaKind
+from .models import SOURCE_SELECTORS, DiscInfo, EpisodeAssignment, MediaKind
 from .scheduler import EncodeScheduler, encode_weight
 from .services import coverart, library, naming, nfo, os_upload
 from .services.mapping_store import MappingStore
@@ -669,6 +669,15 @@ class Pipeline:
         if prior_path and prior_path.exists():
             report.on_event(f"Resuming title {title_id}: reusing ripped file.")
             ripped_mkv = prior_path
+        elif not job.source.startswith(SOURCE_SELECTORS):
+            # A job built from an existing .mkv: its source is that file, not a
+            # disc. There is nothing to re-rip — makemkvcon can't even parse a
+            # bare path — so say the file went missing instead of failing with a
+            # MakeMKV error on a job that never involved a disc.
+            raise RuntimeError(
+                f"The source file is gone: {prior_path or job.source}. This job was "
+                f"added from a file, so there's no disc to re-rip it from. Put the "
+                f"file back (or check the server can still reach that path) and Retry.")
         else:
             job.state = JobState.RIPPING
             report.on_event(f"Ripping title {title_id} ...")
