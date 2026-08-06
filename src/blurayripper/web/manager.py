@@ -21,7 +21,15 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ..config import Settings
-from ..models import DiscInfo, EpisodeAssignment, MediaKind, Stream, StreamType, Title
+from ..models import (
+    SOURCE_SELECTORS,
+    DiscInfo,
+    EpisodeAssignment,
+    MediaKind,
+    Stream,
+    StreamType,
+    Title,
+)
 from ..persistence import (
     ALL_WORKERS,
     WORKER_ACTIONS,
@@ -940,18 +948,40 @@ class JobManager:
     # --- commands -------------------------------------------------------
 
     def add_source(self, source: str) -> list[int]:
-        """Add a disc selector (disc:/dev:/file:/iso:), a single .mkv file, or a
-        directory of .mkv files. Returns the created job id(s)."""
-        raw = source[4:] if source.startswith("mkv:") else source
+        """Add a disc selector (disc:/dev:/file:/iso:), a single .mkv file, a
+        directory of .mkv files, or a bare path to an .iso or a BDMV/VIDEO_TS
+        folder. Returns the created job id(s).
+
+        A path that doesn't resolve raises instead of falling through to a disc
+        scan: makemkvcon can't parse a bare filesystem path, so that fallback
+        turned "this file isn't where you said" into a baffling MakeMKV error.
+        """
+        source = source.strip().strip('"').strip("'")  # Explorer's "Copy as path" quotes
+        explicit_file = source.startswith("mkv:")
+        raw = source[4:].strip() if explicit_file else source
+        if not explicit_file and source.startswith(SOURCE_SELECTORS):
+            return [self.add_disc(source).id]
+
         path = Path(raw)
         if path.is_dir():
             mkvs = sorted(path.glob("*.mkv"))
-            if not mkvs:
-                raise ValueError(f"No .mkv files found in {path}")
-            return [self._add_mkv(m).id for m in mkvs]
-        if path.suffix.lower() == ".mkv" and path.is_file():
-            return [self._add_mkv(path).id]
-        return [self.add_disc(source).id]
+            if mkvs:
+                return [self._add_mkv(m).id for m in mkvs]
+            if not explicit_file and ((path / "BDMV").is_dir() or (path / "VIDEO_TS").is_dir()):
+                return [self.add_disc(f"file:{path}").id]  # a ripped disc folder
+            raise ValueError(f"No .mkv files found in {path}")
+        if path.is_file():
+            if path.suffix.lower() == ".mkv":
+                return [self._add_mkv(path).id]
+            if not explicit_file and path.suffix.lower() == ".iso":
+                return [self.add_disc(f"iso:{path}").id]
+            raise ValueError(
+                f"{path.name} isn't a .mkv. Only .mkv files can be added directly; "
+                f"for a disc image use iso:{path}.")
+        raise ValueError(
+            f"Nothing at {path}. Check the path — and note the server only sees "
+            f"drives IT has mounted, so a mapped drive letter (Z:) from your own "
+            f"session usually isn't visible to it. Use the UNC path instead.")
 
     def add_disc(self, source: str) -> WebJob:
         wj = WebJob(id=next(self._ids), source=source)
@@ -1642,7 +1672,7 @@ class JobManager:
         if wj is None:
             raise KeyError(job_id)
         new_source = (new_source or "").strip()
-        if not new_source.startswith(("disc:", "dev:", "iso:", "file:")):
+        if not new_source.startswith(SOURCE_SELECTORS):
             raise ValueError("Source must be a selector like 'disc:1'.")
         if self._live_state(wj) in self._REDO_BUSY:
             raise ValueError("Can't change the drive while the job is running.")

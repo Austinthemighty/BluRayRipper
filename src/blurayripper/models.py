@@ -57,6 +57,12 @@ class Title:
         return f"{h:d}:{m:02d}:{s:02d}"
 
 
+# The prefixes makemkvcon understands as a source. A job whose source has none
+# of them is a plain filesystem path — a job built from an existing .mkv, which
+# never runs MakeMKV. Handing such a path to makemkvcon only ever errors.
+SOURCE_SELECTORS = ("disc:", "dev:", "file:", "iso:")
+
+
 @dataclass
 class DiscInfo:
     """Result of scanning a disc/folder/ISO."""
