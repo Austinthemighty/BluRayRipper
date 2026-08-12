@@ -44,7 +44,7 @@ from ..persistence import (
 )
 from ..pipeline import Job, JobState, Pipeline, _resolve_path
 from ..scheduler import EncodeScheduler
-from .. import boxset_plan, presence
+from .. import boxset_plan, mkv_folder, presence
 from ..services import library, naming
 from ..services.drive_names import DriveNames
 from ..services.notify import notify
@@ -966,6 +966,13 @@ class JobManager:
         if path.is_dir():
             mkvs = sorted(path.glob("*.mkv"))
             if mkvs:
+                # One show's episodes (MakeMKV's <base>_tNN.mkv) become ONE job with
+                # a title per file, so it's named once like a TV disc. A folder of
+                # unrelated films stays one job per file — they need separate names,
+                # and separate jobs also encode in parallel across workers.
+                mkv_set = mkv_folder.analyse(mkvs)
+                if mkv_set is not None:
+                    return [self._add_mkv_set(mkv_set).id]
                 return [self._add_mkv(m).id for m in mkvs]
             if not explicit_file and ((path / "BDMV").is_dir() or (path / "VIDEO_TS").is_dir()):
                 return [self.add_disc(f"file:{path}").id]  # a ripped disc folder
@@ -996,6 +1003,15 @@ class JobManager:
         self.jobs[wj.id] = wj
         self._persist(wj)
         wj._task = self._spawn(self._scan_mkv(wj, path))
+        self.bus.publish()
+        return wj
+
+    def _add_mkv_set(self, mkv_set) -> WebJob:
+        """One job for a folder of one show's episodes — a title per file."""
+        wj = WebJob(id=next(self._ids), source=str(mkv_set.files[0].parent))
+        self.jobs[wj.id] = wj
+        self._persist(wj)
+        wj._task = self._spawn(self._scan_mkv_set(wj, mkv_set))
         self.bus.publish()
         return wj
 
@@ -1576,6 +1592,67 @@ class JobManager:
             wj.state = JobState.AWAITING_MAPPING  # one title; go straight to naming
             self._persist(wj)
             self.bus.publish()
+        except Exception as exc:
+            wj.state = JobState.FAILED
+            wj.error = f"{type(exc).__name__}: {exc}"
+            reporter.on_event(f"Setup failed: {wj.error}")
+            self._persist(wj)
+            self.bus.publish()
+
+    async def _scan_mkv_set(self, wj: WebJob, mkv_set) -> None:
+        """Set up ONE job from a folder of one show's episode files.
+
+        Same trick as _scan_mkv, a title per file: build a synthetic disc whose
+        titles are the files and pre-set each rip checkpoint, so the pipeline
+        skips ripping and the normal TV mapping form ("Fill in order") names the
+        whole season at once. The disc name is the shared stem, which is what
+        pre-fills the show and season in that form."""
+        reporter = _Reporter(self, wj)
+        try:
+            reporter.on_event(
+                f"Reading {len(mkv_set.files)} file(s) from {mkv_set.base} …")
+            titles, checkpoints = [], {}
+            for tid, path in enumerate(mkv_set.files):
+                try:
+                    probe = await self.pipeline.mkvtools.probe(path)
+                    audio_langs, subs, duration = (
+                        probe.audio_languages, probe.subtitles, probe.duration_seconds)
+                except Exception as exc:
+                    reporter.on_event(f"Probe failed for {path.name} ({exc}).")
+                    audio_langs, subs, duration = [], [], 0
+                streams = [Stream(stream_id=0, stream_type=StreamType.VIDEO)]
+                sid = 1
+                for lang in audio_langs:
+                    streams.append(Stream(stream_id=sid, stream_type=StreamType.AUDIO,
+                                          language=lang))
+                    sid += 1
+                for s in subs:
+                    streams.append(Stream(stream_id=sid, stream_type=StreamType.SUBTITLE,
+                                          language=s.language))
+                    sid += 1
+                titles.append(Title(
+                    title_id=tid, duration_seconds=duration,
+                    size_bytes=path.stat().st_size if path.exists() else 0,
+                    source_filename=path.name, streams=streams))
+                checkpoints[tid] = {"ripped_path": str(path)}  # skip rip: reuse the file
+
+            disc = DiscInfo(source=wj.source, disc_name=mkv_set.base, titles=titles)
+            job = Job(source=wj.source)
+            job.disc = disc
+            job.selected_title_ids = [t.title_id for t in titles]
+            job.checkpoints = checkpoints
+
+            wj._pipeline_job = job
+            wj.disc = disc
+            wj.selected_title_ids = list(job.selected_title_ids)
+            wj.state = JobState.AWAITING_MAPPING   # titles are known; just name them
+            reporter.on_event(
+                f"{len(titles)} episode file(s) — name the set once "
+                "(season and first episode, then Fill in order).")
+            self._persist(wj)
+            self.bus.publish()
+            self._notify(f"🟡 Needs your input: {mkv_set.base}",
+                         f"Job #{wj.id} — {len(titles)} episode file(s) to name.")
         except Exception as exc:
             wj.state = JobState.FAILED
             wj.error = f"{type(exc).__name__}: {exc}"

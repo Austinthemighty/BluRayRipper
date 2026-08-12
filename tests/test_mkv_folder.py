@@ -1,0 +1,72 @@
+"""Is a folder of .mkv files one show's episodes, or unrelated titles?"""
+
+from pathlib import Path
+
+from blurayripper.mkv_folder import analyse
+
+
+def _p(*names):
+    return [Path("Z:/x") / n for n in names]
+
+
+def test_makemkv_season_folder_is_one_set():
+    """The reported case: MakeMKV writes <base>_tNN.mkv for a ripped season."""
+    s = analyse(_p("Rick and Morty Season 1_t04.mkv", "Rick and Morty Season 1_t05.mkv",
+                   "Rick and Morty Season 1_t06.mkv"))
+    assert s is not None
+    assert s.base == "Rick and Morty Season 1"
+    assert s.show == "Rick and Morty"     # cleaned for TMDB
+    assert s.season == 1                  # read off the base
+    assert [p.name for p in s.files] == [
+        "Rick and Morty Season 1_t04.mkv",
+        "Rick and Morty Season 1_t05.mkv",
+        "Rick and Morty Season 1_t06.mkv",
+    ]
+
+
+def test_files_are_ordered_numerically_not_alphabetically():
+    """_t10 must come after _t9, or every episode after the ninth is misnumbered."""
+    s = analyse(_p("Show_t9.mkv", "Show_t10.mkv", "Show_t2.mkv"))
+    assert [p.stem for p in s.files] == ["Show_t2", "Show_t9", "Show_t10"]
+
+
+def test_a_folder_of_unrelated_movies_is_not_a_set():
+    """The existing To Process folder must keep one job per file."""
+    assert analyse(_p("Black Hawk Down (2001).mkv", "Bumblebee (2018).mkv",
+                      "Cars 3 (2017).mkv")) is None
+
+
+def test_a_single_file_is_never_a_set():
+    assert analyse(_p("Rick and Morty Season 1_t04.mkv")) is None
+    assert analyse([]) is None
+
+
+def test_a_file_without_a_counter_breaks_the_set():
+    """Mixed content shouldn't be forced into one show."""
+    assert analyse(_p("Show_t01.mkv", "Show_t02.mkv", "Behind the Scenes.mkv")) is None
+
+
+def test_a_numbered_movie_franchise_is_not_a_show():
+    """The dangerous false positive: sequels share a stem and end in a number, so a
+    naive counter rule would name Rocky 2/3/4 as episodes of "Rocky". A bare space
+    before the number doesn't count as a counter — punctuation or a tag must."""
+    assert analyse(_p("Rocky 2.mkv", "Rocky 3.mkv", "Rocky 4.mkv")) is None
+    assert analyse(_p("Apollo 13.mkv", "Apollo 14.mkv")) is None
+
+
+def test_numbers_inside_the_title_survive():
+    s = analyse(_p("Rick and Morty Season 1_t04.mkv", "Rick and Morty Season 1_t05.mkv"))
+    assert s.base.endswith("Season 1")     # the season number survived
+
+
+def test_other_common_counter_styles():
+    for names in (("Show - 01.mkv", "Show - 02.mkv"),
+                  ("Show.E01.mkv", "Show.E02.mkv"),
+                  ("Show_01.mkv", "Show_02.mkv")):
+        s = analyse(_p(*names))
+        assert s is not None and s.base.casefold().startswith("show")
+
+
+def test_season_absent_from_the_name_is_left_unknown():
+    s = analyse(_p("Some Show_t01.mkv", "Some Show_t02.mkv"))
+    assert s is not None and s.season is None    # the form asks, rather than guessing
