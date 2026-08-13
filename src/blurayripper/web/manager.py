@@ -1795,6 +1795,29 @@ class JobManager:
         cps = getattr(job, "checkpoints", {}) if job else {}
         return any(not (cps.get(t) or {}).get("ripped_path") for t in selected)
 
+    def _source_file_missing(self, wj: WebJob) -> str | None:
+        """Why a file-sourced job can't proceed, or None if its file is there.
+
+        Retrying can't conjure a missing file back, so this must not burn the
+        auto-retry budget. The common cause is a path from another machine: a
+        file job stores an ABSOLUTE source (unlike rip checkpoints, which are
+        relative to staging_dir), so moving the server leaves it pointing at the
+        old box's path."""
+        src = (wj.source or "").strip()
+        if not src or src.startswith(SOURCE_SELECTORS):
+            return None
+        if Path(src).exists():
+            return None
+        looks_foreign = "\\" in src or (len(src) > 1 and src[1] == ":")
+        return (
+            f"The source file isn't reachable: {src}. There's no disc to re-rip it "
+            "from, so retrying won't help. "
+            + ("That looks like a path from another machine — remove this job and "
+               "re-add the file from its path here."
+               if looks_foreign else
+               "Put the file back (or check the server can reach it), then Retry.")
+        )
+
     def _source_disc_missing(self, wj: WebJob) -> bool:
         """True if the job rips from a disc:N whose drive currently has no disc,
         so retrying is pointless until it's reinserted. Uses the OS-aware drive
@@ -1838,6 +1861,8 @@ class JobManager:
         # A drive/read failure (or a genuinely absent disc) won't recover on its
         # own — surface a specific reason and don't burn retries against it.
         hint = self._rip_failure_hint(wj)
+        if hint is None:
+            hint = self._source_file_missing(wj)
         if hint is None and self._source_disc_missing(wj):
             hint = "The disc isn't in the drive — reinsert it, then click Retry."
         if hint:

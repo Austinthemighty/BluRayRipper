@@ -1949,3 +1949,43 @@ async def test_a_folder_of_unrelated_movies_still_makes_one_job_each(manager, mo
     ids = manager.add_source(str(folder))
     await _settle()
     assert len(ids) == 3
+
+
+def test_a_missing_source_file_does_not_burn_auto_retries(manager, monkeypatch, tmp_path):
+    """Retrying can't bring a missing file back. A file job stores an ABSOLUTE
+    source, so after moving the server to another OS every such job points at the
+    old machine's path — auto-retry would just spin on all of them."""
+    retried = []
+    monkeypatch.setattr(manager, "_spawn", lambda coro: (retried.append(coro), coro.close())[1])
+    monkeypatch.setattr(manager, "_notify", lambda *a, **k: None)
+    manager.settings.auto_retry_max = 2
+
+    wj = WebJob(id=400, source=r"Z:\media\MakeMKV\To Process\MKV's\Movie (2022).mkv",
+                state=JobState.FAILED)
+    wj.error = "RuntimeError: The source file is gone"
+    manager.jobs[400] = wj
+
+    manager._schedule_auto_retry(wj)
+
+    assert retried == []                                  # no retry scheduled
+    log = "\n".join(wj.log)
+    assert "retrying won't help" in log
+    assert "another machine" in log                       # names the real cause
+
+
+def test_a_present_source_file_still_auto_retries(manager, monkeypatch, tmp_path):
+    """The guard must be narrow: a real transient failure on a file that IS there
+    should still get its retries."""
+    f = tmp_path / "Movie (2022).mkv"
+    f.write_bytes(b"x")
+    retried = []
+    monkeypatch.setattr(manager, "_spawn", lambda coro: (retried.append(coro), coro.close())[1])
+    monkeypatch.setattr(manager, "_notify", lambda *a, **k: None)
+    manager.settings.auto_retry_max = 2
+
+    wj = WebJob(id=401, source=str(f), state=JobState.FAILED)
+    wj.error = "RuntimeError: transient encode blip"
+    manager.jobs[401] = wj
+
+    manager._schedule_auto_retry(wj)
+    assert len(retried) == 1
