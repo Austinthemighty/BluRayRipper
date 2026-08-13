@@ -94,12 +94,23 @@ install_seconv() {
   fi
   info "Building seconv (SubtitleEdit CLI)"
   if ! command -v dotnet >/dev/null 2>&1; then
-    info "Installing the .NET SDK"
-    $SUDO apt-get install -y dotnet-sdk-8.0 || {
-      warn "dotnet-sdk-8.0 not available via apt on this release. Install the .NET SDK"
-      warn "(https://dotnet.microsoft.com/download), or copy a built seconv from a"
-      warn "worker and re-run with --seconv /path/to/seconv. Skipping seconv."
-      return; }
+    # Don't hardcode a version: the SDK package name tracks the release (24.04
+    # has dotnet-sdk-8.0, later ones don't), so ask apt what it actually has and
+    # take the newest. Hardcoding 8.0 silently skipped seconv on Ubuntu 26.04.
+    local sdk
+    sdk="$(apt-cache --names-only search '^dotnet-sdk-[0-9]' 2>/dev/null \
+           | awk '{print $1}' | sort -V | tail -1)"
+    if [ -n "$sdk" ]; then
+      info "Installing the .NET SDK ($sdk)"
+      $SUDO apt-get install -y "$sdk" || sdk=""
+    fi
+    if [ -z "$sdk" ] || ! command -v dotnet >/dev/null 2>&1; then
+      warn "No .NET SDK available via apt on this release. Either install it"
+      warn "(https://dotnet.microsoft.com/download), or copy a built seconv from"
+      warn "another box and re-run with --seconv /path/to/seconv."
+      warn "Skipping seconv — everything except subtitle OCR still works."
+      return
+    fi
   fi
   local src="$TOOLS_DIR/subtitleedit-cli"
   [ -d "$src" ] || git clone --depth 1 https://github.com/SubtitleEdit/subtitleedit-cli.git "$src"
@@ -145,8 +156,10 @@ if [ "$WITH_MAKEMKV" -eq 1 ]; then
     if build_makemkv && command -v makemkvcon >/dev/null 2>&1; then
       ok "makemkvcon -> $(command -v makemkvcon)"
     else
-      warn "MakeMKV build failed (bump --makemkv-version if the download 404'd, or check"
-      warn "build deps). Manual guide: https://forum.makemkv.com/forum/viewtopic.php?t=224"
+      warn "MakeMKV build failed. A curl 5xx (502/525) is makemkv.com being down —"
+      warn "that is not your version, so just re-run this script later. A 404 means"
+      warn "the version is stale: pass --makemkv-version <current>."
+      warn "Manual guide: https://forum.makemkv.com/forum/viewtopic.php?t=224"
     fi
   fi
 else
