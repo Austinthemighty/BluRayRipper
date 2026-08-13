@@ -21,7 +21,7 @@ set -euo pipefail
 
 # MakeMKV has no apt package; it's compiled from versioned tarballs. Bump this to
 # the current release (see makemkv.com/download or the forum) if a download 404s.
-MAKEMKV_VER="1.18.1"
+MAKEMKV_VER="1.18.4"
 
 LANGS=""
 SECONV=""
