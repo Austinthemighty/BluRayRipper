@@ -1893,3 +1893,59 @@ async def test_a_disc_with_titles_still_reaches_the_title_gate(manager):
     await _settle()
     d = manager.snapshot()["jobs"][0]
     assert d["state"] == "awaiting_titles" and len(d["titles"]) == 3
+
+
+async def test_a_season_folder_becomes_one_job_with_a_title_per_file(manager, monkeypatch, tmp_path):
+    """The reported case: a folder of MakeMKV episode files made 7 separate jobs,
+    each guessed a movie, each wanting its own naming form. It's one job now."""
+    from blurayripper.tools.mkvtools import ProbedFile
+
+    folder = tmp_path / "rick and morty" / "s1"
+    folder.mkdir(parents=True)
+    for n in (4, 5, 6, 10):
+        (folder / f"Rick and Morty Season 1_t{n:02d}.mkv").write_bytes(b"x" * 10)
+
+    async def fake_probe(path):
+        return ProbedFile(duration_seconds=1320, video_height=1080,
+                          audio_languages=["eng"], subtitles=[])
+    monkeypatch.setattr(manager.pipeline.mkvtools, "probe", fake_probe)
+
+    ids = manager.add_source(str(folder))
+    await _settle()
+
+    assert len(ids) == 1                      # one job, not four
+    wj = manager.jobs[ids[0]]
+    assert wj.state is JobState.AWAITING_MAPPING
+    assert len(wj.disc.titles) == 4
+    assert wj.selected_title_ids == [0, 1, 2, 3]
+    # Ordered by the counter, so "Fill in order" numbers the episodes correctly.
+    assert [t.source_filename for t in wj.disc.titles] == [
+        "Rick and Morty Season 1_t04.mkv", "Rick and Morty Season 1_t05.mkv",
+        "Rick and Morty Season 1_t06.mkv", "Rick and Morty Season 1_t10.mkv"]
+    # Every file is pre-checkpointed, so nothing is re-ripped.
+    assert all(wj._pipeline_job.checkpoints[i]["ripped_path"] for i in range(4))
+
+    d = manager._job_dict(wj)
+    assert d["disc_name"] == "Rick and Morty Season 1"   # seeds the TMDB search box
+    assert d["label_season"] == 1                        # pre-fills Season
+    assert d["kind_guess"] == "tv"                       # 4 episode-length titles
+
+
+async def test_a_folder_of_unrelated_movies_still_makes_one_job_each(manager, monkeypatch, tmp_path):
+    """Must not regress the To Process folder — those need separate names, and
+    separate jobs also encode in parallel across workers."""
+    from blurayripper.tools.mkvtools import ProbedFile
+
+    folder = tmp_path / "To Process"
+    folder.mkdir(parents=True)
+    for name in ("Black Hawk Down (2001).mkv", "Bumblebee (2018).mkv", "Cars 3 (2017).mkv"):
+        (folder / name).write_bytes(b"x" * 10)
+
+    async def fake_probe(path):
+        return ProbedFile(duration_seconds=7000, video_height=1080,
+                          audio_languages=["eng"], subtitles=[])
+    monkeypatch.setattr(manager.pipeline.mkvtools, "probe", fake_probe)
+
+    ids = manager.add_source(str(folder))
+    await _settle()
+    assert len(ids) == 3

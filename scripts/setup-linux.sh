@@ -58,10 +58,14 @@ IFS=', ' read -r -a _langs <<< "$LANGS"
 for l in "${_langs[@]:-}"; do [ -n "$l" ] && TESS_LANGS="$TESS_LANGS tesseract-ocr-$l"; done
 $SUDO apt-get update -qq
 # shellcheck disable=SC2086
-$SUDO apt-get install -y handbrake-cli mkvtoolnix ffmpeg tesseract-ocr $TESS_LANGS curl tar
+$SUDO apt-get install -y handbrake-cli mkvtoolnix ffmpeg tesseract-ocr $TESS_LANGS curl tar git
 ok "HandBrakeCLI, mkvmerge/mkvextract, ffmpeg, tesseract installed (on PATH)."
 
-mkdir -p "$TOOLS_DIR"
+# Default TOOLS_DIR is /opt/brr-tools, which needs root to create — but the
+# unpack/build steps below run as the invoking user, so hand it over afterwards
+# rather than building as root.
+$SUDO mkdir -p "$TOOLS_DIR"
+$SUDO chown "$(id -u):$(id -g)" "$TOOLS_DIR"
 
 # --- 2. dovi_tool (Dolby Vision) — GitHub release, linked onto PATH ------------
 if command -v dovi_tool >/dev/null 2>&1; then
