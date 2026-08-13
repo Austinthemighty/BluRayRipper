@@ -22,7 +22,7 @@ from typing import Iterator, Protocol
 from .config import Settings
 from .models import SOURCE_SELECTORS, DiscInfo, EpisodeAssignment, MediaKind
 from .scheduler import EncodeScheduler, encode_weight
-from .services import coverart, library, naming, nfo, os_upload
+from .services import coverart, library, naming, nfo, os_upload, pathmap
 from .services.mapping_store import MappingStore
 from .services.metadata import TMDBClient
 from .services.subtitles import looks_like_sdh
@@ -125,6 +125,7 @@ class Pipeline:
         self.ffmpeg = FFmpeg(settings)
         self.dovitool = DoviTool(settings)
         self.tmdb = TMDBClient(settings.tmdb_api_key, settings.metadata_language)
+        configure_path_map(settings.storage.path_map)
         self.mapping_store = MappingStore(settings.storage.output_dir / ".blurayripper" / "mappings.db")
         # Throttle concurrent subtitle extraction so a big batch (or a recovery
         # resume of many jobs) doesn't fire dozens of multi-GB NAS reads at once.
@@ -1368,10 +1369,27 @@ def _rel_path(root: Path, p: Path) -> str:
 
 
 def _resolve_path(root: Path, rel: str) -> Path:
-    """Resolve a stored (relative or absolute) path against this machine's root."""
+    """Resolve a stored (relative or absolute) path against this machine's root.
+
+    A relative path floats by construction — it's re-anchored on whatever root
+    THIS box uses. An absolute one was stored outside the known roots (a job added
+    from a file elsewhere), so it only works on the machine that wrote it; the
+    configured prefix map is what carries those across. Absent a rule, or on the
+    machine where the path is still valid, it's returned untouched."""
     if _is_abs_stored(rel):
-        return Path(rel)
+        return pathmap.resolve(rel, _PATH_RULES)
     return Path(root).joinpath(*PurePosixPath(rel).parts)
+
+
+# Prefix-rewrite rules, installed once from Settings (see Pipeline.__init__).
+# Module-level so the 11 call sites that funnel through _resolve_path don't each
+# have to thread configuration down to it.
+_PATH_RULES: list = []
+
+
+def configure_path_map(entries) -> None:
+    global _PATH_RULES
+    _PATH_RULES = pathmap.parse_rules(entries)
 
 
 # Blu-ray (including UHD BD) 1x read speed = 36 Mbit/s = 4.5 MB/s.

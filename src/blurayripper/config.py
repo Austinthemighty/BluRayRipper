@@ -163,6 +163,12 @@ class StorageSettings:
     output_dir: Path
     movies_subdir: str = "Movies"
     tv_subdir: str = "TV Shows"
+    # Rewrite stored absolute paths written by another machine, as
+    # ["Z:\\media = /mnt/TrueNas/media"]. Paths under staging/output already
+    # float (they're stored relative), so this is for jobs added from a file
+    # somewhere else. A path that exists on THIS box is never rewritten, so one
+    # rule is safe to set on every machine in a mixed cluster.
+    path_map: list[str] = field(default_factory=list)
 
     @property
     def movies_root(self) -> Path:
@@ -356,6 +362,20 @@ def _load_secrets(config_dir: Path) -> dict[str, str]:
     return secrets
 
 
+def _path_map_from(storage_cfg: dict, secrets: dict) -> list[str]:
+    """Prefix-rewrite rules, from settings.toml or BLURAYRIPPER_PATH_MAP.
+
+    The env form takes several rules separated by ';', since secrets.env is one
+    value per line:
+        BLURAYRIPPER_PATH_MAP=Z:\\media = /mnt/TrueNas/media
+    """
+    env = secrets.get("BLURAYRIPPER_PATH_MAP")
+    if env:
+        return [part for part in (p.strip() for p in env.split(";")) if part]
+    raw = storage_cfg.get("path_map") or []
+    return [str(r) for r in raw] if isinstance(raw, list) else []
+
+
 def _resolve_path(value: str, base: Path) -> Path:
     p = Path(value).expanduser()
     return p if p.is_absolute() else (base / p)
@@ -437,6 +457,7 @@ def load_settings(config_dir: Path | None = None, extra_overlay: dict | None = N
         output_dir=_resolve_path(
             _override("BLURAYRIPPER_OUTPUT_DIR", storage_cfg.get("output_dir")) or "./output",
             REPO_ROOT),
+        path_map=_path_map_from(storage_cfg, secrets),
         movies_subdir=storage_cfg.get("movies_subdir", "Movies"),
         tv_subdir=storage_cfg.get("tv_subdir", "TV Shows"),
     )

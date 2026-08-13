@@ -51,6 +51,7 @@ SCHEMA: list[tuple[str, list[Field]]] = [
     ("Storage", [
         Field("storage", "staging_dir", "str", "Staging dir", "./staging", "Per-job temp/intermediates root — rips, encodes-in-progress, extracted subs live here. Needs lots of space.", env="BLURAYRIPPER_STAGING_DIR"),
         Field("storage", "output_dir", "str", "Output dir", "./output", "Plex library root where finished, named videos are placed.", env="BLURAYRIPPER_OUTPUT_DIR"),
+        Field("storage", "path_map", "list", "Path map (old = new)", [], "Rewrite stored absolute paths written by another machine, e.g. 'Z:\\media = /mnt/TrueNas/media'. Only needed for jobs added from a file outside staging/output — those under them already float. A path that exists on THIS box is never rewritten, so one rule is safe on every machine.", env="BLURAYRIPPER_PATH_MAP"),
         Field("storage", "movies_subdir", "str", "Movies subfolder", "Movies", "Folder name for movies under the output dir (your Plex Movies library)."),
         Field("storage", "tv_subdir", "str", "TV subfolder", "TV Shows", "Folder name for TV shows under the output dir (your Plex TV library)."),
     ]),
