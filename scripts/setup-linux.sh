@@ -98,8 +98,13 @@ install_seconv() {
     # has dotnet-sdk-8.0, later ones don't), so ask apt what it actually has and
     # take the newest. Hardcoding 8.0 silently skipped seconv on Ubuntu 26.04.
     local sdk
+    # Match the SDK package EXACTLY (dotnet-sdk-10.0). The search also returns
+    # dotnet-sdk-10.0-source-built-artifacts, an internal build package which
+    # sorts last and would otherwise be picked — installing it leaves no `dotnet`
+    # on PATH, so seconv was skipped with no useful error.
     sdk="$(apt-cache --names-only search '^dotnet-sdk-[0-9]' 2>/dev/null \
-           | awk '{print $1}' | sort -V | tail -1)"
+           | awk '{print $1}' | grep -E '^dotnet-sdk-[0-9]+\.[0-9]+$' \
+           | sort -V | tail -1)"
     if [ -n "$sdk" ]; then
       info "Installing the .NET SDK ($sdk)"
       $SUDO apt-get install -y "$sdk" || sdk=""
