@@ -182,7 +182,10 @@ class _Reporter:
         wj.preview_off_clip = preview.off_clip
         wj.preview_on_clip = preview.on_clip
         wj.state = JobState.AWAITING_GRAIN
-        wj._grain_future = asyncio.get_event_loop().create_future()
+        # get_running_loop, not get_event_loop: this is inside a coroutine, so the
+        # loop is unambiguous, and get_event_loop's implicit-loop behaviour is
+        # deprecated (and increasingly noisy) on 3.12+.
+        wj._grain_future = asyncio.get_running_loop().create_future()
         self._m._persist(wj)
         self._m.bus.publish()
         self._m._notify(f"🎚 Grain choice: {self._m._name_of(wj)}",
