@@ -35,6 +35,20 @@ class HdrInfo:
     def is_dolby_vision(self) -> bool:
         return self.dv_profile is not None
 
+    def summary(self) -> str:
+        """One line for the job log — what HDR signalling this file carries."""
+        if self.dv_profile is not None:
+            head = f"Dolby Vision profile {self.dv_profile}"
+        elif self.is_hdr:
+            head = "HLG" if self.transfer == "arib-std-b67" else "HDR10"
+        else:
+            return f"SDR ({self.transfer or 'unknown transfer'})"
+        bits = [b for b in (
+            self.colorprim, self.transfer,
+            "master-display" if self.master_display else None,
+            f"max-cll {self.max_cll}" if self.max_cll else None) if b]
+        return f"{head} [{', '.join(bits)}]"
+
 
 def _num(frac) -> int | None:
     """Numerator of an ffprobe 'num/denom' string (already in x265 units)."""

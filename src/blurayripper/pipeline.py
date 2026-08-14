@@ -835,9 +835,44 @@ class Pipeline:
                     "falling back to HDR10.")
         elif enc.dovi and hdr.is_dolby_vision:
             report.on_event("Dolby Vision disc but dovi_tool/mkvmerge unavailable — HDR10 only.")
+        report.on_event(
+            f"ffmpeg UHD: source is {hdr.summary()} -> libx265 preset "
+            f"{enc.ffmpeg_preset}, CRF {enc.ffmpeg_crf}, audio {enc.ffmpeg_audio}"
+            f"{', tune=grain' if tune_grain else ''}.")
         await self.ffmpeg.encode(
             src, dst, on_progress=lambda p: self._encode_progress(p, report),
             tune_grain=tune_grain, low_priority=enc.low_priority)
+        await self._verify_hdr(dst, hdr, report)
+
+    async def _verify_hdr(self, dst: Path, want, report) -> None:
+        """Confirm the encode kept the thing this whole code path exists for.
+
+        An HDR10 source that comes out SDR is a SILENT failure: the file plays
+        fine and just looks washed out on an HDR TV, so you'd only notice months
+        later on the couch. It costs one ffprobe to know instead."""
+        if not want.is_hdr:
+            return
+        try:
+            got, _ = await self.ffmpeg.probe_video(dst)
+        except Exception as exc:
+            report.on_event(
+                f"Could not verify HDR on the output ({type(exc).__name__}: {exc}).")
+            return
+        missing = [name for name, src_v, out_v in (
+            ("transfer", want.transfer, got.transfer),
+            ("primaries", want.colorprim, got.colorprim),
+            ("matrix", want.colormatrix, got.colormatrix),
+            ("master-display", want.master_display, got.master_display),
+            ("max-cll", want.max_cll, got.max_cll),
+        ) if src_v and not out_v]
+        if missing:
+            report.on_event(
+                "HDR CHECK FAILED — the output is missing " + ", ".join(missing)
+                + ". It will play, but look washed out on an HDR TV. The file is "
+                "kept so you can judge it; the usual cause is an ffmpeg built "
+                "without x265 HDR support (check `ffmpeg -h encoder=libx265`).")
+        else:
+            report.on_event(f"HDR check passed — output carries {got.summary()}.")
 
     async def _encode_dovi(self, src: Path, dst: Path, hdr, duration: float,
                            tune_grain: bool, encode_dir: Path, report) -> None:
