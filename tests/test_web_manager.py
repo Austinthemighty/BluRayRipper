@@ -1989,3 +1989,17 @@ def test_a_present_source_file_still_auto_retries(manager, monkeypatch, tmp_path
 
     manager._schedule_auto_retry(wj)
     assert len(retried) == 1
+
+
+def test_no_drives_attached_counts_as_the_disc_being_missing(manager):
+    """A box with no optical drive can't possibly have the disc. Before the first
+    successful enumeration we don't know, so we don't guess — but after it, an
+    absent drive means retrying is pointless."""
+    wj = WebJob(id=500, source="disc:0", state=JobState.FAILED)
+
+    manager._drives_cache = []
+    manager._drives_scanned = False
+    assert manager._source_disc_missing(wj) is False    # haven't looked yet
+
+    manager._drives_scanned = True
+    assert manager._source_disc_missing(wj) is True     # looked, no drives at all

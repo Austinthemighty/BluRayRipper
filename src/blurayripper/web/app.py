@@ -10,6 +10,7 @@ Endpoints
   DELETE /api/jobs/{id}       -> remove a finished/parked job
   GET  /api/tmdb/search       -> TMDB search proxy {kind, query}
   GET  /api/tmdb/season       -> TMDB season episodes {tv_id, season}
+  GET  /api/jobs/{id}/aacs-dump -> download the kept AACS dump
   POST /api/workers/{id}/action -> drain/restart/update one worker ("*" = all)
   GET  /api/boxsets           -> box-set plan CSV + parsed rows
   POST /api/boxsets           -> save (or dry-run) the plan CSV {csv, dry_run}
@@ -339,6 +340,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             manager.rename_job(job_id, body.get("title", ""),
                                int(year) if year not in (None, "") else None)
         return {"ok": True}
+
+    @app.get("/api/jobs/{job_id}/aacs-dump")
+    async def job_aacs_dump(job_id: int):
+        """Download the AACS dump kept for a disc whose key MakeMKV doesn't know,
+        so it can be emailed without hunting through MakeMKV's data directory."""
+        wj = manager.jobs.get(job_id)
+        if wj is None:
+            raise HTTPException(status_code=404, detail="Job not found.")
+        path = Path(wj.aacs_dump) if wj.aacs_dump else None
+        if path is None or not path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail="No AACS dump kept for this job (or it has since been moved).")
+        return FileResponse(path, filename=path.name, media_type="application/gzip")
 
     @app.post("/api/jobs/{job_id}/remap")
     async def remap_job(job_id: int):

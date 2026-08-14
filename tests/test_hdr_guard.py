@@ -1,5 +1,7 @@
-"""A UHD title that falls back to HandBrake (ffmpeg path unavailable) must warn +
-notify that HDR/Dolby Vision won't be preserved, instead of silently making SDR."""
+"""A UHD title that would fall back to HandBrake loses HDR/Dolby Vision.
+
+By default that is BLOCKED (uhd_require_ffmpeg). With the block turned off it
+must still warn + notify rather than silently producing SDR."""
 
 import types
 
@@ -24,8 +26,9 @@ async def _run(pipe, report, tmp_path):
                              EncodeScheduler(3), report)
 
 
-def _pipe(tmp_path, monkeypatch, ffmpeg_uhd, ffmpeg_available):
+def _pipe(tmp_path, monkeypatch, ffmpeg_uhd, ffmpeg_available, block_uhd=False):
     s = load_settings()
+    s.encode.uhd_require_ffmpeg = block_uhd   # default True; off here to reach the warn path
     s.encode.ffmpeg_uhd = ffmpeg_uhd
     s.encode.uhd_min_height = 2160
     s.write_nfo = False
@@ -75,3 +78,40 @@ async def test_no_warning_when_ffmpeg_path_is_used(tmp_path, monkeypatch):
     await _run(pipe, r, tmp_path)
     assert r.notes == []
     assert not any("HDR" in e and "NOT" in e for e in r.events)
+
+
+async def test_uhd_is_blocked_from_handbrake_by_default(tmp_path, monkeypatch):
+    """The default: refuse rather than spend hours making an SDR 4K file. The
+    message has to say which setting to change and that the rip is kept."""
+    import pytest
+    pipe = _pipe(tmp_path, monkeypatch, ffmpeg_uhd=False, ffmpeg_available=True,
+                 block_uhd=True)
+    r = _R()
+    with pytest.raises(RuntimeError) as exc:
+        await _run(pipe, r, tmp_path)
+    msg = str(exc.value)
+    assert "UHD" in msg and "HandBrake" in msg
+    assert "disabled in Settings" in msg          # names the actual cause
+    assert "Retry" in msg and "rip is kept" in msg
+
+
+async def test_block_message_distinguishes_a_missing_ffmpeg(tmp_path, monkeypatch):
+    """Same block, different cause: the intent WAS to keep HDR, but this box has
+    no ffmpeg — that's a per-worker install problem, not a settings one."""
+    import pytest
+    pipe = _pipe(tmp_path, monkeypatch, ffmpeg_uhd=True, ffmpeg_available=False,
+                 block_uhd=True)
+    with pytest.raises(RuntimeError) as exc:
+        await _run(pipe, _R(), tmp_path)
+    assert "isn't available on this machine" in str(exc.value)
+
+
+async def test_sub_uhd_titles_are_untouched_by_the_block(tmp_path, monkeypatch):
+    """The guard must only fire on UHD — a 1080p title still encodes normally."""
+    pipe = _pipe(tmp_path, monkeypatch, ffmpeg_uhd=False, ffmpeg_available=True,
+                 block_uhd=True)
+
+    async def probe(path, report):
+        return 1080
+    monkeypatch.setattr(pipe, "_probe_height", probe)
+    await _run(pipe, _R(), tmp_path)      # no raise

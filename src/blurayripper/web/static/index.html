@@ -1105,6 +1105,13 @@ function buildResting(card, j){
   const body = card.querySelector('[data-body]');
   let html = `<div class="row"><button class="sec" data-redosubs title="Re-OCR subtitles from this job's staged rip or cached subs (no re-encode).">Redo subtitles</button>`;
   html += namingButtonHtml(j, "Fix the title/year — e.g. a remake mapped to the original (or vice versa). Episode numbers are kept; placed files are renamed.");
+  // A disc with no known volume key leaves a dump to email — offer it directly
+  // rather than making you find MakeMKV's data directory on the server.
+  if (j.aacs_dump) {
+    html += `<a class="sec" href="/api/jobs/${j.id}/aacs-dump" download
+      style="text-decoration:none;padding:2px 9px;border-radius:6px;"
+      title="MakeMKV has no volume key for this disc. Download this dump and email it to svq@makemkv.com; the key is usually added within 12-48h.">⤓ AACS dump</a>`;
+  }
   html += `<span data-msg class="muted"></span></div>`;
   // Failed disc job: let the user move the disc to another drive and rip from it
   // (a different drive can often read a sector the original couldn't).

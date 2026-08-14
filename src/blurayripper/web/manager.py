@@ -128,6 +128,7 @@ class WebJob:
     # Subtitle-based episode identification (auto-identify scrambled TV discs).
     auto_identify: bool = False
     show_tmdb_id: int | None = None
+    aacs_dump: str | None = None  # kept AACS dump, offered for download
     season: int | None = None
     candidate_episodes: list[int] = field(default_factory=list)
     show_title: str | None = None
@@ -235,6 +236,9 @@ class JobManager:
         self._drives_cache: list[Drive] = self._load_drives_cache()
         self._last_disc: dict[int, str] = {}  # drive index -> last auto-opened disc name
         self._last_drive_error: str | None = None
+        # True once the watcher has enumerated drives successfully at least once,
+        # so "not in the cache" can be read as "not attached" rather than "unknown".
+        self._drives_scanned = False
         # Cheap OS view of which drives hold media, so a tray closing on a new disc
         # triggers a scan immediately instead of waiting out the full poll interval.
         self._media_snapshot: dict[str, str] | None = None
@@ -294,6 +298,7 @@ class JobManager:
             show_tmdb_id=wj.show_tmdb_id,
             season=wj.season,
             candidate_episodes=list(wj.candidate_episodes),
+            aacs_dump=wj.aacs_dump,
             show_title=wj.show_title,
             show_year=wj.show_year,
         )
@@ -314,6 +319,7 @@ class JobManager:
         wj.show_tmdb_id, wj.season = rec.show_tmdb_id, rec.season
         wj.candidate_episodes = list(rec.candidate_episodes)
         wj.show_title, wj.show_year = rec.show_title, rec.show_year
+        wj.aacs_dump = getattr(rec, 'aacs_dump', None)
         job = Job(source=rec.source)
         job.disc = wj.disc
         job.fingerprint = rec.fingerprint
@@ -363,8 +369,19 @@ class JobManager:
             # An auto-identify job that hasn't been identified yet must re-run on
             # the rip box (workers can't rip/OCR/match), even at READY.
             needs_identify = wj.auto_identify and not wj.assignments
+            # A disc job at READY whose rip never finished is nobody's: serve skips
+            # READY as "worker-owned", but a worker refuses it (_fully_ripped) since
+            # there's no ripped file to encode — so it's claimed and released
+            # forever, showing "ready" while progressing never. Only serve can rip,
+            # so serve takes it back. With the disc absent it now fails fast with a
+            # reason instead of looping.
+            needs_rip = (wj.state is JobState.READY
+                         and (wj.source or "").startswith(("disc:", "dev:"))
+                         and self._rip_pending(wj))
             if clustered:
-                if wj.state in prep_states or (needs_identify and wj.state is JobState.READY):
+                if (wj.state in prep_states
+                        or (needs_identify and wj.state is JobState.READY)
+                        or needs_rip):
                     self._resume(wj)
                     resumed += 1
                 elif interrupted_fail:
@@ -613,6 +630,7 @@ class JobManager:
             try:
                 self._media_snapshot = await asyncio.to_thread(os_media_snapshot)
                 self._drives_cache = await self.list_drives()
+                self._drives_scanned = True
                 self._last_drive_error = None
                 self._save_drives_cache()  # survive restarts; keep the panel warm
                 if self.settings.auto_open:
@@ -1576,6 +1594,7 @@ class JobManager:
             dest = aacs_dump.collect(
                 found, self.settings.storage.staging_dir / "aacs-dumps",
                 wj.disc.disc_name if wj.disc else None)
+            wj.aacs_dump = str(dest)
             reporter.on_event(aacs_dump.advice(dest))
             self._notify(f"🔑 Unknown disc key: {self._name_of(wj)}",
                          f"Job #{wj.id} — AACS dump saved for submission.")
@@ -1857,7 +1876,10 @@ class JobManager:
         for d in self._drives_cache:
             if d.index == idx:
                 return not (d.disc_name and d.disc_name.strip())
-        return False  # drive not in the (maybe unpopulated) cache — don't assume absent
+        # Not in the cache. Once we've enumerated successfully at least once, that
+        # means the drive isn't attached at all — so the disc certainly isn't in it,
+        # and retrying is pointless. Before the first scan we genuinely don't know.
+        return self._drives_scanned
 
     # MakeMKV failure signatures that won't fix themselves on retry — the drive is
     # offline or the disc/drive can't be read. Matched (lower-cased) against the
@@ -2077,6 +2099,8 @@ class JobManager:
             # Rename edits an existing assignment; without one the job needs its
             # naming SET (re-map) instead, so the UI offers the right control.
             "has_naming": bool(wj.assignments),
+            # Offered as a download so the dump never has to be hunted for.
+            "aacs_dump": Path(wj.aacs_dump).name if wj.aacs_dump else None,
             "outputs": wj.outputs,
             # Whether the disc is still needed (some title left to rip). False once
             # ripping is done, so an encode/subtitle failure doesn't offer "change

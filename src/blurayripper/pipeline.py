@@ -899,6 +899,20 @@ class Pipeline:
         # so the misconfig doesn't quietly produce SDR files for hours.
         if bool(height) and height >= enc.uhd_min_height and not use_ffmpeg:
             name = getattr(assignment, "show_or_movie_title", None) or video_dest.stem
+            if enc.uhd_require_ffmpeg:
+                # Stop rather than warn. HandBrake would produce a watchable file,
+                # so the loss is silent — and a 4K encode runs for hours before you
+                # notice the HDR is gone. Failing costs seconds and keeps the rip,
+                # so fixing the setting and hitting Retry re-encodes only.
+                why = ("ffmpeg isn't available on this machine"
+                       if enc.ffmpeg_uhd else
+                       "the ffmpeg UHD path is disabled in Settings")
+                raise RuntimeError(
+                    f"{name} is UHD ({height}p) and would be encoded by HandBrake, "
+                    f"which drops HDR10/Dolby Vision — {why}. Enable 'ffmpeg UHD "
+                    "path' (and install ffmpeg on whichever box encodes), then "
+                    "Retry; the rip is kept, so only the encode re-runs. To accept "
+                    "SDR instead, turn off 'Block HandBrake on UHD'.")
             if enc.ffmpeg_uhd and not self.ffmpeg.available:
                 warn = (f"⚠ {name}: UHD ({height}p) but ffmpeg isn't available here — "
                         "HandBrake will encode it and HDR/Dolby Vision will NOT be "

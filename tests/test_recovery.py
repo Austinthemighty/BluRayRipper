@@ -67,9 +67,13 @@ async def test_clustered_recovery_leaves_ready_jobs_for_workers(tmp_path, monkey
     settings.cluster.use_workers = True
     store = MemoryStore()
     # Many READY (prepped, queued) jobs must NOT be re-run by the rip box.
+    # "Prepped" means the rip finished, so they carry a rip checkpoint — that's
+    # what distinguishes them from a READY job whose rip never completed, which
+    # no worker can take and which serve therefore has to reclaim.
     for i in range(1, 6):
         store.save(JobRecord(id=i, source=f"disc:{i}", state="ready", disc=_disc_dict(),
-                             selected_title_ids=[0]))
+                             selected_title_ids=[0],
+                             checkpoints={"0": {"ripped_path": f"job_{i}/rip/t000/a.mkv"}}))
     # A job still mid-prep should be resumed by the rip box.
     store.save(JobRecord(id=9, source="disc:9", state="ripping", disc=_disc_dict(),
                          selected_title_ids=[0]))
@@ -147,3 +151,86 @@ async def test_jobs_persist_to_store_on_transitions(tmp_path, monkeypatch):
     assert rec.source == "disc:0"
     assert rec.state == "awaiting_mapping"  # single-title disc auto-advances past titles
     assert rec.disc and rec.disc["disc_name"] == "WarGames"
+
+
+def _rec(**kw):
+    from blurayripper.persistence import JobRecord
+    base = dict(id=1, source="disc:0", state="ready", selected_title_ids=[0],
+                assignments=[{"title_id": 0, "kind": "movie",
+                              "show_or_movie_title": "X", "year": 2000}])
+    base.update(kw)
+    return JobRecord(**base)
+
+
+def test_recovery_takes_back_a_ready_disc_job_that_never_ripped(tmp_path, monkeypatch):
+    """Orphan case: serve skips READY as worker-owned, but a worker refuses a job
+    with no ripped file (_fully_ripped). It was claimed and released forever,
+    showing 'ready' while progressing never. Only serve can rip, so serve takes it."""
+    from blurayripper.config import load_settings
+    from blurayripper.persistence import MemoryStore
+    from blurayripper.web.manager import JobManager
+
+    class Durable(MemoryStore):
+        @property
+        def durable(self): return True
+
+    settings = load_settings()
+    settings.cluster.use_workers = True
+    monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    store = Durable()
+    store.save(_rec(id=300, checkpoints={}))          # no rip checkpoint at all
+
+    m = JobManager(settings, store=store)
+    resumed = []
+    monkeypatch.setattr(m, "_resume", lambda wj: resumed.append(wj.id))
+
+    m.recover()
+    assert resumed == [300]
+
+
+def test_recovery_still_leaves_a_ripped_ready_job_for_the_workers(tmp_path, monkeypatch):
+    """The guard must be narrow — a job whose rip finished is exactly what the
+    workers are for, and serve must not steal it back."""
+    from blurayripper.config import load_settings
+    from blurayripper.persistence import MemoryStore
+    from blurayripper.web.manager import JobManager
+
+    class Durable(MemoryStore):
+        @property
+        def durable(self): return True
+
+    settings = load_settings()
+    settings.cluster.use_workers = True
+    monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    store = Durable()
+    store.save(_rec(id=301, checkpoints={"0": {"ripped_path": "job_301/rip/t000/a.mkv"}}))
+
+    m = JobManager(settings, store=store)
+    resumed = []
+    monkeypatch.setattr(m, "_resume", lambda wj: resumed.append(wj.id))
+
+    m.recover()
+    assert resumed == []
+
+
+def test_a_ready_file_job_is_not_taken_back(tmp_path, monkeypatch):
+    """Only disc jobs need serve — a file job has nothing to rip."""
+    from blurayripper.config import load_settings
+    from blurayripper.persistence import MemoryStore
+    from blurayripper.web.manager import JobManager
+
+    class Durable(MemoryStore):
+        @property
+        def durable(self): return True
+
+    settings = load_settings()
+    settings.cluster.use_workers = True
+    monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    store = Durable()
+    store.save(_rec(id=302, source=r"Z:\x\Movie.mkv", checkpoints={}))
+
+    m = JobManager(settings, store=store)
+    resumed = []
+    monkeypatch.setattr(m, "_resume", lambda wj: resumed.append(wj.id))
+    m.recover()
+    assert resumed == []

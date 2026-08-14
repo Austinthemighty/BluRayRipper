@@ -69,6 +69,7 @@ SCHEMA: list[tuple[str, list[Field]]] = [
               choices=("ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow")),
         Field("encode", "ffmpeg_audio", "choice", "ffmpeg audio", "copy", "UHD-path audio: 'copy' keeps the originals (needs container = mkv); 'aac' re-encodes.", choices=("copy", "aac")),
         Field("encode", "dovi", "bool", "Preserve Dolby Vision", False, "Round-trip Dolby Vision (Profile 7 -> 8.1) on UHD. Needs dovi_tool + mkvmerge + temp space; requires the ffmpeg UHD path. Falls back to HDR10."),
+        Field("encode", "uhd_require_ffmpeg", "bool", "Block HandBrake on UHD", True, "Fail a UHD title instead of letting HandBrake encode it, since HandBrake silently drops HDR10/Dolby Vision. Turn off only if you deliberately want SDR 4K. Needs the ffmpeg UHD path enabled (and ffmpeg present on whichever box encodes)."),
     ]),
     ("Languages", [
         Field("languages", "keep", "list", "Keep languages", ["eng"], "Audio + subtitle languages to keep, as ISO 639-2/B codes, comma-separated (e.g. eng, pol). Others are dropped."),

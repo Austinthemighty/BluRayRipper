@@ -94,6 +94,7 @@ class JobRecord:
     candidate_episodes: list[int] = field(default_factory=list)
     show_title: str | None = None
     show_year: int | None = None
+    aacs_dump: str | None = None   # kept dump for a disc with no known key
 
     def to_json(self) -> dict:
         return asdict(self)

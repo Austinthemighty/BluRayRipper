@@ -203,6 +203,10 @@ class EncodeSettings:
     # inject -> remux to profile 8.1). Needs dovitool + mkvmerge + lots of temp
     # space. Falls back to HDR10 if unavailable. Requires ffmpeg_uhd.
     dovi: bool = False
+    # Refuse to encode a UHD title with HandBrake, which silently drops HDR10 and
+    # Dolby Vision. Default ON: a 4K disc quietly re-encoded to SDR over many
+    # hours is a worse outcome than a job that fails in seconds saying why.
+    uhd_require_ffmpeg: bool = True
 
 
 @dataclass
@@ -484,6 +488,7 @@ def load_settings(config_dir: Path | None = None, extra_overlay: dict | None = N
         ffmpeg_preset=str(encode_cfg.get("ffmpeg_preset", "medium")),
         ffmpeg_audio=str(encode_cfg.get("ffmpeg_audio", "copy")),
         dovi=bool(encode_cfg.get("dovi", False)),
+        uhd_require_ffmpeg=bool(encode_cfg.get("uhd_require_ffmpeg", True)),
     )
 
     lang_cfg = data.get("languages", {})
