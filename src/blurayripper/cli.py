@@ -1080,10 +1080,22 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         try:
             from .handbrake_store import SHARED_KEY, apply_shared_preset
             from .persistence import make_store
-            _shared = make_store(settings.database_url).get_shared_config(SHARED_KEY)
+            _store = make_store(settings.database_url)
+            _shared = _store.get_shared_config(SHARED_KEY)
             if _shared and apply_shared_preset(settings.config_dir, _shared):
                 settings = load_settings(args.config)
                 console.print("[dim]Applied the cluster's shared HandBrake preset.[/dim]")
+            # The web-edited settings overlay, same deal. It used to live only in
+            # a gitignored file, so a new box silently started from settings.toml
+            # defaults — which looks like the app changing settings, not like a
+            # file that never arrived.
+            from .settings_store import sync_from_cluster
+            note = sync_from_cluster(settings.config_dir, _store)
+            if note.startswith("pulled") or note.startswith("seeded"):
+                settings = load_settings(args.config)
+                console.print(f"[dim]Cluster settings: {note}.[/dim]")
+            elif "unreachable" in note:
+                console.print(f"[yellow]Cluster settings: {note}.[/yellow]")
         except Exception:
             pass  # DB down / not set up — fall back to the local preset
 

@@ -20,6 +20,8 @@ from pathlib import Path
 from .config import DEFAULT_CONFIG_DIR, _load_secrets  # noqa: F401 (shared secrets parse)
 
 OVERLAY_NAME = "settings.local.json"
+# Cluster-wide key holding the global overlay (persistence.cluster_config).
+SHARED_KEY = "settings.global"
 
 
 @dataclass
@@ -188,6 +190,48 @@ def read_overlay(cfg_dir: Path) -> dict:
     return {}
 
 
+def _write_overlay_file(cfg_dir: Path, overlay: dict) -> None:
+    path = _overlay_path(cfg_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(overlay, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8")
+
+
+def sync_from_cluster(cfg_dir: Path, store) -> str:
+    """Refresh the local overlay from Postgres, which owns it. Returns a summary.
+
+    The overlay is everything the web Settings page writes, and it used to live
+    only in a gitignored file — so it reached no other box, and moving machines
+    silently dropped every value back to settings.toml's defaults, which reads
+    as the app changing your settings rather than as a file that didn't come
+    across. Postgres is already the one thing every box can reach.
+
+    The local file stays as a CACHE: refreshed from the cluster at startup, and
+    used unchanged when the database is unreachable so a box still boots with
+    its last known config instead of silently reverting to defaults.
+    """
+    if store is None or not getattr(store, "durable", False):
+        return "no shared store — this box's settings stay local to it"
+    local = read_overlay(cfg_dir)
+    try:
+        remote = store.get_shared_config(SHARED_KEY)
+    except Exception as exc:
+        return (f"cluster unreachable ({type(exc).__name__}) — keeping the local "
+                "cache; settings were NOT reverted")
+    if remote is None:
+        # First run against this database: adopt what this box already has
+        # instead of wiping it, so switching to shared config never costs
+        # anyone the settings they are currently running.
+        if not local:
+            return "nothing stored in the cluster yet"
+        store.set_shared_config(SHARED_KEY, local)
+        return f"seeded the cluster from this box ({len(local)} section(s))"
+    if remote == local:
+        return "in sync with the cluster"
+    _write_overlay_file(cfg_dir, remote)
+    return f"pulled {len(remote)} section(s) from the cluster"
+
+
 def _configured(cfg_dir: Path) -> dict:
     """settings.toml deep-merged with the overlay (no secrets) — 'configured' values."""
     data: dict = {}
@@ -227,7 +271,7 @@ def _coerce(f: Field, raw: object):
     return value
 
 
-def save_overlay(cfg_dir: Path, updates: dict) -> dict:
+def save_overlay(cfg_dir: Path, updates: dict, store=None) -> dict:
     """Validate `updates` against the schema, merge into the overlay, write it.
 
     Unknown / non-editable keys (anything not in SCHEMA, including [database])
@@ -242,9 +286,13 @@ def save_overlay(cfg_dir: Path, updates: dict) -> dict:
             if spec is None:
                 continue
             overlay.setdefault(section, {})[key] = _coerce(spec, raw)
-    path = _overlay_path(cfg_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(overlay, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_overlay_file(cfg_dir, overlay)
+    # Publish to the cluster too, so this survives the box it was typed on.
+    if store is not None and getattr(store, "durable", False):
+        try:
+            store.set_shared_config(SHARED_KEY, overlay)
+        except Exception:
+            pass  # saved locally; the next successful sync will publish it
     return overlay
 
 
@@ -261,7 +309,7 @@ def save_settings(cfg_dir: Path, updates: dict, scope: str = "global", store=Non
     unset fields keep following the global config.
     """
     if not _is_worker_scope(scope):
-        return save_overlay(cfg_dir, updates)
+        return save_overlay(cfg_dir, updates, store)
     if store is None or not getattr(store, "durable", False):
         raise ValueError("Per-worker settings need a shared Postgres store "
                          "(set BLURAYRIPPER_DATABASE_URL and run `blurayripper db-init`).")
