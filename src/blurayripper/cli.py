@@ -330,6 +330,37 @@ async def _cmd_check(args: argparse.Namespace) -> int:
             f"[red]{runner} — configured but NOT found on this machine[/red]")
         ok = False
 
+    # A configured path proves the file is THERE, not that it runs. seconv is a
+    # framework-dependent .NET build, so a box whose runtime moved on (built
+    # against 8.0, only 10.x installed) passes every check above and then fails
+    # at OCR time, mid-job — the encode continues and the file is placed with no
+    # subtitles, so the job goes green and the loss is silent.
+    se = settings.tools.subtitleedit
+    if se and _on_disk(se):
+        import subprocess
+
+        try:
+            probe = subprocess.run([runner, se] if runner else [se],
+                                   capture_output=True, text=True, timeout=60)
+            blob = (probe.stderr or "") + (probe.stdout or "")
+        except (OSError, subprocess.SubprocessError):
+            blob = ""
+        if "must install or update .NET" in blob or "app-launch-failed" in blob:
+            want = ""
+            for marker in ("version '", "framework_version="):
+                if marker in blob:
+                    want = blob.split(marker, 1)[1].split("'")[0].split("&")[0]
+                    break
+            tool_table.add_row(
+                "subtitleedit (runs?)",
+                f"[red]NO — built against .NET {want or '(older)'} but this box "
+                "has a different runtime, so subtitle OCR fails mid-job and the "
+                "video is placed with no subtitles.\n"
+                "  Fix without reinstalling anything:\n"
+                "    sudo sed -i '2i export DOTNET_ROLL_FORWARD=LatestMajor' "
+                f"{se}[/red]")
+            ok = False
+
     def _optional_row(label: str, path: str | None, absent_msg: str) -> None:
         if _on_disk(path):
             tool_table.add_row(label, f"[green]{path}[/green]")

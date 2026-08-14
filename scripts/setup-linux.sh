@@ -129,7 +129,11 @@ install_seconv() {
   local dll="$TOOLS_DIR/seconv-bin/seconv.dll"
   if [ -f "$dll" ]; then
     # A tiny wrapper so it's a plain `seconv` on PATH, run via the .NET runtime.
-    printf '#!/usr/bin/env bash\nexec dotnet "%s" "$@"\n' "$dll" | $SUDO tee /usr/local/bin/seconv >/dev/null
+    # DOTNET_ROLL_FORWARD lets a build that targets an older .NET run on whatever
+    # runtime this release ships. Without it, seconv built against 8.0 refuses to
+    # start on a box that only has 10.x — and it fails at OCR time, mid-job, long
+    # after setup said everything installed fine.
+    printf '#!/usr/bin/env bash\nexport DOTNET_ROLL_FORWARD=LatestMajor\nexec dotnet "%s" "$@"\n' "$dll" | $SUDO tee /usr/local/bin/seconv >/dev/null
     $SUDO chmod +x /usr/local/bin/seconv
     ok "seconv -> /usr/local/bin/seconv (dotnet $dll)"
   else warn "seconv build produced no seconv.dll."; fi
