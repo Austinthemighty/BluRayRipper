@@ -975,6 +975,7 @@ class Pipeline:
                 await self._encode_uhd(ripped_mkv, encoded, bool(tune_grain),
                                        encode_dir, report)
             else:
+                report.on_event(f"HandBrake preset: {self.handbrake.speed_summary()}")
                 await self.handbrake.encode(
                     ripped_mkv, encoded,
                     on_progress=lambda p: self._encode_progress(p, report),

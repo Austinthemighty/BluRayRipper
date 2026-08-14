@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+import json
 from pathlib import Path
 
 from ..config import Settings
@@ -110,6 +111,31 @@ class HandBrake:
 
     def _effective_grain(self, tune_grain: bool | None) -> bool:
         return self._settings.encode.tune_grain if tune_grain is None else tune_grain
+
+    def speed_summary(self) -> str:
+        """What the active preset actually encodes at, for the job log.
+
+        HandBrake's speed and quality live inside the preset JSON, not in our
+        settings, so "which preset am I running" was only answerable by opening
+        the file. Two presets named similarly can differ by 5x in wall-clock."""
+        enc = self._settings.encode
+        try:
+            data = json.loads(Path(enc.preset_file).read_text())
+        except (OSError, ValueError) as exc:
+            return f"{enc.preset_name} (preset file unreadable: {exc})"
+        presets = data.get("PresetList") if isinstance(data, dict) else data
+        found = next((p for p in (presets or [])
+                      if p.get("PresetName") == enc.preset_name), None)
+        if found is None:
+            return (f"{enc.preset_name} (NOT FOUND in {Path(enc.preset_file).name} "
+                    "— HandBrake will fall back to its own built-in default)")
+        bits = [b for b in (
+            found.get("VideoEncoder"),
+            f"preset {found['VideoPreset']}" if found.get("VideoPreset") else None,
+            f"CQ {found['VideoQualitySlider']}"
+            if found.get("VideoQualitySlider") is not None else None,
+        ) if b]
+        return f"{enc.preset_name} [{', '.join(bits)}] from {Path(enc.preset_file).name}"
 
     def build_command(
         self, src: Path, dst: Path, *, tune_grain: bool | None = None,
