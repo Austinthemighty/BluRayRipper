@@ -119,8 +119,18 @@ def os_media_snapshot() -> dict[str, str] | None:
 
 
 def parse_drives(lines: list[str]) -> list[Drive]:
-    """Parse DRV lines from `makemkvcon -r info disc:<big>` into present drives."""
-    drives: list[Drive] = []
+    """Parse DRV lines from `makemkvcon -r info disc:<big>` into present drives.
+
+    Deduplicated by index. One makemkvcon run can emit the DRV block more than
+    once — it re-enumerates after LibreDrive/driver init, which is also why
+    "MakeMKV ... started" appears twice in a scan log — and every one of those
+    lines is the same physical drive. Appending them blindly showed each drive
+    twice in the panel, each with its own Add button queueing the same disc.
+
+    A later line wins, being the more initialised enumeration, except that it
+    must not blank a disc name or device the earlier one already had.
+    """
+    by_index: dict[int, Drive] = {}
     for line in lines:
         prefix, _, payload = line.partition(":")
         if prefix != "DRV":
@@ -128,15 +138,18 @@ def parse_drives(lines: list[str]) -> list[Drive]:
         fields = _split_robot_line(payload)
         if len(fields) < 6 or not fields[4]:  # require a non-empty drive name
             continue
-        drives.append(
-            Drive(
-                index=_to_int(fields[0]),
-                name=fields[4],
-                device=fields[6] if len(fields) >= 7 and fields[6] else None,
-                disc_name=fields[5] or None,
-            )
+        drive = Drive(
+            index=_to_int(fields[0]),
+            name=fields[4],
+            device=fields[6] if len(fields) >= 7 and fields[6] else None,
+            disc_name=fields[5] or None,
         )
-    return drives
+        prior = by_index.get(drive.index)
+        if prior is not None:
+            drive.disc_name = drive.disc_name or prior.disc_name
+            drive.device = drive.device or prior.device
+        by_index[drive.index] = drive
+    return list(by_index.values())
 
 # Attribute IDs we care about.
 ATTR_TYPE = 1
