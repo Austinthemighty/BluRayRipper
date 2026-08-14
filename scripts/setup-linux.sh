@@ -58,8 +58,12 @@ IFS=', ' read -r -a _langs <<< "$LANGS"
 for l in "${_langs[@]:-}"; do [ -n "$l" ] && TESS_LANGS="$TESS_LANGS tesseract-ocr-$l"; done
 $SUDO apt-get update -qq
 # shellcheck disable=SC2086
-$SUDO apt-get install -y handbrake-cli mkvtoolnix ffmpeg tesseract-ocr $TESS_LANGS curl tar git
-ok "HandBrakeCLI, mkvmerge/mkvextract, ffmpeg, tesseract installed (on PATH)."
+# default-jre is for MakeMKV, not for us: it shells out to a JRE for BD-Java
+# discs (menu-driven Blu-rays and most BD+ titles). Without one it does not fail
+# outright — it rips a subset of the titles and logs "This disc requires Java
+# runtime (JRE)" partway down, so the disc looks done and is quietly incomplete.
+$SUDO apt-get install -y handbrake-cli mkvtoolnix ffmpeg tesseract-ocr $TESS_LANGS curl tar git default-jre
+ok "HandBrakeCLI, mkvmerge/mkvextract, ffmpeg, tesseract, JRE installed (on PATH)."
 
 # Default TOOLS_DIR is /opt/brr-tools, which needs root to create — but the
 # unpack/build steps below run as the invoking user, so hand it over afterwards

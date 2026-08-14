@@ -286,6 +286,39 @@ async def _cmd_check(args: argparse.Namespace) -> int:
         else:
             tool_table.add_row(key, "[red]MISSING — install or set in settings.toml[/red]")
             ok = False
+    # Java, but only on a box that can actually rip. MakeMKV shells out to a JRE
+    # for BD-Java discs (menu-driven Blu-rays, and most BD+ titles); without one
+    # it does not fail cleanly, it rips a subset of titles and logs "This disc
+    # requires Java runtime (JRE)" partway down a long log. An encode-only worker
+    # never touches a disc, so requiring it there would be noise.
+    if settings.tools.makemkvcon:
+        import os
+        import subprocess
+
+        java = _shutil.which("java") or ""
+        if not java and os.environ.get("JAVA_HOME"):
+            cand = Path(os.environ["JAVA_HOME"]) / "bin" / "java"
+            java = str(cand) if cand.exists() else ""
+        if java:
+            ver = ""
+            try:  # java prints its version to stderr, and has for decades
+                out = subprocess.run([java, "-version"], capture_output=True,
+                                     text=True, timeout=15)
+                ver = (out.stderr or out.stdout).splitlines()[0].strip()
+            except (OSError, subprocess.SubprocessError, IndexError):
+                pass
+            tool_table.add_row("java (BD-Java discs)",
+                               f"[green]{ver or java}[/green]")
+        else:
+            tool_table.add_row(
+                "java (BD-Java discs)",
+                "[red]MISSING — MakeMKV needs a JRE for BD-Java/BD+ discs. Without "
+                "it those discs rip incomplete rather than failing outright.\n"
+                "  Debian/Ubuntu: sudo apt-get install -y default-jre\n"
+                "  Windows: install a JRE (e.g. Adoptium Temurin) and make sure "
+                "java is on PATH[/red]")
+            ok = False
+
     runner = settings.tools.subtitleedit_runner
     if not runner:
         tool_table.add_row("subtitleedit_runner", "[dim](none — runs directly)[/dim]")
