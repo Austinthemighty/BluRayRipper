@@ -363,7 +363,45 @@ def _load_secrets(config_dir: Path) -> dict[str, str]:
     for key, value in os.environ.items():
         if key == "TMDB_API_KEY" or key.startswith(("BLURAYRIPPER_", "OPENSUBTITLES_")):
             secrets[key] = value
+    _merge_cluster_secrets(secrets)
     return secrets
+
+
+# Decrypted once per process: the scrypt derivation is deliberately slow, and
+# load_settings is called freely. Keyed by (database, passphrase) so a test or a
+# rotation that changes either does not read a stale result.
+_CLUSTER_SECRETS: dict[tuple[str, str], dict[str, str]] = {}
+
+
+def _merge_cluster_secrets(secrets: dict[str, str]) -> None:
+    """Fill in credentials shared through Postgres, encrypted at rest.
+
+    They fill GAPS only — a value present in this box's secrets.env or process
+    env wins, so a machine can still override one locally, and pointing a box at
+    the cluster can never silently change a credential it already had.
+
+    Doing nothing without a passphrase keeps every existing install, and every
+    test, on exactly the path it was on before.
+    """
+    from .services import secretbox
+
+    passphrase = secrets.get(secretbox.PASSPHRASE_KEY, "").strip()
+    db_url = secrets.get("BLURAYRIPPER_DATABASE_URL", "").strip()
+    if not passphrase or not db_url:
+        return
+    cache_key = (db_url, passphrase)
+    if cache_key not in _CLUSTER_SECRETS:
+        from .persistence import make_store
+        try:
+            _CLUSTER_SECRETS[cache_key] = secretbox.fetch(
+                make_store(db_url), passphrase)
+        except secretbox.SecretsUnavailable:
+            raise
+        except Exception:
+            _CLUSTER_SECRETS[cache_key] = {}   # database down: use local values
+    for key, value in _CLUSTER_SECRETS[cache_key].items():
+        if not secrets.get(key, "").strip():
+            secrets[key] = value
 
 
 def _path_map_from(storage_cfg: dict, secrets: dict) -> list[str]:

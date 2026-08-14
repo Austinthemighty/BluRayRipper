@@ -1076,6 +1076,90 @@ async def _cmd_resub(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_secrets(args: argparse.Namespace) -> int:
+    """Manage the credentials shared through Postgres.
+
+    Values are never printed. The whole point is that they stop being readable
+    from anywhere except a box that already holds the passphrase, and a CLI that
+    echoes them back would put them into shell history and terminal scrollback.
+    """
+    from .config import _load_secrets
+    from .persistence import make_store
+    from .services import secretbox
+
+    settings = load_settings(args.config)
+    raw = _load_secrets(settings.config_dir)
+    passphrase = raw.get(secretbox.PASSPHRASE_KEY, "").strip()
+    if not settings.database_url:
+        console.print("[red]No database configured — nothing to share with.[/red]")
+        return 2
+    if not passphrase:
+        console.print(
+            f"[red]{secretbox.PASSPHRASE_KEY} is not set in config/secrets.env.[/red]\n"
+            "Generate one and put it in secrets.env on EVERY box (it must match):\n"
+            "  python3 -c \"import secrets; print(secrets.token_urlsafe(32))\"")
+        return 2
+    store = make_store(settings.database_url)
+
+    if args.action == "clear":
+        store.set_shared_config(secretbox.SHARED_KEY, {})
+        console.print("[green]Cleared.[/green] Every box falls back to its own "
+                      "secrets.env on the next restart.")
+        return 0
+
+    if args.action == "push":
+        movable = secretbox.movable(raw)
+        if not movable:
+            console.print(
+                "[yellow]Nothing to push — none of the shareable credentials are "
+                f"set on this box.[/yellow] Shareable: {', '.join(secretbox.SHARED_KEYS)}")
+            return 1
+        secretbox.publish(store, passphrase, movable)
+        console.print(
+            f"[bold green]Stored {len(movable)} credential(s), encrypted.[/bold green]")
+        for name in sorted(movable):
+            console.print(f"  [dim]{name}[/dim]")
+        console.print(
+            "\n[dim]Other boxes pick these up on their next restart, as long as "
+            f"their secrets.env has the same {secretbox.PASSPHRASE_KEY}. A local "
+            "value still wins, so a box can override one.[/dim]")
+        return 0
+
+    # status
+    try:
+        stored = secretbox.fetch(store, passphrase)
+    except secretbox.SecretsUnavailable as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 2
+    if not stored:
+        console.print("[yellow]No credentials stored in the cluster.[/yellow] "
+                      "Run [bold]blurayripper secrets push[/bold] from the box "
+                      "that has them.")
+        return 1
+    # `raw` has the cluster values merged in already, so read the file directly
+    # to tell "this box overrides it" apart from "this box received it".
+    local_only = {}
+    env_file = settings.config_dir / "secrets.env"
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            if "=" in line and not line.strip().startswith("#"):
+                k, _, v = line.partition("=")
+                local_only[k.strip()] = v.strip().strip('"').strip("'")
+    table = Table("Credential", "In cluster", "Overridden on this box",
+                  title="Shared credentials (values never shown)")
+    for name in secretbox.SHARED_KEYS:
+        table.add_row(
+            name,
+            "[green]yes[/green]" if name in stored else "[dim]no[/dim]",
+            "[yellow]yes[/yellow]" if local_only.get(name, "").strip() else "[dim]no[/dim]")
+    console.print(table)
+    console.print(
+        "[dim]The database holds ciphertext only. Anyone who can read a box's "
+        "secrets.env can still decrypt them — that is unavoidable, since a box "
+        "must decrypt unattended at boot.[/dim]")
+    return 0
+
+
 async def _cmd_db_init(args: argparse.Namespace) -> int:
     from .persistence import MemoryStore, make_store
 
@@ -1388,6 +1472,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     db_init = sub.add_parser("db-init", help="Create/verify the Postgres schema for crash recovery")
     db_init.set_defaults(func=_cmd_db_init)
+
+    secrets_p = sub.add_parser(
+        "secrets", help="Share API credentials through Postgres, encrypted at rest")
+    secrets_p.add_argument(
+        "action", choices=("push", "status", "clear"),
+        help="push: encrypt this box's credentials to the cluster. "
+             "status: show what is stored (names only, never values). "
+             "clear: remove them from the cluster.")
+    secrets_p.set_defaults(func=_cmd_secrets)
 
     worker = sub.add_parser(
         "worker", help="Run an encode worker that pulls jobs from the shared queue "

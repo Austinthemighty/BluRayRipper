@@ -26,6 +26,10 @@ web = [
 postgres = [
     "psycopg[binary]>=3.1",
 ]
+# Share API credentials through Postgres, encrypted at rest (optional).
+secrets = [
+    "cryptography>=42.0",
+]
 # Read cover art from inside .iso sources (optional).
 iso = [
     "pycdlib>=1.14",
