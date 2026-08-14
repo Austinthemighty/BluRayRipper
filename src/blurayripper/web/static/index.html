@@ -802,7 +802,14 @@ function liveUpdate(card, j){
     card.querySelector('[data-body]').prepend(o);
   }
   if (j.state==='failed' && !card.querySelector('[data-retry]')) {
-    const b=document.createElement('button'); b.dataset.retry='1'; b.textContent='Retry';
+    const b=document.createElement('button'); b.dataset.retry='1';
+    // Say what it does. The same endpoint either RIPS (no ripped file yet — needs
+    // the disc in the drive) or resumes from checkpoints, and "Retry" alone left
+    // you guessing which.
+    b.textContent = j.retry_rips ? '⏏ Rip this disc' : '↻ Resume (no re-rip)';
+    b.title = j.retry_rips
+      ? 'Rips the disc from the start — put it in a drive first (use "Rip from drive" if it is in the other one). Nothing is read until you click this.'
+      : 'Continues from where it stopped, reusing the finished rip. The disc is not needed.';
     b.style.marginTop='8px';
     b.onclick=()=>api('POST','/api/jobs/'+j.id+'/retry').catch(e=>alert(e.message));
     card.querySelector('[data-body]').appendChild(b);

@@ -166,8 +166,8 @@ def test_an_unripped_ready_disc_job_is_parked_for_review(tmp_path, monkeypatch):
     """Orphan case: serve skips READY as worker-owned, but a worker refuses a job
     with no ripped file (_fully_ripped), so it was claimed and released forever
     while showing 'ready'. It's now surfaced as FAILED for review rather than
-    re-ripped unasked — the disc may not even be in the drive, and Retry is the
-    approval."""
+    re-ripped unasked — the disc may not even be in the drive. Approving it is an
+    explicit click, and the button says which of the two things it does."""
     from blurayripper.config import load_settings
     from blurayripper.persistence import MemoryStore
     from blurayripper.web.manager import JobManager
@@ -192,7 +192,9 @@ def test_an_unripped_ready_disc_job_is_parked_for_review(tmp_path, monkeypatch):
     assert wj.state is JobState.FAILED         # surfaced for review instead
     assert "Rip never completed" in (wj.error or "")
     log = "\n".join(wj.log)
-    assert "Retry" in log and "Nothing has been re-ripped" in log
+    assert "Rip this disc" in log and "Nothing has been read or re-ripped" in log
+    # The card must say Retry RIPS here, not that it resumes an existing rip.
+    assert m._job_dict(wj)["retry_rips"] is True
 
 
 def test_recovery_still_leaves_a_ripped_ready_job_for_the_workers(tmp_path, monkeypatch):

@@ -391,8 +391,9 @@ class JobManager:
                 wj.error = ("Rip never completed — no ripped file for this job.")
                 wj.log.append(stamp_log(
                     "Needs review: this job was queued as ready but its rip never "
-                    "finished, so no worker can encode it. Put the disc in and click "
-                    "Retry to rip it, or Remove it. Nothing has been re-ripped."))
+                    "finished, so no worker can encode it. Put the disc in a drive "
+                    "and click “Rip this disc”, or Remove it. Nothing has been read "
+                    "or re-ripped."))
                 self._persist(wj)
             elif clustered:
                 if (wj.state in prep_states
@@ -2121,6 +2122,11 @@ class JobManager:
             # ripping is done, so an encode/subtitle failure doesn't offer "change
             # drive" (the disc isn't involved anymore).
             "needs_disc": self._rip_pending(wj),
+            # What Retry would actually do, so the button can say it rather than
+            # making you infer it: a job with no ripped file RIPS (needs the disc
+            # in the drive), one that's already ripped resumes from checkpoints.
+            "retry_rips": ((wj.source or "").startswith(("disc:", "dev:"))
+                           and self._rip_pending(wj)),
             "preview": (
                 {
                     # Poster URLs only when ffmpeg produced the stills.
