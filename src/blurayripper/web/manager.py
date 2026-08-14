@@ -378,10 +378,25 @@ class JobManager:
             needs_rip = (wj.state is JobState.READY
                          and (wj.source or "").startswith(("disc:", "dev:"))
                          and self._rip_pending(wj))
-            if clustered:
+            if clustered and needs_rip:
+                # Park for review rather than re-ripping unasked. These are discs
+                # whose rip never completed, so resuming means spinning up the
+                # drive again — and the disc may not even be in it. FAILED puts
+                # them in front of you with the controls that already exist
+                # (Retry to rip, "Rip from drive" to move it, Remove to drop it),
+                # so Retry IS the approval.
+                wj.state = JobState.FAILED
+                if wj._pipeline_job is not None:
+                    wj._pipeline_job.state = JobState.FAILED
+                wj.error = ("Rip never completed — no ripped file for this job.")
+                wj.log.append(stamp_log(
+                    "Needs review: this job was queued as ready but its rip never "
+                    "finished, so no worker can encode it. Put the disc in and click "
+                    "Retry to rip it, or Remove it. Nothing has been re-ripped."))
+                self._persist(wj)
+            elif clustered:
                 if (wj.state in prep_states
-                        or (needs_identify and wj.state is JobState.READY)
-                        or needs_rip):
+                        or (needs_identify and wj.state is JobState.READY)):
                     self._resume(wj)
                     resumed += 1
                 elif interrupted_fail:
