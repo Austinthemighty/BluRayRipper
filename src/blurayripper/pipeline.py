@@ -20,7 +20,9 @@ from pathlib import Path, PurePosixPath
 from typing import Iterator, Protocol
 
 from .config import Settings
-from .models import SOURCE_SELECTORS, DiscInfo, EpisodeAssignment, MediaKind
+from .models import (
+    SOURCE_SELECTORS, DiscInfo, EpisodeAssignment, MediaKind, StreamType,
+)
 from .scheduler import EncodeScheduler, encode_weight
 from .services import coverart, library, naming, nfo, os_upload, pathmap
 from .services.mapping_store import MappingStore
@@ -185,6 +187,15 @@ class Pipeline:
         staging_root = self.settings.storage.staging_dir / (job_name or _slug(job.source))
         try:
             await self._process_titles(job, staging_root, scheduler, report)
+            problems = self._verify_outputs(job)
+            if problems:
+                raise RuntimeError(
+                    "Encoding finished but the output is incomplete:\n  - "
+                    + "\n  - ".join(problems)
+                    + "\nThe rip and encode are kept, so retrying resumes from "
+                      "them rather than starting over.")
+            report.on_event(f"Verified {self._output_count(job)} output file(s) "
+                            "in place.")
             self._persist_mapping(job, report)
             library.cleanup(staging_root)
             job.state = JobState.DONE
@@ -200,6 +211,57 @@ class Pipeline:
         return job
 
     # --- stages ---------------------------------------------------------
+
+    def _output_count(self, job: Job) -> int:
+        return sum(1 + len(r.subtitle_paths) for r in job.results if r.video_path)
+
+    def _verify_outputs(self, job: Job) -> list[str]:
+        """Everything that should be on disk but isn't. Empty means really done.
+
+        A job that half-failed still finished green: job 42's subtitle OCR died
+        while the encode carried on, so the video was placed with no sidecars and
+        nothing said so. Every stage reports its own success, and none of them
+        looks at the finished folder — checking the disk once at the end is what
+        separates "finished" from "finished except for the parts that failed
+        quietly".
+        """
+        problems: list[str] = []
+        if not job.results:
+            return ["nothing was produced — no titles were processed"]
+        keep = {l.lower() for l in self.settings.languages.keep}
+        for result in job.results:
+            video = result.video_path
+            if video is None:
+                problems.append(f"title {result.title_id}: no video was placed")
+            elif not video.exists():
+                problems.append(f"missing video: {video}")
+            elif video.stat().st_size == 0:
+                problems.append(f"video is 0 bytes: {video}")
+            for srt in result.subtitle_paths:
+                if not srt.exists():
+                    problems.append(f"missing subtitle: {srt.name}")
+                elif srt.stat().st_size == 0:
+                    problems.append(f"subtitle is 0 bytes: {srt.name}")
+            # Expected but absent. Placed-file checks alone cannot catch this:
+            # when OCR fails there is no path to check, so the evidence is the
+            # DISC having tracks we keep while nothing came out.
+            if not result.subtitle_paths and job.disc is not None:
+                title = next((t for t in job.disc.titles
+                              if t.title_id == result.title_id), None)
+                langs = sorted({
+                    (st.language or "und").lower()
+                    for st in (title.streams if title else [])
+                    if st.stream_type is StreamType.SUBTITLE
+                    and (st.language or "und").lower() in keep})
+                if langs:
+                    problems.append(
+                        f"title {result.title_id}: the disc carries "
+                        f"{', '.join(langs)} subtitle track(s) but no .srt was "
+                        "produced (subtitle OCR failed or was skipped)")
+            if self.settings.write_nfo and video is not None and video.exists():
+                if not video.with_suffix(".nfo").exists():
+                    problems.append(f"missing NFO sidecar: {video.stem}.nfo")
+        return problems
 
     async def _process_titles(
         self, job: Job, staging_root: Path, scheduler: EncodeScheduler, report
