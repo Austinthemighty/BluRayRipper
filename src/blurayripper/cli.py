@@ -928,6 +928,30 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
             "[red]A worker needs a shared database. Set BLURAYRIPPER_DATABASE_URL "
             "(the same Postgres the rip machine uses) in config/secrets.env.[/red]")
         return 2
+    # Pull the cluster's shared config before starting, same as serve does. A
+    # worker box has its own gitignored config files, so without this it happily
+    # encodes at whatever preset that box was last set to — the drift is silent,
+    # and the output looks fine until you compare it to another worker's.
+    try:
+        from .boxset_plan import sync_from_cluster as _sync_boxsets
+        from .handbrake_store import SHARED_KEY, apply_shared_preset
+        from .persistence import make_store
+        from .settings_store import sync_from_cluster as _sync_settings
+        _store = make_store(settings.database_url)
+        _shared = _store.get_shared_config(SHARED_KEY)
+        changed = bool(_shared and apply_shared_preset(settings.config_dir, _shared))
+        for note in (_sync_settings(settings.config_dir, _store),
+                     _sync_boxsets(settings, _store)):
+            if note.startswith("pulled"):
+                changed = True
+                console.print(f"[dim]Cluster config: {note}.[/dim]")
+            elif "unreachable" in note:
+                console.print(f"[yellow]Cluster config: {note}.[/yellow]")
+        if changed:
+            settings = load_settings(args.config)
+    except Exception:
+        pass  # DB down — the worker still starts on its local cache
+
     runner = WorkerRunner(settings, worker_id=args.name)
     console.print(
         f"[bold green]Encode worker[/bold green] {runner.worker_id} — "
