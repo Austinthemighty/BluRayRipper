@@ -243,3 +243,77 @@ def test_a_ready_file_job_is_not_taken_back(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "_resume", lambda wj: resumed.append(wj.id))
     m.recover()
     assert resumed == []
+
+
+def _drive(index, disc_name):
+    from blurayripper.tools.makemkv import Drive
+    return Drive(index=index, name="Test Drive", device=f"/dev/sr{index}",
+                 disc_name=disc_name)
+
+
+def _mgr_with_failed_disc(tmp_path, monkeypatch, *, ripped: bool):
+    from blurayripper.config import load_settings
+    from blurayripper.models import DiscInfo
+    from blurayripper.persistence import MemoryStore
+    from blurayripper.web.manager import JobManager, WebJob
+
+    settings = load_settings()
+    monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    m = JobManager(settings, store=MemoryStore())
+    wj = WebJob(id=300, source="disc:0", state=JobState.FAILED)
+    wj.disc = DiscInfo(source="disc:0", disc_name="HOUSE_S1_D3", titles=[])
+    wj.selected_title_ids = [0]
+    if ripped:
+        from blurayripper.pipeline import Job
+
+        f = tmp_path / "ripped.mkv"
+        f.write_bytes(b"x")
+        job = Job(source="disc:0")
+        job.disc = wj.disc
+        job.selected_title_ids = [0]
+        job.checkpoints = {0: {"ripped_path": str(f)}}
+        wj._pipeline_job = job
+    m.jobs[300] = wj
+    return m, wj
+
+
+def test_reinserting_a_parked_jobs_disc_matches_it_instead_of_starting_a_new_job(
+        tmp_path, monkeypatch):
+    """The review gate parks jobs until the disc goes back in — so the disc going
+    back in must not spawn a SECOND job for it, which would then compete with the
+    original for the same drive and leave the review undone."""
+    m, wj = _mgr_with_failed_disc(tmp_path, monkeypatch, ripped=False)
+    added = []
+    monkeypatch.setattr(m, "add_disc", lambda src: added.append(src))
+    m._drives_cache = [_drive(1, "HOUSE_S1_D3")]
+
+    m._auto_open(m._drives_cache)
+
+    assert added == []                       # no duplicate job
+    assert wj.source == "disc:1"             # repointed at the drive it is in
+    assert "Disc is back" in "\n".join(wj.log)
+    assert m._job_dict(wj)["disc_loaded"] is True
+
+
+def test_a_job_that_already_ripped_does_not_grab_the_disc(tmp_path, monkeypatch):
+    """It failed after ripping, so its file is on disk. Re-ripping because the
+    disc happens to be loaded would throw away work and take the drive."""
+    m, wj = _mgr_with_failed_disc(tmp_path, monkeypatch, ripped=True)
+    added = []
+    monkeypatch.setattr(m, "add_disc", lambda src: added.append(src))
+
+    m._auto_open([_drive(1, "HOUSE_S1_D3")])
+
+    assert added == ["disc:1"]               # a genuinely new job, as before
+    assert wj.source == "disc:0"             # untouched
+
+
+def test_an_unrelated_disc_still_starts_a_new_job(tmp_path, monkeypatch):
+    """Matching must be on the disc, not merely on something having failed."""
+    m, _ = _mgr_with_failed_disc(tmp_path, monkeypatch, ripped=False)
+    added = []
+    monkeypatch.setattr(m, "add_disc", lambda src: added.append(src))
+
+    m._auto_open([_drive(1, "SOME_OTHER_MOVIE")])
+
+    assert added == ["disc:1"]

@@ -806,18 +806,26 @@ function liveUpdate(card, j){
     o.style.fontSize='12px'; o.textContent = j.outputs.join('\n');
     card.querySelector('[data-body]').prepend(o);
   }
-  if (j.state==='failed' && !card.querySelector('[data-retry]')) {
-    const b=document.createElement('button'); b.dataset.retry='1';
-    // Say what it does. The same endpoint either RIPS (no ripped file yet — needs
-    // the disc in the drive) or resumes from checkpoints, and "Retry" alone left
-    // you guessing which.
-    b.textContent = j.retry_rips ? '⏏ Rip this disc' : '↻ Resume (no re-rip)';
-    b.title = j.retry_rips
-      ? 'Rips the disc from the start — put it in a drive first (use "Rip from drive" if it is in the other one). Nothing is read until you click this.'
-      : 'Continues from where it stopped, reusing the finished rip. The disc is not needed.';
-    b.style.marginTop='8px';
-    b.onclick=()=>api('POST','/api/jobs/'+j.id+'/retry').catch(e=>alert(e.message));
-    card.querySelector('[data-body]').appendChild(b);
+  if (j.state==='failed') {
+    let b = card.querySelector('[data-retry]');
+    if (!b) {
+      b=document.createElement('button'); b.dataset.retry='1';
+      b.style.marginTop='8px';
+      b.onclick=()=>api('POST','/api/jobs/'+j.id+'/retry').catch(e=>alert(e.message));
+      card.querySelector('[data-body]').appendChild(b);
+    }
+    // Say what it does, and recompute every render: the same endpoint either
+    // RIPS (no ripped file yet) or resumes from checkpoints, and whether the
+    // disc is loaded changes under us as discs are swapped between drives.
+    b.textContent = !j.retry_rips ? '↻ Resume (no re-rip)'
+      : j.disc_loaded ? '⏏ Rip this disc — it is in a drive now'
+      : '⏏ Rip this disc';
+    b.title = !j.retry_rips
+      ? 'Continues from where it stopped, reusing the finished rip. The disc is not needed.'
+      : j.disc_loaded
+        ? 'This disc is loaded right now. Rips it from the start; nothing is read until you click.'
+        : 'Rips the disc from the start — put it in a drive first. Nothing is read until you click this.';
+    b.className = j.disc_loaded && j.retry_rips ? '' : 'sec';
   }
   // A folder's worth of episodes added as separate jobs: offer to fold them into
   // one, which is the shape a folder scan would have produced — name once, not N

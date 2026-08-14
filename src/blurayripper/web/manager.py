@@ -722,6 +722,28 @@ class JobManager:
                     or self._scan_pending_for(source)):
                 self._last_disc[d.index] = name  # already handled / in progress
                 continue
+            waiting = self._jobs_awaiting_this_disc(name)
+            if waiting:
+                # Putting the disc back IS the next step for these, so starting a
+                # second job for it is exactly wrong: the duplicate then competes
+                # with the original for the same drive, and the review the job is
+                # parked for never happens.
+                self._last_disc[d.index] = name
+                where = self.drive_names.get(d.device)
+                for wj in waiting:
+                    wj.source = source   # point it at the drive it is actually in
+                    wj.log.append(stamp_log(
+                        f"Disc is back in {where or d.name or source}. This job is "
+                        "still parked for review — use its rip button to start it. "
+                        "No new job was created for this disc."))
+                    self._persist(wj)
+                self.bus.publish()
+                self._notify(
+                    f"💿 Disc back for review: {name}",
+                    f"Job #{waiting[0].id} was waiting for this disc."
+                    if len(waiting) == 1 else
+                    f"{len(waiting)} parked jobs match this disc.")
+                continue
             self._last_disc[d.index] = name
             self.add_disc(source)  # new disc -> scan it
         # Forget drives that are gone or now empty, so reinserting re-triggers.
@@ -736,6 +758,35 @@ class JobManager:
                 continue
             if idx not in present or idx in empty:
                 self._last_disc.pop(idx, None)
+
+    def _jobs_awaiting_this_disc(self, disc_name: str) -> list[WebJob]:
+        """Parked jobs that are waiting for exactly this disc to come back.
+
+        _disc_has_active_job deliberately ignores failed jobs, which is right for
+        "that disc failed, here is a different one" — but wrong for the case the
+        review gate creates, where the disc going back in is the intended next
+        step. Matched on the volume label, the same key that function uses.
+
+        Only jobs that still need a rip qualify: one that failed AFTER ripping
+        has its file already and must not be re-ripped just because the disc
+        happens to be in the drive."""
+        return [
+            wj for wj in self.jobs.values()
+            if self._live_state(wj) is JobState.FAILED
+            and wj.disc is not None
+            and (wj.disc.disc_name or "").strip() == disc_name
+            and self._rip_pending(wj)
+        ]
+
+    def _disc_is_loaded(self, wj: WebJob) -> bool:
+        """Whether this job's disc is in a drive right now, so the UI can say so
+        instead of leaving you to work out which of 50 parked jobs you just fed."""
+        if wj.disc is None:
+            return False
+        name = (wj.disc.disc_name or "").strip()
+        if not name:
+            return False
+        return any((d.disc_name or "").strip() == name for d in self._drives_cache)
 
     def _scan_pending_for(self, source: str) -> bool:
         """Whether a live job for this drive hasn't finished scanning yet.
@@ -2195,6 +2246,8 @@ class JobManager:
             "needs_review": (wj.state is JobState.FAILED
                              and (wj.source or "").startswith(("disc:", "dev:"))
                              and self._rip_pending(wj)),
+            # True when this job's disc is sitting in a drive right now.
+            "disc_loaded": self._disc_is_loaded(wj),
             # >1 when this job's folder holds sibling episode files that could be
             # folded into one job and named once instead of N times.
             "group_with": len(self._group_candidates(wj)[0]),
