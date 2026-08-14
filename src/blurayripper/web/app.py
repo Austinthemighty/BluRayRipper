@@ -564,7 +564,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         dry_run = bool(body.get("dry_run"))
         if not dry_run:
             try:
-                boxset_plan.save_plan(settings, text)
+                boxset_plan.save_plan(settings, text, manager.store)
             except OSError as exc:
                 raise HTTPException(status_code=400, detail=f"Couldn't save the plan: {exc}")
         return {"ok": True, "saved": not dry_run, "errors": errors,

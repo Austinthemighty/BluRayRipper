@@ -89,3 +89,36 @@ def test_without_a_shared_store_nothing_changes(tmp_path):
     _overlay(tmp_path, {"encode": {"ffmpeg_preset": "slower"}})
     assert "no shared store" in sync_from_cluster(tmp_path, MemoryStore())
     assert read_overlay(tmp_path) == {"encode": {"ffmpeg_preset": "slower"}}
+
+
+def test_the_box_set_plan_also_lives_in_the_cluster(tmp_path):
+    """Same class of file, same failure: the CSV is gitignored, so it never
+    reached the workers and the migration lost it. A missing plan is silent —
+    discs just stop being auto-named — so it must not depend on a manual copy."""
+    from blurayripper import boxset_plan
+
+    settings = type("S", (), {"config_dir": tmp_path})()
+    store = Durable()
+    csv = "disc_label,show,year,season,first_episode,episodes\nHAWAII_S1_D1,Hawaii Five-0,1968,1,1,3\n"
+    boxset_plan.save_plan(settings, csv, store)
+
+    fresh = type("S", (), {"config_dir": tmp_path / "newbox"})()
+    note = boxset_plan.sync_from_cluster(fresh, store)
+
+    assert "pulled 1 box-set row" in note
+    assert boxset_plan.load_plan(fresh) == csv
+
+
+def test_an_outage_never_clears_the_box_set_plan(tmp_path):
+    from blurayripper import boxset_plan
+
+    settings = type("S", (), {"config_dir": tmp_path})()
+    boxset_plan.save_plan(settings, "disc_label,show\nX,Y\n")
+
+    class Broken(Durable):
+        def get_shared_config(self, key):
+            raise ConnectionError("no route to host")
+
+    note = boxset_plan.sync_from_cluster(settings, Broken())
+    assert "NOT cleared" in note
+    assert boxset_plan.load_plan(settings) == "disc_label,show\nX,Y\n"

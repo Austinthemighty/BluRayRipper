@@ -403,16 +403,30 @@ async def _cmd_check(args: argparse.Namespace) -> int:
         ("secrets.env", "TMDB / OpenSubtitles keys, database URL"),
         ("boxsets.local.csv", "box-set naming plan"),
     ]
+    # Everything except secrets.env is now a CACHE of Postgres, refreshed at
+    # serve startup — absent is fine there, it just means "not pulled yet".
+    shared = {"settings.local.json", "presets.local.json", "boxsets.local.csv"}
+    clustered = bool(settings.database_url)
     for fname, carries in layers:
         here = (cfg_dir / fname).exists()
-        layer_table.add_row(
-            fname, "[green]yes[/green]" if here else "[dim]no[/dim]", carries)
+        if here:
+            mark = "[green]yes[/green]"
+        elif clustered and fname in shared:
+            mark = "[dim]no — from cluster[/dim]"
+        else:
+            mark = "[dim]no[/dim]"
+        layer_table.add_row(fname, mark, carries)
     console.print(layer_table)
-    if not (cfg_dir / "settings.local.json").exists():
+    if not (cfg_dir / "settings.local.json").exists() and not clustered:
         console.print(
-            "[yellow]No settings.local.json — every setting below comes from the "
-            "tracked settings.toml. If you tuned anything in the web UI on another "
-            "machine, that file is where it went, and it is not in git.[/yellow]")
+            "[yellow]No settings.local.json and no database — every setting below "
+            "comes from the tracked settings.toml, and anything tuned in the web "
+            "UI stays on this box only.[/yellow]")
+    if clustered:
+        console.print(
+            "[dim]Shared config is stored in Postgres and pulled at serve startup; "
+            "the local files above are caches. secrets.env is the exception — it "
+            "holds the database URL itself, so it must exist on every box.[/dim]")
 
     # Preset file <-> name <-> container
     pf: Path = settings.encode.preset_file
@@ -1089,6 +1103,10 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
             # a gitignored file, so a new box silently started from settings.toml
             # defaults — which looks like the app changing settings, not like a
             # file that never arrived.
+            from .boxset_plan import sync_from_cluster as _sync_boxsets
+            _bs = _sync_boxsets(settings, _store)
+            if _bs.startswith(("pulled", "seeded")):
+                console.print(f"[dim]Cluster box-set plan: {_bs}.[/dim]")
             from .settings_store import sync_from_cluster
             note = sync_from_cluster(settings.config_dir, _store)
             if note.startswith("pulled") or note.startswith("seeded"):

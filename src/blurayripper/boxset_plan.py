@@ -233,11 +233,48 @@ def load_plan(settings) -> str:
         return ""
 
 
-def save_plan(settings, text: str) -> Path:
+SHARED_KEY = "boxset.plan"
+
+
+def save_plan(settings, text: str, store=None) -> Path:
     path = plan_path(settings)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text or "", encoding="utf-8")
+    if store is not None and getattr(store, "durable", False):
+        try:
+            store.set_shared_config(SHARED_KEY, {"csv": text or ""})
+        except Exception:
+            pass  # saved locally; the next sync publishes it
     return path
+
+
+def sync_from_cluster(settings, store) -> str:
+    """Refresh the plan from Postgres, which owns it. Returns a summary.
+
+    Same reasoning as the settings overlay: the CSV is gitignored, so it never
+    reached the other boxes and a machine move lost it outright. A missing plan
+    is silent — discs just stop being auto-named and get queued for manual
+    naming instead, which looks like the matcher having a bad day."""
+    if store is None or not getattr(store, "durable", False):
+        return "no shared store — this box's plan stays local to it"
+    local = load_plan(settings)
+    try:
+        remote = store.get_shared_config(SHARED_KEY)
+    except Exception as exc:
+        return (f"cluster unreachable ({type(exc).__name__}) — keeping the local "
+                "plan; it was NOT cleared")
+    if remote is None:
+        if not local.strip():
+            return "nothing stored in the cluster yet"
+        store.set_shared_config(SHARED_KEY, {"csv": local})
+        return "seeded the cluster from this box"
+    text = remote.get("csv", "")
+    if text == local:
+        return "in sync with the cluster"
+    plan_path(settings).parent.mkdir(parents=True, exist_ok=True)
+    plan_path(settings).write_text(text, encoding="utf-8")
+    rows, _ = parse_csv(text)
+    return f"pulled {len(rows)} box-set row(s) from the cluster"
 
 
 def load_rows(settings) -> list[PlanRow]:
