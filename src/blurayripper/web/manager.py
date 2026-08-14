@@ -46,6 +46,7 @@ from ..pipeline import Job, JobState, Pipeline, _resolve_path
 from ..scheduler import EncodeScheduler
 from .. import boxset_plan, mkv_folder, presence
 from ..services import library, naming
+from ..services import aacs_dump
 from ..services.drive_names import DriveNames
 from ..services.notify import notify
 from ..services.opensubtitles import OpenSubtitlesClient, gather_references
@@ -1500,6 +1501,7 @@ class JobManager:
 
     async def _scan_job(self, wj: WebJob) -> None:
         reporter = _Reporter(self, wj)
+        started = time.time()   # bounds the AACS dump search on failure (see below)
         try:
             job = await self.pipeline.scan_disc(wj.source, reporter)
             wj._pipeline_job = job
@@ -1554,8 +1556,31 @@ class JobManager:
             wj.state = JobState.FAILED
             wj.error = f"{type(exc).__name__}: {exc}"
             reporter.on_event(f"Scan failed: {wj.error}")
+            self._keep_aacs_dump(wj, started, reporter)
             self._persist(wj)
             self.bus.publish()
+
+    def _keep_aacs_dump(self, wj: WebJob, started: float, reporter) -> None:
+        """A disc whose volume key MakeMKV doesn't know fails to open, having
+        written a .tgz dump into its own data directory — which is configurable,
+        easy to miss, and where the NEXT failing disc drops another one.
+
+        Copy any dump from this scan somewhere findable and say where it went,
+        plus where to email it. Detection is by timestamp rather than MakeMKV's
+        message wording, which differs between versions. Best-effort throughout:
+        a disc failed already, and nothing here may make that worse."""
+        try:
+            found = aacs_dump.find_new_dump(aacs_dump.data_dir(), started)
+            if found is None:
+                return
+            dest = aacs_dump.collect(
+                found, self.settings.storage.staging_dir / "aacs-dumps",
+                wj.disc.disc_name if wj.disc else None)
+            reporter.on_event(aacs_dump.advice(dest))
+            self._notify(f"🔑 Unknown disc key: {self._name_of(wj)}",
+                         f"Job #{wj.id} — AACS dump saved for submission.")
+        except Exception as exc:
+            reporter.on_event(f"(Couldn't keep the AACS dump: {type(exc).__name__}.)")
 
     async def _scan_mkv(self, wj: WebJob, path: Path) -> None:
         """Set up a job from an existing .mkv: probe it, build a one-title disc,
