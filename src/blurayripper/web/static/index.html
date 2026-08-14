@@ -107,7 +107,7 @@
   .stat.rip  .dot{background:#58a6ff;} .stat.subs .dot{background:#d29922;}
   .stat.enc  .dot{background:#a371f7;} .stat.input .dot{background:#e3b341;}
   .stat.queued .dot{background:#6e7681;} .stat.done .dot{background:#3fb950;}
-  .stat.fail .dot{background:#f85149;}
+  .stat.fail .dot{background:#f85149;} .stat.review .dot{background:#db6d28;}
   .stat[data-cat]{cursor:pointer;} .stat[data-cat]:hover{border-color:#8b949e;}
   .stat.active{border-color:#58a6ff; color:#e6edf3; box-shadow:0 0 0 1px #58a6ff;}
   #bulkbar{display:flex; gap:8px; align-items:center;}
@@ -478,7 +478,11 @@ function jobRank(j){
 
 const SUB_STATES = ['extracting_subs','ocr_subs','identifying'];
 const ENC_STATES = ['encoding','placing','confirming'];
-function catOf(s){
+function catOf(j){
+  // Takes the JOB, not the state: "needs review" is a slice of failed the state
+  // alone can't tell you — failed AND the disc has to come back for it to move.
+  const s = j.state;
+  if (j.needs_review) return 'review';
   if (s==='failed') return 'fail';
   if (s==='done') return 'done';
   if (RIP_STATES.includes(s)) return 'rip';
@@ -490,12 +494,13 @@ function catOf(s){
 }
 let jobFilter = null;  // active stat-chip filter (category key) or null = all
 const STAT_DEFS = [['rip','Ripping'],['subs','Subtitles'],['enc','Encoding'],
-  ['input','Needs you'],['queued','Queued'],['done','Done'],['fail','Failed']];
+  ['input','Needs you'],['queued','Queued'],['done','Done'],
+  ['review','Needs review'],['fail','Failed']];
 function renderStats(jobs){
   const host = document.getElementById('stats');
   if (!host) return;
   const c = {}; for (const [k] of STAT_DEFS) c[k]=0;
-  for (const j of jobs){ const k = catOf(j.state); if (k) c[k]++; }
+  for (const j of jobs){ const k = catOf(j); if (k) c[k]++; }
   host.innerHTML = STAT_DEFS.map(([cls,label]) =>
     `<span class="stat ${cls}${c[cls]?'':' zero'}${jobFilter===cls?' active':''}" data-cat="${cls}"><span class="dot"></span>${label} <b>${c[cls]}</b></span>`
   ).join('') + `<span class="stat" style="margin-left:auto;">Total <b>${jobs.length}</b></span>`;
@@ -629,7 +634,7 @@ function renderJobs(snap) {
   renderWorkers(snap.workers || []);
   if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the Drives panel.</span>'; renderedStateClear(); renderJobs._sig = ''; renderJobs._known = new Set(); renderBulkBar(0); const pg = document.getElementById('pager'); if (pg){ pg.innerHTML=''; pg._sig=''; } return; }
   const ph = document.getElementById('placeholder'); if (ph) ph.remove();
-  const allJobs = [...snap.jobs].filter(j => !jobFilter || catOf(j.state)===jobFilter)
+  const allJobs = [...snap.jobs].filter(j => !jobFilter || catOf(j)===jobFilter)
                                 .sort((a,b) => jobRank(a)-jobRank(b) || (b.priority||0)-(a.priority||0) || a.id-b.id);
   renderBulkBar(allJobs.length);
   // Paginate — rendering 150+ heavy cards (logs, live SSE, thumbnails) at once
@@ -814,6 +819,20 @@ function liveUpdate(card, j){
     b.onclick=()=>api('POST','/api/jobs/'+j.id+'/retry').catch(e=>alert(e.message));
     card.querySelector('[data-body]').appendChild(b);
   }
+  // A folder's worth of episodes added as separate jobs: offer to fold them into
+  // one, which is the shape a folder scan would have produced — name once, not N
+  // times. Drops off again once grouped or once the job starts.
+  const grp = card.querySelector('[data-group]');
+  if (j.group_with > 1 && !grp) {
+    const b=document.createElement('button'); b.dataset.group='1'; b.className='sec';
+    b.textContent = `⇊ Group ${j.group_with} episode files into one job`;
+    b.title = 'Replaces these separate jobs with a single job holding all the '
+      + 'files, so you name the show and season once. The files are not moved or '
+      + 'changed, and nothing starts encoding until you name it.';
+    b.style.marginTop='8px';
+    b.onclick=()=>api('POST','/api/jobs/'+j.id+'/group-season').catch(e=>alert(e.message));
+    card.querySelector('[data-body]').appendChild(b);
+  } else if (grp && !(j.group_with > 1)) { grp.remove(); }
   // Stalled jobs have no normal controls — give them a Requeue so they can be
   // recovered. Remove it again once the job is no longer stalled.
   const rq = card.querySelector('[data-requeue]');

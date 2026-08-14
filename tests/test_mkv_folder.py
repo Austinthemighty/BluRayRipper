@@ -1,5 +1,6 @@
 """Is a folder of .mkv files one show's episodes, or unrelated titles?"""
 
+import asyncio
 from pathlib import Path
 
 from blurayripper.mkv_folder import analyse
@@ -70,3 +71,71 @@ def test_other_common_counter_styles():
 def test_season_absent_from_the_name_is_left_unknown():
     s = analyse(_p("Some Show_t01.mkv", "Some Show_t02.mkv"))
     assert s is not None and s.season is None    # the form asks, rather than guessing
+
+
+def _mgr(tmp_path, sources):
+    """A JobManager holding file jobs parked at naming — the state N separately
+    added episode files sit in."""
+    from blurayripper.config import load_settings
+    from blurayripper.persistence import MemoryStore
+    from blurayripper.pipeline import JobState
+    from blurayripper.web.manager import JobManager, WebJob
+
+    settings = load_settings()
+    settings.storage.output_dir = tmp_path
+    m = JobManager(settings, store=MemoryStore())
+    for i, src in enumerate(sources, start=1):
+        m.jobs[i] = WebJob(id=i, source=str(src), state=JobState.AWAITING_MAPPING)
+    return m
+
+
+def test_separately_added_episode_files_offer_to_group(tmp_path):
+    """The rick-and-morty case: 10 files added one at a time became 10 jobs, each
+    wanting the same show name typed again. They can be folded back into the one
+    job a folder scan would have made."""
+    folder = tmp_path / "s1"
+    folder.mkdir()
+    files = [folder / f"Rick and Morty Season 1_t{n:02d}.mkv" for n in range(3)]
+    for f in files:
+        f.write_bytes(b"")
+    m = _mgr(tmp_path, files)
+
+    members, mkv_set = m._group_candidates(m.jobs[1])
+    assert [o.id for o in members] == [1, 2, 3]
+    assert mkv_set.show == "Rick and Morty"
+    assert m._job_dict(m.jobs[1])["group_with"] == 3
+
+
+def test_unrelated_films_in_one_folder_are_never_grouped(tmp_path):
+    """The guard that matters: grouping these would name Rocky III as an episode
+    of Rocky II. Offer nothing, and refuse if asked directly."""
+    import pytest
+
+    folder = tmp_path / "movies"
+    folder.mkdir()
+    files = [folder / f"Rocky {n}.mkv" for n in (2, 3, 4)]
+    for f in files:
+        f.write_bytes(b"")
+    m = _mgr(tmp_path, files)
+
+    assert m._group_candidates(m.jobs[1]) == ([], None)
+    assert m._job_dict(m.jobs[1])["group_with"] == 0
+    with pytest.raises(ValueError, match="don't look like one show's episodes"):
+        asyncio.run(m.group_season(1))
+
+
+def test_a_job_already_being_worked_is_left_out_of_a_group(tmp_path):
+    """Grouping replaces jobs, so it must only ever touch ones with no rip or
+    encode work to throw away."""
+    from blurayripper.pipeline import JobState
+
+    folder = tmp_path / "s2"
+    folder.mkdir()
+    files = [folder / f"Show Season 2_t{n:02d}.mkv" for n in range(3)]
+    for f in files:
+        f.write_bytes(b"")
+    m = _mgr(tmp_path, files)
+    m.jobs[3].state = JobState.ENCODING            # already running — hands off
+
+    members, _ = m._group_candidates(m.jobs[1])
+    assert [o.id for o in members] == [1, 2]

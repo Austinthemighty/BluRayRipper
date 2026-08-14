@@ -363,6 +363,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             manager.remap(job_id)
         return {"ok": True}
 
+    @app.post("/api/jobs/{job_id}/group-season")
+    async def group_season(job_id: int):
+        # N separate episode jobs -> the one-job-per-folder shape a folder scan
+        # would have produced, so the season is named once.
+        with _job_errors():
+            new_id = await manager.group_season(job_id)
+        return {"ok": True, "id": new_id}
+
     @app.post("/api/jobs/{job_id}/change-source")
     async def change_source(job_id: int, body: ChangeSource):
         with _job_errors():

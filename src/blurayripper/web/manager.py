@@ -1053,6 +1053,68 @@ class JobManager:
         self.bus.publish()
         return wj
 
+    # A file job in one of these has no rip or encode work to throw away, so it
+    # can still be folded into a season set.
+    _GROUPABLE_STATES = (JobState.AWAITING_TITLES, JobState.AWAITING_MAPPING)
+
+    def _mkv_source(self, wj: WebJob) -> Path | None:
+        """This job's .mkv path, or None if it isn't a plain single-file job."""
+        src = (wj.source or "").strip()
+        if not src or src.startswith(SOURCE_SELECTORS):
+            return None
+        path = Path(src)
+        return path if path.suffix.lower() == ".mkv" else None
+
+    def _group_candidates(self, wj: WebJob):
+        """The jobs that would merge with `wj` into one season job, and the set.
+
+        Adding a folder groups episodes automatically, but files added one at a
+        time — or added before grouping existed — sit as N separate jobs wanting
+        the same show name typed N times. Same filename heuristic, applied after
+        the fact, so it can't group what a folder scan wouldn't have."""
+        if wj.state not in self._GROUPABLE_STATES:
+            return [], None
+        path = self._mkv_source(wj)
+        if path is None:
+            return [], None
+        peers = {}
+        for other in self.jobs.values():
+            if other.state not in self._GROUPABLE_STATES:
+                continue
+            opath = self._mkv_source(other)
+            if opath is not None and opath.parent == path.parent:
+                peers[opath] = other
+        if len(peers) < mkv_folder.MIN_SET:
+            return [], None
+        mkv_set = mkv_folder.analyse(sorted(peers))
+        if mkv_set is None:
+            return [], None
+        members = [peers[p] for p in mkv_set.files if p in peers]
+        return (members, mkv_set) if len(members) >= mkv_folder.MIN_SET else ([], None)
+
+    async def group_season(self, job_id: int) -> int:
+        """Fold this job and its sibling episode files into ONE job, named once."""
+        wj = self.jobs.get(job_id)
+        if wj is None:
+            raise ValueError("No such job.")
+        members, mkv_set = self._group_candidates(wj)
+        if not members:
+            raise ValueError(
+                "These files don't look like one show's episodes, so grouping "
+                "them would name separate films as episodes of each other. "
+                "Name them one at a time instead.")
+        ids = [o.id for o in members]
+        for old_id in ids:
+            await self.remove(old_id)
+        new = self._add_mkv_set(mkv_set)
+        new.log.append(stamp_log(
+            f"Grouped job(s) {', '.join('#' + str(i) for i in ids)} into this one "
+            f"— {len(mkv_set.files)} episode file(s) to name once. The files "
+            "themselves were not touched."))
+        self._persist(new)
+        self.bus.publish()
+        return new.id
+
     def requeue(self, job_id: int) -> None:
         """Recover a STALLED job — one in a worker-owned state (encoding / subtitles
         / placing) with nothing actually working it (its worker died or the serve
@@ -2127,6 +2189,15 @@ class JobManager:
             # in the drive), one that's already ripped resumes from checkpoints.
             "retry_rips": ((wj.source or "").startswith(("disc:", "dev:"))
                            and self._rip_pending(wj)),
+            # Failed AND needs the disc back to get anywhere — the orphaned-READY
+            # jobs recovery parks, plus rips that died. Own queue because the
+            # decision is physical ("find the disc, or drop it"), not a retry.
+            "needs_review": (wj.state is JobState.FAILED
+                             and (wj.source or "").startswith(("disc:", "dev:"))
+                             and self._rip_pending(wj)),
+            # >1 when this job's folder holds sibling episode files that could be
+            # folded into one job and named once instead of N times.
+            "group_with": len(self._group_candidates(wj)[0]),
             "preview": (
                 {
                     # Poster URLs only when ffmpeg produced the stills.
