@@ -390,6 +390,30 @@ async def _cmd_check(args: argparse.Namespace) -> int:
             "[green]yes[/green]" if writable else "[yellow]NO — configured but unreachable[/yellow]")
     console.print(folder_table)
 
+    # Local config layers. All of these are gitignored, so `git pull` never
+    # restores them and moving to a new machine silently drops every value back
+    # to the tracked defaults. That reads as "the app changed my settings" rather
+    # than as a missing file, so name the files and say what each one carries.
+    cfg_dir = settings.config_dir
+    layer_table = Table("File", "Present", "Carries",
+                        title="Local config (gitignored — git pull will NOT restore these)")
+    layers = [
+        ("settings.local.json", "everything saved from the web Settings page"),
+        ("presets.local.json", "HandBrake presets edited in the web UI"),
+        ("secrets.env", "TMDB / OpenSubtitles keys, database URL"),
+        ("boxsets.local.csv", "box-set naming plan"),
+    ]
+    for fname, carries in layers:
+        here = (cfg_dir / fname).exists()
+        layer_table.add_row(
+            fname, "[green]yes[/green]" if here else "[dim]no[/dim]", carries)
+    console.print(layer_table)
+    if not (cfg_dir / "settings.local.json").exists():
+        console.print(
+            "[yellow]No settings.local.json — every setting below comes from the "
+            "tracked settings.toml. If you tuned anything in the web UI on another "
+            "machine, that file is where it went, and it is not in git.[/yellow]")
+
     # Preset file <-> name <-> container
     pf: Path = settings.encode.preset_file
     if not pf.exists():
