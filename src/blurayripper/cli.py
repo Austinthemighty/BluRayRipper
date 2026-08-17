@@ -361,6 +361,32 @@ async def _cmd_check(args: argparse.Namespace) -> int:
                 f"{se}[/red]")
             ok = False
 
+    # Which seconv this is. Two different programs use the name, and the one
+    # setup-linux.sh builds does NOcr with a single Latin database — it has no
+    # Tesseract and no per-track language, so installed language data goes unused.
+    # That is a quality difference you would otherwise only hear about from the
+    # subtitles themselves.
+    if se and _on_disk(se):
+        from .tools.subtitleedit import SubtitleEdit
+
+        se_help = await SubtitleEdit(settings).help_text()
+        if se_help and "--ocr-engine" not in se_help and "--format" not in se_help:
+            _, dropped = SubtitleEdit(settings)._classic_command(
+                Path("x.sup"), Path("."), se_help)
+            note = ("[yellow]subtitleedit-cli build: OCR is NOcr with the "
+                    f"'{'/ocrdb' if '/ocrdb:' in se_help else 'built-in'}' database, "
+                    "NOT Tesseract — it has no per-track language option, so the "
+                    "tesseract language data above is not used by it. Accented "
+                    "languages suffer most.")
+            if dropped:
+                note += f" Also unavailable in this build: {', '.join(dropped)}."
+            tool_table.add_row("subtitleedit (flavour)", note + "[/yellow]")
+        elif se_help:
+            tool_table.add_row(
+                "subtitleedit (flavour)",
+                "[green]SubtitleEdit 5.x CLI — Tesseract with per-track "
+                "language[/green]")
+
     def _optional_row(label: str, path: str | None, absent_msg: str) -> None:
         if _on_disk(path):
             tool_table.add_row(label, f"[green]{path}[/green]")
