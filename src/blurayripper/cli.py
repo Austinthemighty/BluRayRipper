@@ -268,7 +268,17 @@ async def _cmd_check(args: argparse.Namespace) -> int:
     # se-cli build; they need different command syntax, so show which mode is live.
     from .tools.subtitleedit import SubtitleEdit, tesseract_language
 
-    uses_cli_ocr = bool(settings.tools.subtitleedit) and SubtitleEdit(settings)._is_cli_tool()
+    # Ask the binary which flavour it is, once. It decides real capability: the
+    # subtitleedit-cli build does NOcr against a Latin database, so it uses
+    # neither Tesseract nor an OCR-fix dictionary, and demanding those of it
+    # would fail a box over tools that build cannot use. Falls back to the
+    # name-based guess only when --help says nothing.
+    _se_tool = SubtitleEdit(settings) if settings.tools.subtitleedit else None
+    se_help = await _se_tool.help_text() if _se_tool else ""
+    if se_help:
+        uses_cli_ocr = "--ocr-engine" in se_help or "--format" in se_help
+    else:
+        uses_cli_ocr = bool(_se_tool) and _se_tool._is_cli_tool()
 
     tool_table = Table("Tool", "Status", title="External tools")
     for key in ("makemkvcon", "handbrakecli", "mkvmerge", "mkvextract", "subtitleedit"):
@@ -276,8 +286,14 @@ async def _cmd_check(args: argparse.Namespace) -> int:
         if _on_disk(path):
             note = ""
             if key == "subtitleedit":
-                note = (" [dim](seconv/se-cli CLI mode)[/dim]" if uses_cli_ocr
-                        else " [dim](GUI batch mode — bundled Tesseract, GUI-set language)[/dim]")
+                # Three real modes, not two: the classic CLI is neither the
+                # Tesseract CLI nor the GUI, and calling it "GUI batch mode"
+                # sent people looking for a GUI setting that does not apply.
+                note = (" [dim](seconv CLI — Tesseract, per-track language)[/dim]"
+                        if uses_cli_ocr else
+                        " [dim](subtitleedit-cli — NOcr, no language option)[/dim]"
+                        if se_help else
+                        " [dim](GUI batch mode — bundled Tesseract, GUI-set language)[/dim]")
             tool_table.add_row(key, f"[green]{path}[/green]{note}")
         elif path:
             tool_table.add_row(
@@ -366,13 +382,9 @@ async def _cmd_check(args: argparse.Namespace) -> int:
     # Tesseract and no per-track language, so installed language data goes unused.
     # That is a quality difference you would otherwise only hear about from the
     # subtitles themselves.
-    if se and _on_disk(se):
-        from .tools.subtitleedit import SubtitleEdit
-
-        se_help = await SubtitleEdit(settings).help_text()
-        if se_help and "--ocr-engine" not in se_help and "--format" not in se_help:
-            _, dropped = SubtitleEdit(settings)._classic_command(
-                Path("x.sup"), Path("."), se_help)
+    if _se_tool and se_help:
+        if not uses_cli_ocr:
+            _, dropped = _se_tool._classic_command(Path("x.sup"), Path("."), se_help)
             note = ("[yellow]subtitleedit-cli build: OCR is NOcr with the "
                     f"'{'/ocrdb' if '/ocrdb:' in se_help else 'built-in'}' database, "
                     "NOT Tesseract — it has no per-track language option, so the "
@@ -381,7 +393,7 @@ async def _cmd_check(args: argparse.Namespace) -> int:
             if dropped:
                 note += f" Also unavailable in this build: {', '.join(dropped)}."
             tool_table.add_row("subtitleedit (flavour)", note + "[/yellow]")
-        elif se_help:
+        else:
             tool_table.add_row(
                 "subtitleedit (flavour)",
                 "[green]SubtitleEdit 5.x CLI — Tesseract with per-track "
