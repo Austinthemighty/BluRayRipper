@@ -46,6 +46,7 @@ def tesseract_language(iso_639_2b: str) -> str:
 class SubtitleEdit:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        self._help_cache: str | None = None
 
     def _launcher(self) -> list[str]:
         exe = self._settings.tools.require("subtitleedit")
@@ -62,10 +63,70 @@ class SubtitleEdit:
         stem = base.rsplit(".", 1)[0].lower().replace("_", "-")
         return stem in ("seconv", "se-cli", "secli")
 
-    def build_command(self, sup_path: Path, language: str, out_dir: Path) -> list[str]:
+    async def help_text(self) -> str:
+        """The tool's own --help, cached. Asking it beats inferring from the file
+        name: two entirely different programs ship as "seconv" — SubtitleEdit
+        5.x's Spectre.Console CLI (``--option value``, Tesseract, per-language)
+        and the subtitleedit-cli project (``/option:value``, NOcr). Guessing from
+        the name sent one flavour the other's arguments, and every option was
+        rejected mid-job after the extract had already run."""
+        if self._help_cache is None:
+            try:
+                out = await process.run(self._launcher() + ["--help"], check=False,
+                                        timeout=60)
+                self._help_cache = "\n".join(
+                    out.stdout_lines + getattr(out, "stderr_lines", [])).lower()
+            except Exception:
+                self._help_cache = ""   # unknown: fall back to the name-based guess
+        return self._help_cache
+
+    def _classic_command(self, sup_path: Path, out_dir: Path, help_text: str
+                         ) -> tuple[list[str], list[str]]:
+        """subtitleedit-cli syntax: ``seconv <pattern> <format> [/option:value]``.
+
+        Every optional flag is gated on the help text actually listing it. This
+        build hard-fails the whole conversion on one unknown option, so emitting
+        a flag it does not have loses the subtitles entirely — better to skip the
+        refinement and say which ones were skipped."""
+        cmd = list(self._launcher()) + [str(sup_path), "srt"]
+        subs, skipped = self._settings.subtitles, []
+
+        def supported(flag: str) -> bool:
+            return flag.lower() in help_text
+
+        if supported("/encoding:"):
+            cmd.append("/encoding:utf-8")
+        if supported("/outputfolder:"):
+            cmd.append(f"/outputfolder:{out_dir}")
+        if supported("/overwrite"):
+            cmd.append("/overwrite")
+        for want, flag, label in (
+            (subs.fix_common_errors, "/FixCommonErrors", "fix common OCR errors"),
+            (subs.remove_text_for_hi, "/RemoveTextForHI", "remove text for HI"),
+            (subs.split_long_lines, "/SplitLongLines", "split long lines"),
+            (subs.balance_lines, "/BalanceLines", "balance lines"),
+        ):
+            if not want:
+                continue
+            if supported(flag):
+                cmd.append(flag)
+            else:
+                skipped.append(label)
+        return cmd, skipped
+
+    def build_command(self, sup_path: Path, language: str, out_dir: Path,
+                      help_text: str | None = None) -> list[str]:
+        # What the binary says it accepts wins; the name-based guess is only a
+        # fallback for when --help told us nothing.
+        if help_text:
+            new_style = "--ocr-engine" in help_text or "--format" in help_text
+            if not new_style:
+                return self._classic_command(sup_path, out_dir, help_text)[0]
+        else:
+            new_style = self._is_cli_tool()
         cmd = list(self._launcher())
         subs = self._settings.subtitles
-        if self._is_cli_tool():
+        if new_style:
             # seconv (SubtitleEdit 5.x CLI, Spectre.Console.Cli): the format is an
             # OPTION (--format), and option values are space-separated. It takes the
             # OCR language directly (--ocr-language), so — unlike the GUI batch tool
@@ -118,8 +179,9 @@ class SubtitleEdit:
     async def ocr_to_srt(self, sup_path: Path, language: str, out_dir: Path) -> Path:
         """OCR ``sup_path`` to SRT in ``out_dir``; returns the produced .srt path."""
         out_dir.mkdir(parents=True, exist_ok=True)
+        help_text = await self.help_text()
         await process.run(
-            self.build_command(sup_path, language, out_dir),
+            self.build_command(sup_path, language, out_dir, help_text),
             timeout=self._settings.subtitles.ocr_timeout_seconds or None,
         )
         srt_path = out_dir / (sup_path.stem + ".srt")
