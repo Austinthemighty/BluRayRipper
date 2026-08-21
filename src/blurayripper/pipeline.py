@@ -329,20 +329,32 @@ class Pipeline:
     ) -> None:
         """Extract + OCR (concurrent) + place sidecars for a set of ripped titles.
         Shared by prep_phase (rip box) and the worker's encode_phase."""
-        if not todo:
+        pending = []
+        for entry in todo:
+            done = self._subs_already_done(job.checkpoints.setdefault(entry[0], {}))
+            if done is None:
+                pending.append(entry)
+            else:
+                report.on_event(
+                    f"Subtitles already done for title {entry[0]} "
+                    f"({len(done)} sidecar(s)) — skipping extract + OCR.")
+        if not pending:
             return
         extracted: dict[int, list] = {}
-        for title_id, _assignment, ripped, sub_dir in todo:
+        for title_id, _assignment, ripped, sub_dir in pending:
             extracted[title_id] = await self._extract_title_subs(job, title_id, ripped, sub_dir, report)
         ocr = await self._ocr_all(
-            job, [(tid, a, r, sd, extracted[tid]) for tid, a, r, sd in todo], report)
-        for title_id, assignment, ripped, _sub_dir in todo:
+            job, [(tid, a, r, sd, extracted[tid]) for tid, a, r, sd in pending], report)
+        for title_id, assignment, ripped, _sub_dir in pending:
             result = TitleResult(title_id=title_id)
             video_dest = self._video_path_for(assignment)
             await self._place_title_subs(
                 result, video_dest, ocr.get(title_id, []), report,
                 source_video=ripped, assignment=assignment)
             self._cache_subs(video_dest, extracted[title_id])
+            self._record_subs_done(job.checkpoints.setdefault(title_id, {}),
+                                   result.subtitle_paths)
+        _checkpoint(report)
 
     async def _extract_title_subs(
         self, job: Job, title_id: int, ripped_mkv: Path, sub_dir: Path, report
@@ -863,12 +875,23 @@ class Pipeline:
 
         # Extract subtitle images, OCR them, and place the SRT sidecars. (The
         # parallel path lives in prep_phase; here OCR runs inline for one title.)
-        sub_jobs = await self._extract_title_subs(job, title_id, ripped_mkv, sub_dir, report)
-        ocr = await self._ocr_all(job, [(title_id, assignment, ripped_mkv, sub_dir, sub_jobs)], report)
-        await self._place_title_subs(
-            result, video_dest, ocr.get(title_id, []), report,
-            source_video=ripped_mkv, assignment=assignment)
-        self._cache_subs(video_dest, sub_jobs)
+        done = self._subs_already_done(cp)
+        if done is not None:
+            # Carry them onto the result: the output check at the end compares
+            # against these, so a resume that skipped OCR must not look like a
+            # job that produced no subtitles at all.
+            result.subtitle_paths = list(done)
+            report.on_event(
+                f"Subtitles already done ({len(done)} sidecar(s)) — skipping OCR.")
+        else:
+            sub_jobs = await self._extract_title_subs(job, title_id, ripped_mkv, sub_dir, report)
+            ocr = await self._ocr_all(job, [(title_id, assignment, ripped_mkv, sub_dir, sub_jobs)], report)
+            await self._place_title_subs(
+                result, video_dest, ocr.get(title_id, []), report,
+                source_video=ripped_mkv, assignment=assignment)
+            self._cache_subs(video_dest, sub_jobs)
+            self._record_subs_done(cp, result.subtitle_paths)
+            _checkpoint(report)
 
         # Resolve grain (may park at an interactive preview gate — UI only). Skip
         # if a prior run already decided it, so a resume doesn't re-prompt (which
@@ -1140,6 +1163,33 @@ class Pipeline:
             report.on_event(
                 f"Could not probe resolution ({type(exc).__name__}: {exc}); assuming non-UHD weight.")
             return None
+
+    def _record_subs_done(self, cp: dict, paths: list[Path]) -> None:
+        """Record that a title's sidecars are placed, so a resume skips OCR.
+
+        Stored relative to output_dir (as rip checkpoints are to staging) so the
+        record survives a move between machines."""
+        out = self.settings.storage.output_dir
+        cp["subs_done"] = [_rel_path(out, p) for p in paths]
+
+    def _subs_already_done(self, cp: dict) -> list[Path] | None:
+        """The placed sidecars, if every one is still on disk; else None (redo).
+
+        Only the extracted .sup images were checkpointed before, so a resume
+        re-ran OCR — the expensive half, minutes to hours per disc — with the
+        finished .srt files sitting right beside the video the whole time.
+
+        An empty list is a real answer, not a missing one: a title whose disc
+        carries no kept-language subtitles is DONE with zero sidecars, and must
+        not be retried forever. That is why absence is None rather than []."""
+        saved = cp.get("subs_done")
+        if saved is None:
+            return None
+        out = self.settings.storage.output_dir
+        paths = [_resolve_path(out, rel) for rel in saved]
+        if any(not p.exists() for p in paths):
+            return None   # deleted, or a box that cannot see them — redo properly
+        return paths
 
     def _reuse_subs(self, cp: dict) -> list[tuple[Path, SubtitleTrack]] | None:
         """Rebuild the (sup, track) list from a checkpoint if every .sup still
