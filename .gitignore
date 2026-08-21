@@ -29,3 +29,6 @@ output/
 # OS
 .DS_Store
 .coverage
+
+# Agent worktrees (transient, created by background workflows)
+.claude/worktrees/
