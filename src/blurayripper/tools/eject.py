@@ -20,13 +20,34 @@ def eject(device: str | None, method: str = "auto") -> None:
     if sys.platform.startswith("win"):
         _eject_windows(device, method)
     elif sys.platform == "darwin":
-        # drutil ejects the default optical tray; ignore failure if none.
-        subprocess.run(["drutil", "tray", "eject"], check=False)
+        _run_or_raise(["drutil", "tray", "eject"], "eject")
     else:
         cmd = ["eject"]
         if device:
             cmd.append(device)
-        subprocess.run(cmd, check=False)
+        _run_or_raise(cmd, "eject")
+
+
+def _run_or_raise(cmd: list[str], what: str) -> None:
+    """Run a tray command and FAIL on a non-zero exit.
+
+    check=False discarded the exit status, so a busy drive, a wrong /dev/srN or
+    a jammed tray returned normally — and the pipeline then logged "Ejected
+    disc — safe to load the next one" and pushed a notification saying so, while
+    the tray never moved. Only Windows could ever report a failure.
+    """
+    try:
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"Could not {what}: '{cmd[0]}' is not installed on this machine."
+        ) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        raise RuntimeError(
+            f"Could not {what} ({' '.join(cmd)} exited {result.returncode})"
+            + (f": {detail[-1]}" if detail else "")
+        )
 
 
 def close_tray(device: str | None, method: str = "auto") -> None:
@@ -35,12 +56,12 @@ def close_tray(device: str | None, method: str = "auto") -> None:
     if sys.platform.startswith("win"):
         _close_windows(device, method)
     elif sys.platform == "darwin":
-        subprocess.run(["drutil", "tray", "close"], check=False)
+        _run_or_raise(["drutil", "tray", "close"], "close the tray")
     else:
         cmd = ["eject", "-t"]  # -t closes the tray on Linux
         if device:
             cmd.append(device)
-        subprocess.run(cmd, check=False)
+        _run_or_raise(cmd, "close the tray")
 
 
 def _close_windows(device: str | None, method: str = "auto") -> None:

@@ -853,6 +853,7 @@ async def test_the_dolby_vision_mux_takes_video_from_one_input_and_audio_from_th
 
     def respond(cmd):
         seen["parent_existed"] = out.parent.is_dir()
+        out.write_bytes(b"muxed")   # a successful mkvmerge leaves a real file
         return []
 
     fake = _install(monkeypatch, FakeProcess(respond))
@@ -871,11 +872,11 @@ async def test_the_dolby_vision_mux_is_bounded_too(tmp_path, monkeypatch):
     """Remuxing a UHD title is a long copy over the mapped drive — generously
     bounded, but bounded, for the same stale-handle reason as the extraction."""
     seen = _bound_timeouts(monkeypatch, mkvtools_mod)
-    _install(monkeypatch, FakeProcess())
+    out = tmp_path / "encode" / "Movie.mkv"
+    _install(monkeypatch, FakeProcess(lambda cmd: out.write_bytes(b"muxed") and []))
 
     await _mkv(tmp_path).mux_dovi(Path("/stage/enc_dv.hevc"),
-                                  Path("/stage/t00.mkv"),
-                                  tmp_path / "encode" / "Movie.mkv")
+                                  Path("/stage/t00.mkv"), out)
 
     assert len(seen) == 1
     assert seen[0] is not None and 0 < seen[0] <= 86400

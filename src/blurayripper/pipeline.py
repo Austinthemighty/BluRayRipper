@@ -457,13 +457,21 @@ class Pipeline:
                     report.on_event(f"Detected SDH subtitle ({language}) from content.")
             is_default = False
             index: int | None = None
-            if not track.forced and not is_sdh:
-                n = plain_counts.get(language, 0)
-                plain_counts[language] = n + 1
-                if n == 0:
-                    is_default = language.lower() == default_lang
-                else:
-                    index = n + 1  # second plain track -> .2, third -> .3, ...
+            # Count within (language, flavour), not just for plain tracks. Two
+            # tracks sharing a language AND a flavour otherwise land on the same
+            # filename and library.place overwrites the first — one subtitle
+            # silently lost, with nothing to detect it afterwards because the
+            # surviving file exists and is non-empty. Blu-ray rarely flags SDH,
+            # so a feature track and a commentary track both sniffed as SDH is
+            # the realistic way in, not the flags themselves.
+            flavour = "forced" if track.forced else "sdh" if is_sdh else "plain"
+            n = plain_counts.get((language, flavour), 0)
+            plain_counts[(language, flavour)] = n + 1
+            if n == 0:
+                is_default = (flavour == "plain"
+                              and language.lower() == default_lang)
+            else:
+                index = n + 1  # second of this flavour -> .2, third -> .3, ...
             srt_dest = naming.subtitle_sidecar_path(
                 video_dest, language,
                 default=is_default, forced=track.forced, sdh=is_sdh, index=index,

@@ -147,6 +147,15 @@ class MkvTools:
         cmd = [self._settings.tools.require("mkvmerge"), "-o", str(out),
                str(video_hevc), "--no-video", "--no-subtitles", str(audio_src)]
         await asyncio.wait_for(process.run(cmd), timeout=3600)
+        # The last step of the Dolby Vision path. mkvmerge can exit 0 having
+        # written a header-only file when the RPU-injected stream is truncated,
+        # and the caller then MOVES that into the Plex library and marks the
+        # title placed — a green job with no video. The DV path already falls
+        # back to plain HDR10 on an exception, so raising here recovers the job
+        # rather than failing it.
+        if not out.exists() or out.stat().st_size == 0:
+            raise RuntimeError(
+                f"mkvmerge reported success but produced no usable file at {out}")
         return out
 
     async def video_dims(self, mkv_path: Path) -> tuple[int | None, float | None]:

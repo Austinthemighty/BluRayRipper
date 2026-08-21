@@ -27,10 +27,14 @@ _WIN_DRIVE = re.compile(r"^[A-Za-z]:$")
 def _child_ci(parent: Path, name: str) -> Path | None:
     """Case-insensitive child lookup — disc filesystems are usually UPPERCASE and
     case matters on Linux."""
-    direct = parent / name
-    if direct.exists():
-        return direct
+    # exists() re-raises PermissionError (it only swallows ENOENT and friends),
+    # so an intermediate directory without traverse rights — an SMB share, a
+    # restrictively mounted disc — escaped from what is meant to be a lookup
+    # that answers "no".
     try:
+        direct = parent / name
+        if direct.exists():
+            return direct
         for c in parent.iterdir():
             if c.name.lower() == name.lower():
                 return c
