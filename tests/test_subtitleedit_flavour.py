@@ -79,3 +79,62 @@ def test_with_no_help_available_it_falls_back_to_the_old_behaviour(tmp_path):
     """An unreadable --help must not change what a working install does."""
     cmd = _se(tmp_path).build_command(Path("/s/t000.sup"), "pol", tmp_path, "")
     assert "--ocr-engine" in cmd
+
+
+def _run(coro):
+    import asyncio
+    return asyncio.run(coro)
+
+
+def test_the_help_probe_runs_once_and_is_reused(tmp_path, monkeypatch):
+    """OCR runs per track, and a subprocess launch per track would add up on a
+    disc with several languages. The answer cannot change while we run."""
+    se = _se(tmp_path)
+    calls = []
+
+    class _Out:
+        stdout_lines = ["--ocr-engine tesseract"]
+        stderr_lines = []
+
+    async def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return _Out()
+
+    monkeypatch.setattr("blurayripper.tools.subtitleedit.process.run", fake_run)
+
+    assert "--ocr-engine" in _run(se.help_text())
+    assert "--ocr-engine" in _run(se.help_text())
+    assert len(calls) == 1
+    assert calls[0][-1] == "--help"
+
+
+def test_a_tool_that_cannot_be_probed_falls_back_instead_of_failing(tmp_path, monkeypatch):
+    """A --help that errors must not break OCR — it drops to the previous
+    name-based guess. Raising here would turn an unknown into an outage."""
+    se = _se(tmp_path)
+
+    async def boom(cmd, **kw):
+        raise OSError("cannot execute")
+
+    monkeypatch.setattr("blurayripper.tools.subtitleedit.process.run", boom)
+
+    assert _run(se.help_text()) == ""
+    # ...and an empty help still produces a usable command.
+    cmd = se.build_command(Path("/s/t.sup"), "eng", tmp_path, "")
+    assert "--ocr-engine" in cmd          # the seconv-named fallback
+
+
+def test_stderr_help_is_read_too(tmp_path, monkeypatch):
+    """Plenty of CLIs print usage to stderr; reading only stdout would see an
+    empty help and silently pick the wrong dialect."""
+    se = _se(tmp_path)
+
+    class _Out:
+        stdout_lines = []
+        stderr_lines = ["usage: seconv <pattern> <format>", " /ocrdb:<ocr db>"]
+
+    async def fake_run(cmd, **kw):
+        return _Out()
+
+    monkeypatch.setattr("blurayripper.tools.subtitleedit.process.run", fake_run)
+    assert "/ocrdb:" in _run(se.help_text())

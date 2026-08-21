@@ -28,3 +28,4 @@ output/
 
 # OS
 .DS_Store
+.coverage
