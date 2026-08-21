@@ -409,11 +409,15 @@ async def test_only_the_progress_marker_emits_an_event():
 async def test_progress_lines_are_harmless_with_no_listener_attached():
     """The DV base-layer pass runs encode_hevc without a callback; an
     unconditional call there would crash the Dolby Vision pipeline."""
-    events = await _feed(3600.0, [
-        "out_time=00:15:00.000000", "speed=2.0x", "fps=24.0",
-        "progress=continue", "progress=end",
-    ], on_progress=None)
-    assert events == []
+    lines = ["out_time=00:15:00.000000", "speed=2.0x", "fps=24.0",
+             "progress=continue", "progress=end"]
+    # Control first: with a listener attached these same lines are two real
+    # ticks. Without it, 'nothing was called' is otherwise indistinguishable
+    # from a handler that emits nothing for anyone.
+    heard = await _feed(3600.0, lines)
+    assert [(e.state, e.fps) for e in heard] == [("working", 24.0), ("done", 24.0)]
+    # Same lines, no listener: the emit branch is reached and skipped, quietly.
+    assert await _feed(3600.0, lines, on_progress=None) == []
 
 
 # --------------------------------------------------------------------------

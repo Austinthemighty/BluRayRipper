@@ -321,11 +321,21 @@ async def test_the_file_is_named_from_tmdb_not_from_the_disc_label(rig):
     unmatchable file (and the wrong folder) in the library."""
     await _run_story(rig)
 
-    assert rig.video.name == f"{TMDB_TITLE} ({TMDB_YEAR}).mkv"
-    assert rig.video.parent.name == f"{TMDB_TITLE} ({TMDB_YEAR})"
-    assert rig.video.parent.parent == rig.settings.storage.movies_root
-    # Nothing was written under the raw label.
-    assert not (rig.settings.storage.movies_root / DISC_LABEL).exists()
+    movies_root = rig.settings.storage.movies_root
+    assert rig.video.exists(), f"nothing was placed at the TMDB name; steps were {rig.steps}"
+
+    # Read the names back OFF THE DISK rather than comparing paths this test built
+    # (rig.video is constructed from TMDB_TITLE/TMDB_YEAR, so comparing against it
+    # would pass no matter what the code named things — and on a case-insensitive
+    # filesystem even the "not under the raw label" check would be satisfied by a
+    # folder literally called "WARGAMES").
+    assert [p.name for p in sorted(movies_root.iterdir())] == [
+        f"{TMDB_TITLE} ({TMDB_YEAR})"]
+    assert sorted(p.name for p in rig.movie_dir.glob("*.mkv")) == [
+        f"{TMDB_TITLE} ({TMDB_YEAR}).mkv"]
+    # Both halves come from TMDB: the casing the disc label doesn't have, and the
+    # year it doesn't carry at all.
+    assert DISC_LABEL not in rig.video.name and str(TMDB_YEAR) in rig.video.name
 
 
 async def test_two_equally_good_matches_park_the_job_instead_of_guessing(rig):

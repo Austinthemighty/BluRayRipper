@@ -6,6 +6,7 @@ HTTP at the transport layer and lets real httpx build the URL/query string and d
 would actually receive and the objects the pipeline actually gets back.
 """
 
+import stat
 from pathlib import Path
 
 import httpx
@@ -377,28 +378,46 @@ async def test_a_failed_image_download_leaves_no_placeholder_behind(
 def test_a_readonly_temp_from_an_interrupted_run_does_not_block_the_next_write(
         tmp_path, monkeypatch):
     """A killed run can leave poster.jpg.tmp behind, and on a Windows/SMB share it
-    carries the read-only attribute — writing it raises PermissionError, which
-    would otherwise wedge artwork for that folder permanently."""
+    carries the read-only attribute — which denies writing it AND deleting it
+    until the attribute itself is cleared. Retrying without clearing it just
+    raises PermissionError again and wedges artwork for that folder permanently.
+
+    The stale temp here really is read-only, and both refusals are keyed off the
+    live mode bits, so the retry only gets through if the code actually cleared
+    them."""
     dest = tmp_path / "poster.jpg"
     dest.write_bytes(b"old-art")
     stale = tmp_path / "poster.jpg.tmp"
     stale.write_bytes(b"half-written-junk")
+    stale.chmod(stat.S_IREAD)          # the read-only attribute, for real
 
     real_write_bytes = Path.write_bytes
-    refused: list[str] = []
+    real_unlink = Path.unlink
+    denied: list[str] = []
 
-    def flaky_write_bytes(self, data):
-        # Refuse the first write to the temp file, the way a read-only attribute
-        # does on Z: — the retry after clearing it must succeed.
-        if self.name.endswith(".tmp") and not refused:
-            refused.append(self.name)
+    def _is_readonly(path):
+        return path.exists() and not path.stat().st_mode & stat.S_IWUSR
+
+    def win_write_bytes(self, data):
+        if _is_readonly(self):
+            denied.append(f"write {self.name}")
             raise PermissionError(13, "Permission denied")
         return real_write_bytes(self, data)
 
-    monkeypatch.setattr(Path, "write_bytes", flaky_write_bytes)
+    def win_unlink(self, missing_ok=False):
+        # POSIX lets you unlink a read-only file; Windows/SMB does not, and that
+        # is the platform this retry exists for.
+        if _is_readonly(self):
+            denied.append(f"unlink {self.name}")
+            raise PermissionError(13, "Permission denied")
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "write_bytes", win_write_bytes)
+    monkeypatch.setattr(Path, "unlink", win_unlink)
 
     metadata._replace_bytes(dest, b"new-art")
 
-    assert refused == ["poster.jpg.tmp"]   # the failure path really was taken
+    # Refused once on the write, then cleared — never refused a second time.
+    assert denied == ["write poster.jpg.tmp"]
     assert dest.read_bytes() == b"new-art"
     assert not stale.exists()

@@ -127,12 +127,14 @@ def test_the_friendly_cinfo_name_beats_the_drv_label_whichever_line_came_first()
     the human title used for the library folder. makemkvcon does not guarantee
     the order it emits them in, and the DRV line must never overwrite a name
     CINFO already supplied or discs land in an ALL_CAPS_UNDERSCORE folder."""
-    lines = [
-        'CINFO:2,0,"Sample Show Season 1 Disc 1"',
-        'DRV:0,2,999,12,"BD-RE","SAMPLE_SHOW_S01_D1","/dev/sr0"',
-    ]
+    cinfo = 'CINFO:2,0,"Sample Show Season 1 Disc 1"'
+    drv = 'DRV:0,2,999,12,"BD-RE","SAMPLE_SHOW_S01_D1","/dev/sr0"'
 
-    assert parse_info(lines, "disc:0").disc_name == "Sample Show Season 1 Disc 1"
+    # DRV arriving second must not clobber the name CINFO already set...
+    assert parse_info([cinfo, drv], "disc:0").disc_name == "Sample Show Season 1 Disc 1"
+    # ...and DRV arriving first (the order a real scan log uses) must not win
+    # either: CINFO has to overwrite the label the DRV line seeded.
+    assert parse_info([drv, cinfo], "disc:0").disc_name == "Sample Show Season 1 Disc 1"
 
 
 def test_a_disc_with_no_cinfo_name_still_gets_the_drv_label():

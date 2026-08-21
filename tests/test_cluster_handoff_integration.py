@@ -289,6 +289,13 @@ async def test_a_1080p_job_is_encoded_on_the_rip_box_and_never_offered_to_a_work
     assert encoded_locally == ["disc:0"]         # serve did the encode
     assert _record(store, 41).state == "done"    # ...and nothing is claimable
 
+    # Ask the store directly, BEFORE a worker is built: a finished row is not
+    # offered to a claimer at all. Without this the test below would also pass
+    # for an unrelated reason — the local encode deletes the job's staging dir,
+    # so even a wrongly-claimable row is dropped again by the _fully_ripped
+    # guard, and "the worker encoded nothing" would prove nothing about state.
+    assert store.claim_next("encoder-Z", CLAIMABLE_STATES, 180) is None
+
     runner = _worker(settings, store, "encoder-A", monkeypatch)
     processed = _capture_process(runner, monkeypatch)
     _stop_after(runner, monkeypatch)
@@ -484,7 +491,10 @@ async def test_serve_flags_an_encode_as_stalled_only_when_no_live_worker_claims_
     assert manager._is_stalled(claimed, manager._live_state(claimed)) is False
     assert manager._is_stalled(orphaned, manager._live_state(orphaned)) is True
 
-    store.now += 300                            # encoder-A stops reporting
+    # encoder-A stops reporting. 100s is past THIS cluster's 60s window but
+    # inside the 180s default, so a stall window read from anywhere but
+    # cluster.stale_after_seconds still calls the dead encode healthy.
+    store.now += 100
     await _refresh_until(
         manager,
         lambda: any(w.worker_id == "encoder-A" and w.seconds_since_seen > 60

@@ -164,13 +164,18 @@ async def test_one_plan_row_names_every_disc_in_the_set_with_no_form(box):
         "HAWAII_FIVE_0_S1_D4": [13, 14, 15, 16],
         "HAWAII_FIVE_0_S1_D5_NTSC": [17, 18, 19, 20],
     }
-    # The names reached the pipeline, not just the web job.
-    assert len(box.encoded) == 4
-    assert all(
-        a.kind is MediaKind.TV and a.show_or_movie_title == "Hawaii Five-O"
-        and a.year == 1968 and a.season == 1
-        for job in box.encoded for a in job.assignments.values()
-    )
+    # The names reached the pipeline, not just the web job — spelled out per disc,
+    # because an `all(...)` over the assignments is vacuously true if the pipeline
+    # job is handed none of them, which is exactly the failure this guards.
+    assert [job.disc.volume_label for job in box.encoded] == list(numbered)
+    assert [
+        sorted((a.kind, a.show_or_movie_title, a.year, a.season, a.episode)
+               for a in job.assignments.values())
+        for job in box.encoded
+    ] == [
+        [(MediaKind.TV, "Hawaii Five-O", 1968, 1, ep) for ep in numbered[label]]
+        for label in numbered
+    ]
 
 
 async def test_a_disc_specific_row_beats_the_wildcard_that_would_have_caught_it(box):
@@ -307,9 +312,17 @@ async def test_a_row_with_no_year_warns_that_plex_will_be_left_guessing(box):
     assert pinned.show_year == 1968
     assert "has no year" not in _log(pinned)
     assert unpinned.show_year is None
-    assert all(a.year is None for a in unpinned.assignments.values())
     assert "has no year" in _log(unpinned) and "remake" in _log(unpinned)
-    assert unpinned.state is JobState.DONE              # a warning, not a refusal
+    # A warning, not a refusal: the disc is still fully named and ripped, with the
+    # year — and only the year — missing. Checked as a list, not as an `all(...)`
+    # over the assignments, which would also pass if there were none.
+    assert unpinned.state is JobState.DONE
+    named = [(None, 3, 1), (None, 3, 2), (None, 3, 3), (None, 3, 4)]
+    assert sorted((a.year, a.season, a.episode)
+                  for a in unpinned.assignments.values()) == named
+    assert sorted((a.year, a.season, a.episode)
+                  for job in box.encoded for a in job.assignments.values()
+                  if job.disc.volume_label == "THE_OFFICE_S3_D1") == named
 
 
 # --- the wrong numbers -----------------------------------------------------
