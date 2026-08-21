@@ -103,7 +103,17 @@ class FFmpeg:
         try:
             data = json.loads("\n".join(result.stdout_lines))
         except (ValueError, TypeError):
-            return hdr_mod.HdrInfo(), 0.0
+            # NOT an empty HdrInfo. That is indistinguishable from a genuinely
+            # SDR source, so the encode would drop HDR10 with no colour flags at
+            # all AND the output check would pass vacuously (it returns early
+            # when the SOURCE is not HDR) — the exact silent loss this path
+            # exists to prevent, with nothing in the log.
+            raise RuntimeError(
+                f"ffprobe could not read {video.name}, so this title's HDR "
+                "metadata is unknown. Encoding it now would silently produce "
+                "SDR. Check that ffprobe works on this machine, then Retry — "
+                "the rip is kept, so only the encode re-runs."
+            ) from None
         info = hdr_mod.parse_hdr(data)
         try:
             duration = float(data.get("format", {}).get("duration") or 0)

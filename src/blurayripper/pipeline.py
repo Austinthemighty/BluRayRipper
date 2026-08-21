@@ -65,6 +65,10 @@ class TitleResult:
     title_id: int
     video_path: Path | None = None
     subtitle_paths: list[Path] = field(default_factory=list)
+    # True when an EARLIER run completed this title and this run skipped it. Its
+    # subtitles were checked then; demanding fresh evidence from a run that
+    # deliberately did no subtitle work fails a job that is already correct.
+    from_checkpoint: bool = False
 
 
 @dataclass
@@ -245,7 +249,8 @@ class Pipeline:
             # Expected but absent. Placed-file checks alone cannot catch this:
             # when OCR fails there is no path to check, so the evidence is the
             # DISC having tracks we keep while nothing came out.
-            if not result.subtitle_paths and job.disc is not None:
+            if (not result.subtitle_paths and not result.from_checkpoint
+                    and job.disc is not None):
                 title = next((t for t in job.disc.titles
                               if t.title_id == result.title_id), None)
                 langs = sorted({
@@ -267,6 +272,10 @@ class Pipeline:
         self, job: Job, staging_root: Path, scheduler: EncodeScheduler, report
     ) -> None:
         assert job.disc is not None
+        # A resume re-enters here with the previous run's results still attached;
+        # appending to them double-counts every output and reports each problem
+        # twice.
+        job.results = []
         await self._resolve_source_drive(job, report)  # follow the disc across drives
         await self._place_cover_art(job, report)  # before any rip/eject
         await self._place_tmdb_art(job, report)   # real poster/backdrop overrides disc art
@@ -352,8 +361,9 @@ class Pipeline:
                 result, video_dest, ocr.get(title_id, []), report,
                 source_video=ripped, assignment=assignment)
             self._cache_subs(video_dest, extracted[title_id])
-            self._record_subs_done(job.checkpoints.setdefault(title_id, {}),
-                                   result.subtitle_paths)
+            self._record_if_complete(job.checkpoints.setdefault(title_id, {}),
+                                     extracted[title_id], ocr.get(title_id, []),
+                                     result, report)
         _checkpoint(report)
 
     async def _extract_title_subs(
@@ -701,7 +711,14 @@ class Pipeline:
         cp = job.checkpoints.setdefault(title_id, {})
         if cp.get("placed") and self._video_path_for(assignment).exists():
             report.on_event(f"Title {title_id} already done (resume) — skipping.")
-            return TitleResult(title_id=title_id, video_path=self._video_path_for(assignment))
+            # Carry the recorded sidecars, and mark where they came from. Without
+            # this the result looks like a title that produced no subtitles at
+            # all, and the end-of-job check fails a job that is already complete
+            # — every time it is resumed.
+            return TitleResult(
+                title_id=title_id, video_path=self._video_path_for(assignment),
+                subtitle_paths=list(self._subs_already_done(cp) or []),
+                from_checkpoint=True)
         ripped_mkv = await self._ensure_ripped(job, title_id, staging_root, report)
         return await self._process_after_rip(
             job, title_id, assignment, staging_root, ripped_mkv, scheduler, report)
@@ -886,11 +903,12 @@ class Pipeline:
         else:
             sub_jobs = await self._extract_title_subs(job, title_id, ripped_mkv, sub_dir, report)
             ocr = await self._ocr_all(job, [(title_id, assignment, ripped_mkv, sub_dir, sub_jobs)], report)
+            pairs = ocr.get(title_id, [])
             await self._place_title_subs(
-                result, video_dest, ocr.get(title_id, []), report,
+                result, video_dest, pairs, report,
                 source_video=ripped_mkv, assignment=assignment)
             self._cache_subs(video_dest, sub_jobs)
-            self._record_subs_done(cp, result.subtitle_paths)
+            self._record_if_complete(cp, sub_jobs, pairs, result, report)
             _checkpoint(report)
 
         # Resolve grain (may park at an interactive preview gate — UI only). Skip
@@ -1171,6 +1189,24 @@ class Pipeline:
         record survives a move between machines."""
         out = self.settings.storage.output_dir
         cp["subs_done"] = [_rel_path(out, p) for p in paths]
+
+    def _record_if_complete(self, cp: dict, extracted: list, pairs: list,
+                            result: TitleResult, report) -> None:
+        """Record completion only when EVERY extracted track produced an SRT.
+
+        _ocr_all drops a track whose OCR raised, so a failed OCR leaves an empty
+        result — which is exactly the shape of "this disc has no subtitles".
+        Recording that as done meant a single OCR failure permanently convinced
+        every later run there was nothing to do, while the encode carried on and
+        marked the title placed. The subtitles could then never be recovered.
+        """
+        if len(pairs) == len(extracted):
+            self._record_subs_done(cp, result.subtitle_paths)
+            return
+        report.on_event(
+            f"{len(extracted) - len(pairs)} of {len(extracted)} subtitle track(s) "
+            "failed OCR — NOT marking subtitles done, so a retry re-runs them "
+            "(the extracted images are kept, so no re-rip).")
 
     def _subs_already_done(self, cp: dict) -> list[Path] | None:
         """The placed sidecars, if every one is still on disk; else None (redo).
