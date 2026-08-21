@@ -125,7 +125,10 @@ SCHEMA: list[tuple[str, list[Field]]] = [
         Field("serve", "cleanup_stale_tools", "bool", "Clean up stale tools at startup", True, "Kill leftover MakeMKV/HandBrake/OCR processes orphaned by a prior crash before starting, so they don't exhaust memory."),
         Field("serve", "prep_concurrency", "int", "Prep concurrency", 2, "How many jobs rip + extract subs + resolve grain at once (bounds a recovery stampede after a restart)."),
         Field("serve", "auto_retry_max", "int", "Auto-retry max", 2, "How many times a failed job auto-retries (with backoff) before it stops and waits for you. 0 = never auto-retry."),
-        Field("serve", "notify_url", "str", "Notify webhook URL", "", "Push URL for alerts (ntfy-style, e.g. https://ntfy.sh/your-topic). Blank = notifications off.", env="BLURAYRIPPER_NOTIFY_URL"),
+    ]),
+    ("Notifications", [
+        Field("serve", "notify_url", "str", "ntfy URL", "", "Where alerts are pushed: https://ntfy.sh/your-topic, or your own server, e.g. https://ntfy.example.com/blurayripper. Any endpoint taking a plain-text POST works. Blank = notifications off. Save, then use Send test to confirm it arrives.", env="BLURAYRIPPER_NOTIFY_URL"),
+        Field("serve", "notify_priority", "choice", "Priority", "default", "ntfy priority. 'high' or 'urgent' break through a phone's silent mode; 'low'/'min' arrive without a sound. Alerts only fire when a job needs you, fails, or a box goes offline.", choices=("min", "low", "default", "high", "urgent"), env="BLURAYRIPPER_NOTIFY_PRIORITY"),
     ]),
     ("Scan", [
         Field("scan", "min_length_seconds", "int", "Min title length (s)", 120, "Ignore disc titles shorter than this — drops menus, trailers, and studio logos."),

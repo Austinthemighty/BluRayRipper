@@ -2086,9 +2086,14 @@ class JobManager:
         wj._task = self._spawn(self._run_job(wj))
 
     def _notify(self, title: str, message: str, priority: str | None = None) -> None:
-        """Fire-and-forget push (if a notify_url is configured)."""
+        """Fire-and-forget push (if a notify_url is configured).
+
+        An explicit priority (a per-alert escalation) wins; otherwise the
+        configured default applies, which is what lets a phone actually ring for
+        these instead of collecting them silently."""
         if self.settings.notify_url:
-            self._spawn(notify(self.settings.notify_url, title, message, priority))
+            self._spawn(notify(self.settings.notify_url, title, message,
+                               priority or self.settings.notify_priority))
 
     def _maybe_notify_done(self, wj: WebJob) -> None:
         """Push a 'finished encoding' notification the first time a job reaches

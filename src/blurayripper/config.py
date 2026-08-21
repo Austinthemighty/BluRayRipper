@@ -327,6 +327,9 @@ class Settings:
     # Webhook URL (ntfy-style plain-text POST) to push a notification when a job
     # needs input or fails. Blank = off. Put it in secrets.env if it has a token.
     notify_url: str | None = None
+    # ntfy priority for those pushes: min/low/default/high/urgent (or 1..5).
+    # "high" is what makes a phone actually ring rather than sit silent.
+    notify_priority: str = "default"
     min_length_seconds: int = 120
     web_host: str = "127.0.0.1"  # set to 0.0.0.0 to allow LAN access (no auth!)
     web_port: int = 8723
@@ -605,6 +608,8 @@ def load_settings(config_dir: Path | None = None, extra_overlay: dict | None = N
         prep_concurrency=int(serve_cfg.get("prep_concurrency", 2)),
         auto_retry_max=int(serve_cfg.get("auto_retry_max", 2)),
         notify_url=_override("BLURAYRIPPER_NOTIFY_URL", serve_cfg.get("notify_url")),
+        notify_priority=(_override("BLURAYRIPPER_NOTIFY_PRIORITY",
+                                   serve_cfg.get("notify_priority")) or "default"),
         min_length_seconds=int(scan_cfg.get("min_length_seconds", 120)),
         web_host=web_cfg.get("host", "127.0.0.1"),
         web_port=int(web_cfg.get("port", 8723)),

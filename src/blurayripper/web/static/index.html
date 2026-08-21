@@ -1670,6 +1670,29 @@ async function openSettings(scope){
         (note2 ? `<div class="fhelp">${esc(note2)}</div>` : '');
       gd.appendChild(row);
     }
+    // Notifications get a live test: a wrong URL or an unreachable server is
+    // otherwise invisible until the alert you actually needed never arrives.
+    if (g.title === 'Notifications') {
+      const row = document.createElement('div'); row.className = 'row';
+      const b = document.createElement('button'); b.className = 'sec';
+      b.textContent = '🔔 Send test notification';
+      const out = document.createElement('span'); out.className = 'muted';
+      out.style.fontSize = '12px';
+      b.onclick = async () => {
+        b.disabled = true; out.textContent = 'Sending…';
+        try {
+          const r = await api('POST', '/api/settings/notify-test');
+          out.textContent = (r.ok ? '✅ ' : '❌ ') + r.detail;
+        } catch (e) { out.textContent = '❌ ' + e.message; }
+        b.disabled = false;
+      };
+      row.appendChild(b); row.appendChild(out);
+      gd.appendChild(row);
+      const note = document.createElement('div');
+      note.className = 'muted'; note.style.fontSize = '12px';
+      note.textContent = 'Save first — the test sends using the saved settings.';
+      gd.appendChild(note);
+    }
     body.appendChild(gd);
   }
 }

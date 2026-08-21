@@ -574,6 +574,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def get_settings(scope: str = "global"):
         return settings_ui_payload(settings.config_dir, scope, manager.store)
 
+    @app.post("/api/settings/notify-test")
+    async def notify_test():
+        # Reload rather than using the settings this process started with: the
+        # point is to test what you JUST saved, and saved settings otherwise only
+        # take effect on the next restart.
+        from ..config import load_settings as _load
+        from ..services.notify import notify as _notify
+
+        fresh = _load()
+        if not fresh.notify_url:
+            return {"ok": False, "detail": "No ntfy URL is set. Save one first."}
+        sent = await _notify(
+            fresh.notify_url, "✅ BluRayRipper test",
+            "If you can read this, alerts are working. Sent from the Settings page.",
+            fresh.notify_priority)
+        return {"ok": bool(sent),
+                "detail": (f"Delivered to {fresh.notify_url} at priority "
+                           f"'{fresh.notify_priority}'." if sent else
+                           f"The POST to {fresh.notify_url} did not succeed. Check "
+                           "the URL and that this machine can reach it.")}
+
     @app.post("/api/settings")
     async def post_settings(updates: dict = Body(...), scope: str = "global"):
         try:
