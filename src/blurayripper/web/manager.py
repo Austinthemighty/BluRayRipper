@@ -542,18 +542,36 @@ class JobManager:
                 return False  # a live remote worker is heartbeating it
         return True
 
+    # Grace before "no task is working this" counts as stalled. Covers the gap
+    # between a job being marked RIPPING and its task being attached.
+    _RIP_TASK_GRACE = 90
+
     def _rip_stalled(self, wj: WebJob) -> bool:
-        """A rip/scan that hasn't emitted progress or a log line for the configured
-        window — a wedged makemkvcon (bad sector / unresponsive drive) that will
-        never finish on its own. Requeue cancels it (killing the subprocess, freeing
-        the drive) and re-runs from the last checkpoint."""
+        """A rip/scan that nothing is actually advancing — either a wedged
+        makemkvcon (bad sector / unresponsive drive) that will never finish, or a
+        job whose task is simply gone. Requeue cancels it (killing any subprocess,
+        freeing the drive) and re-runs from the last checkpoint."""
         window = self.settings.rip_stall_after_seconds
         if window <= 0:
             return False
+        now = time.monotonic()
         last = getattr(wj, "_activity_at", None)
         if last is None:
-            return False  # never started reporting yet — give it a baseline first
-        return (time.monotonic() - last) > window
+            # No baseline: the job reached a rip state without _run_job stamping
+            # one — its task died early, or it was restored mid-rip. This used to
+            # return False, so "no data" read as "healthy" and the job sat on
+            # RIPPING forever with no stall flag and no Requeue button. Stamp
+            # first sight instead, so there is something to measure from.
+            last = wj._activity_at = now
+        if (now - last) > window:
+            return True
+        # A rip only ever runs as a LOCAL task on the rip box — workers encode,
+        # they never rip. So no live task means nothing is moving this job, and
+        # waiting out the full no-progress window would just delay saying so.
+        task = getattr(wj, "_task", None)
+        if task is not None and not task.done():
+            return False
+        return (now - last) > self._RIP_TASK_GRACE
 
     def _record_serve_presence(self) -> None:
         """Heartbeat this box into the shared workers table.
