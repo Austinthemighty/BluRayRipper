@@ -1901,6 +1901,15 @@ class JobManager:
                     return
                 reporter.on_event(
                     f"Ripped + subtitles done — encoding locally ({max(heights)}p <= {limit}p).")
+                # Leave the rip lane BEFORE the encode starts. Without this the
+                # job keeps whatever state prep left it in (RIPPING) until
+                # _encode_title gets past the encode scheduler, so a job that has
+                # already ejected its disc still shows as ripping, still counts
+                # in "Ripping N", and — because RIPPING is a drive-held state —
+                # still pins its drive in the Drives panel.
+                job.state = wj.state = JobState.ENCODING
+                self._persist(wj)
+                self.bus.publish()
                 results = await self.pipeline.encode_phase(
                     job, staging_root, self.scheduler, reporter)
                 library.cleanup(staging_root)

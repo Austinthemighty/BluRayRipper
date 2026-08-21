@@ -85,3 +85,17 @@ def test_the_watchdog_can_still_be_turned_off(tmp_path, monkeypatch):
     m = _mgr(tmp_path, monkeypatch, window=0)
     wj = _ripping(m, _activity_at=time.monotonic() - 100000)
     assert m._is_stalled(wj, JobState.RIPPING) is False
+
+
+def test_a_local_encode_leaves_the_rip_lane(tmp_path, monkeypatch):
+    """A job encoding on the serve box must not still read as ripping.
+
+    Its disc is already ejected, so showing RIPPING puts it in the wrong queue,
+    inflates "Ripping N", and — since RIPPING is a drive-held state — pins the
+    now-empty drive in the Drives panel."""
+    m = _mgr(tmp_path, monkeypatch)
+    wj = _ripping(m)
+    assert m._lane(wj, JobState.RIPPING) == "rip"
+    assert JobState.RIPPING in m._DRIVE_HELD_STATES     # why it pinned the drive
+    assert m._lane(wj, JobState.ENCODING) == "encode"
+    assert JobState.ENCODING not in m._DRIVE_HELD_STATES
