@@ -87,12 +87,13 @@ def test_the_watchdog_can_still_be_turned_off(tmp_path, monkeypatch):
     assert m._is_stalled(wj, JobState.RIPPING) is False
 
 
-def test_a_local_encode_leaves_the_rip_lane(tmp_path, monkeypatch):
-    """A job encoding on the serve box must not still read as ripping.
+def test_encoding_is_neither_a_rip_lane_nor_a_drive_held_state(tmp_path, monkeypatch):
+    """Why marking a local encode as ENCODING matters — RIPPING keeps a job in
+    the rip queue AND pins its drive, so a job that kept RIPPING through an
+    encode held an already-ejected drive for hours.
 
-    Its disc is already ejected, so showing RIPPING puts it in the wrong queue,
-    inflates "Ripping N", and — since RIPPING is a drive-held state — pins the
-    now-empty drive in the Drives panel."""
+    This checks the mapping only. That the local-encode path actually sets
+    ENCODING is covered in test_wiring.py, which is the part that was missing."""
     m = _mgr(tmp_path, monkeypatch)
     wj = _ripping(m)
     assert m._lane(wj, JobState.RIPPING) == "rip"

@@ -1,6 +1,7 @@
 """JobManager state-machine flow, with the pipeline's tool calls stubbed out."""
 
 import asyncio
+import time
 import threading
 
 import pytest
@@ -617,7 +618,12 @@ async def test_wait_for_disc_change_sleeps_when_os_cannot_tell(manager, monkeypa
 
     monkeypatch.setattr(manager, "_MEDIA_PROBE_SECONDS", 0.01)
     monkeypatch.setattr(mgr, "os_media_snapshot", lambda: None)
+    started = time.monotonic()
     await asyncio.wait_for(manager._wait_for_disc_change(0.05), timeout=2)
+    # Not just "it returned": returning IMMEDIATELY is the bug this guards
+    # against (it would busy-poll the drives), and a bare call cannot tell the
+    # two apart. The timeout above covers the opposite failure, hanging.
+    assert time.monotonic() - started >= 0.04
 
 
 def test_drives_overlay_active_rip_name(manager):
