@@ -70,9 +70,25 @@ async def test_unknown_expected_duration_skips(pipe):
     await pipe._verify_rip_duration(_job(0), 1, Path("x.mkv"), _Report())  # no raise
 
 
-async def test_probe_failure_does_not_block(pipe):
+async def test_a_rip_that_cannot_be_read_back_is_rejected(pipe):
+    """This runs on a file just written, so a file mkvmerge cannot parse is a
+    broken file — not an unknown. Treating "can't tell" as "fine" is exactly how
+    two failed rips reached the encode queue: MakeMKV died mid-write, the
+    partial file could not be probed, the check skipped, and the jobs were
+    queued as ready with nothing to encode."""
+    import pytest
+
     async def boom(p): raise OSError("mkvmerge died")
     pipe.mkvtools.probe = boom
+
+    with pytest.raises(RuntimeError, match="can't be read back"):
+        await pipe._verify_rip_duration(_job(1711), 1, Path("x.mkv"), _Report())
+
+
+async def test_an_unknown_expected_duration_still_skips_quietly(pipe):
+    """The genuine can't-compare case: the scan reported no duration, so there
+    is nothing to check against. That must stay non-blocking."""
+    pipe.mkvtools.probe = _probe(10)
     r = _Report()
-    await pipe._verify_rip_duration(_job(1711), 1, Path("x.mkv"), r)  # no raise
-    assert any("skipped" in e for e in r.events)
+    await pipe._verify_rip_duration(_job(0), 1, Path("x.mkv"), r)   # no raise
+    assert not any("can't be read back" in e for e in r.events)

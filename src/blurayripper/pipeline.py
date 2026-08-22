@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import sys
 import time
@@ -734,8 +735,11 @@ class Pipeline:
     async def _verify_rip_duration(self, job: Job, title_id: int, ripped_mkv: Path, report) -> None:
         """Reject a rip whose runtime is much shorter than the disc title — the
         signature of a truncated rip (bad sectors) that MakeMKV still exited 0 on.
-        Best-effort: skips silently if the tolerance is off, the expected duration
-        is unknown, or the probe fails (never blocks on the check itself)."""
+        Skips only when it genuinely cannot compare: the tolerance is off, or the
+        scan never reported a duration. A probe FAILURE is not that — this runs
+        on a file just written, so a file mkvmerge cannot parse is a broken file,
+        and treating "can't tell" as "fine" is what let a failed rip reach the
+        encode queue."""
         tol_pct = self.settings.rip_duration_tolerance_pct
         if tol_pct <= 0:
             return
@@ -746,8 +750,11 @@ class Pipeline:
         try:
             actual = (await self.mkvtools.probe(ripped_mkv)).duration_seconds
         except Exception as exc:
-            report.on_event(f"Rip duration check skipped ({type(exc).__name__}: {exc}).")
-            return
+            raise RuntimeError(
+                f"The ripped file for title {title_id} can't be read back "
+                f"({type(exc).__name__}) — so the rip did not complete. Not "
+                f"keeping it; a Retry re-rips. Underlying error: {exc}"
+            ) from exc
         if actual <= 0:
             return
         floor = expected * (100 - tol_pct) // 100
@@ -793,13 +800,32 @@ class Pipeline:
                         pass
             title = job.disc.title(title_id) if job.disc else None
             speed = _RipSpeed(total_bytes=title.size_bytes if title else 0)
+            # MakeMKV writes progressively, so a rip that dies partway still
+            # leaves a file behind — "produced no output" alone does not catch
+            # it. Watch what it actually SAYS: it reports the failure plainly,
+            # and that is the most direct signal there is.
+            failed_msgs: list[str] = []
+
+            def watch(msg: str) -> None:
+                low = msg.lower()
+                if ("failed to save title" in low
+                        or re.search(r"\b0 titles saved\b", low)):
+                    failed_msgs.append(msg.strip())
+                report.on_event(msg)
+
             ripped = await self.makemkv.rip_title(
                 job.source, title_id, rip_dir,
                 on_progress=lambda label, frac: report.on_progress(
                     f"Rip t{title_id}: {label}{speed.update(frac)}", frac
                 ),
-                on_message=report.on_event,
+                on_message=watch,
             )
+            if failed_msgs:
+                raise RuntimeError(
+                    f"MakeMKV could not save title {title_id}: {failed_msgs[0]} "
+                    "The partial file is not kept, so a Retry re-rips it. A "
+                    "write error here usually means the staging disk or share "
+                    "went away mid-rip rather than a bad disc.")
             if not ripped:
                 raise RuntimeError(f"MakeMKV produced no output for title {title_id}.")
             ripped_mkv = ripped[0]

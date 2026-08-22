@@ -119,3 +119,97 @@ async def test_a_worker_publishes_the_job_it_claimed_before_it_starts_encoding(
 
     assert registered[0][1] == 42               # first thing published, not None
     assert registered[0][2] == "claimed"
+
+
+# --- a rip MakeMKV says failed must not reach the encode queue ---------------
+
+async def test_a_rip_makemkv_reports_as_failed_is_not_queued_for_encoding(
+        tmp_path, monkeypatch):
+    """Jobs 334 and 335. MakeMKV hit a write error on the NAS mid-rip, said "0
+    titles saved, 1 failed" — and both jobs were still logged as "Ripped +
+    subtitles done — queued for an encode worker".
+
+    It writes progressively, so the partial file it left behind defeated the
+    "produced no output" guard, and the truncation check could not probe that
+    file so it skipped. Believe what MakeMKV actually said instead."""
+    import pytest
+
+    from blurayripper.models import DiscInfo, Title
+    from blurayripper.pipeline import Job, Pipeline
+
+    s = load_settings()
+    monkeypatch.setattr(s.storage, "output_dir", tmp_path)
+    monkeypatch.setattr(s.storage, "staging_dir", tmp_path / "stage")
+    p = Pipeline(s)
+
+    job = Job(source="disc:0")
+    job.disc = DiscInfo(source="disc:0", disc_name="X", titles=[
+        Title(title_id=0, duration_seconds=6000, size_bytes=1,
+              source_filename="t00.mkv", streams=[])])
+    job.selected_title_ids = [0]
+
+    async def rip_title(source, title_id, dest_dir, *, on_progress=None,
+                        on_message=None):
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        partial = dest_dir / "C1_t00.mkv"
+        partial.write_bytes(b"partial")        # MakeMKV wrote some of it
+        on_message("Error 'Posix error - Resource temporarily unavailable' "
+                   "occurred while writing data")
+        on_message("Failed to save title 0 to file " + str(partial))
+        on_message("0 titles saved, 1 failed")
+        return [partial]                        # ...so it is NOT "no output"
+
+    monkeypatch.setattr(p.makemkv, "rip_title", rip_title)
+
+    with pytest.raises(RuntimeError, match="could not save title 0"):
+        await p._ensure_ripped(job, 0, tmp_path / "stage" / "job_1", _Rep())
+
+    assert "ripped_path" not in job.checkpoints.get(0, {})   # nothing to encode
+
+
+async def test_a_clean_rip_is_still_checkpointed(tmp_path, monkeypatch):
+    """The guard must not reject good rips — MakeMKV's normal chatter includes
+    plenty of lines, and only the failure ones may count."""
+    from blurayripper.models import DiscInfo, Title
+    from blurayripper.pipeline import Job, Pipeline
+
+    s = load_settings()
+    monkeypatch.setattr(s.storage, "output_dir", tmp_path)
+    monkeypatch.setattr(s.storage, "staging_dir", tmp_path / "stage")
+    s.auto_eject = False
+    p = Pipeline(s)
+
+    job = Job(source="disc:0")
+    job.disc = DiscInfo(source="disc:0", disc_name="X", titles=[
+        Title(title_id=0, duration_seconds=100, size_bytes=1,
+              source_filename="t00.mkv", streams=[])])
+    job.selected_title_ids = [0]
+
+    async def rip_title(source, title_id, dest_dir, *, on_progress=None,
+                        on_message=None):
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        good = dest_dir / "C1_t00.mkv"
+        good.write_bytes(b"a real rip")
+        on_message("Operation successfully completed")
+        on_message("1 titles saved")
+        return [good]
+
+    class _Probe:
+        duration_seconds = 100
+
+    async def probe(path): return _Probe()
+
+    monkeypatch.setattr(p.makemkv, "rip_title", rip_title)
+    monkeypatch.setattr(p.mkvtools, "probe", probe)
+
+    await p._ensure_ripped(job, 0, tmp_path / "stage" / "job_2", _Rep())
+    assert job.checkpoints[0]["ripped_path"].endswith("C1_t00.mkv")
+
+
+class _Rep:
+    def __init__(self): self.events = []
+    def on_event(self, m): self.events.append(m)
+    def on_progress(self, *a, **k): pass
+    def checkpoint(self): pass
+    def notify(self, *a, **k): pass
+    def ejected(self, *a, **k): pass
