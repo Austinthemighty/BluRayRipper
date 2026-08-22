@@ -1041,13 +1041,14 @@ def test_rip_failure_hint_classifies_drive_vs_read_vs_disc(manager):
                 error="ProcessError: Command failed (11)")
     wj.log = ["Error 'OS error - This device does not exist' occurred while reading",
               "0 titles saved, 1 failed"]
-    hint = manager._rip_failure_hint(wj)
-    assert hint and "dropped" in hint.lower()
+    hint, terminal = manager._rip_failure_hint(wj)
+    assert "dropped" in hint.lower() and terminal is True
 
     # SCSI read error -> read hint
     wj2 = WebJob(id=502, source="disc:0", state=JobState.FAILED, error="ProcessError")
     wj2.log = ["Error 'Scsi error - ILLEGAL REQUEST' occurred while reading", "1 failed"]
-    assert "read error" in manager._rip_failure_hint(wj2).lower()
+    hint2, terminal2 = manager._rip_failure_hint(wj2)
+    assert "read error" in hint2.lower() and terminal2 is True
 
     # No signature but drive cache shows no disc -> the reinsert message (via schedule)
     wj3 = WebJob(id=503, source="disc:0", state=JobState.FAILED, error="something else")

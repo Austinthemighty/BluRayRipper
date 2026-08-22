@@ -1857,6 +1857,7 @@ class JobManager:
     async def _run_job(self, wj: WebJob) -> None:
         reporter = _Reporter(self, wj)
         wj._activity_at = time.monotonic()  # baseline for the rip-stall watchdog
+        wj._log_mark = len(wj.log)          # a failure hint reads only this run
         job = wj._pipeline_job
         job.selected_title_ids = wj.selected_title_ids
         job.assignments = wj.assignments
@@ -2040,21 +2041,45 @@ class JobManager:
     # MakeMKV failure signatures that won't fix themselves on retry — the drive is
     # offline or the disc/drive can't be read. Matched (lower-cased) against the
     # job error + recent log.
+    # The drive itself is gone. "failed to open disc" is deliberately NOT here:
+    # it is also what an unknown AACS volume key prints, and the two remedies
+    # are opposites — power-cycle a healthy drive vs submit a key dump.
     _DRIVE_OFFLINE_SIGNS = (
-        "no usable optical drives", "device does not exist", "failed to open disc")
+        "no usable optical drives", "device does not exist", "no such device")
     _READ_ERROR_SIGNS = ("scsi error", "read error", "hash check failed", "fetchframes")
+    # Ambiguous on its own: could be a dead drive, a disc the drive cannot read,
+    # or a missing volume key. Worth saying, but NOT worth suppressing a retry.
+    _OPEN_FAILED_SIGNS = ("failed to open disc",)
 
-    def _rip_failure_hint(self, wj: WebJob) -> str | None:
-        """A specific, non-retryable hint for a drive/read failure, or None."""
-        blob = ((wj.error or "") + "\n" + "\n".join(wj.log[-12:])).lower()
+    def _run_log_mark(self, wj: WebJob) -> int:
+        """Where THIS run's log lines start, so a hint never reads an old phase."""
+        return min(getattr(wj, "_log_mark", 0), len(wj.log))
+
+    def _rip_failure_hint(self, wj: WebJob) -> tuple[str, bool] | None:
+        """(hint, is_terminal) for a drive/read failure, or None.
+
+        Scoped to THIS run. It used to read the last 12 log lines whatever run
+        they came from, so one "Failed to open disc" during a scan relabelled
+        every later failure on that job — an encoder crash reported as a drive
+        that dropped off the bus, with the wrong remedy pushed to the phone and
+        the auto-retry it deserved suppressed.
+        """
+        blob = ((wj.error or "") + "\n"
+                + "\n".join(wj.log[self._run_log_mark(wj):])).lower()
         if any(s in blob for s in self._DRIVE_OFFLINE_SIGNS):
             return ("The optical drive became unavailable to MakeMKV — it likely dropped "
                     "off the bus. The disc being inserted isn't enough: check the drive's "
-                    "power/connection or reset it (or use another drive), then click Retry.")
+                    "power/connection or reset it (or use another drive), then click Retry.",
+                    True)
         if any(s in blob for s in self._READ_ERROR_SIGNS):
             return ("Disc read error — the drive couldn't read the disc (a bad sector, a "
                     "dirty/scratched disc, or the drive dropping mid-read). Clean the disc "
-                    "or reset/try another drive, then click Retry.")
+                    "or reset/try another drive, then click Retry.", True)
+        if any(s in blob for s in self._OPEN_FAILED_SIGNS):
+            return ("MakeMKV couldn't open the disc. That is either a disc it has no "
+                    "volume key for (check this job for a saved AACS dump), a disc it "
+                    "can't read, or a drive that has stopped responding — so this is "
+                    "retried anyway in case it was transient.", False)
         return None
 
     def _schedule_auto_retry(self, wj: WebJob) -> None:
@@ -2063,7 +2088,12 @@ class JobManager:
         broken job doesn't loop forever."""
         # A drive/read failure (or a genuinely absent disc) won't recover on its
         # own — surface a specific reason and don't burn retries against it.
-        hint = self._rip_failure_hint(wj)
+        found = self._rip_failure_hint(wj)
+        hint, terminal = found if found else (None, True)
+        if hint is not None and not terminal:
+            # Say it, but still let the retry budget do its work.
+            wj.log.append(stamp_log(hint))
+            hint = None
         if hint is None:
             hint = self._source_file_missing(wj)
         if hint is None and self._source_disc_missing(wj):

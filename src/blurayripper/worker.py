@@ -420,6 +420,14 @@ class WorkerRunner:
         reporter = WorkerReporter(self.store, self.worker_id, rec.id, job)
         staging_root = self.settings.storage.staging_dir / f"job_{rec.id}"
         reporter.on_event(f"Claimed by {self.worker_id}.")
+        # Publish WHICH job this box is holding before any work starts. The
+        # heartbeat sleeps before its first touch, so until now the presence row
+        # still said job_id=None from the last idle poll — and serve decides "is
+        # anything working this?" precisely by looking for a row naming the job.
+        # For that window a live encode read as stalled, and Requeue would have
+        # released the claim and started a second encode of the same title onto
+        # the same output path.
+        self._register(rec.id, "claimed")
         hb = asyncio.create_task(self._heartbeat(reporter))
         try:
             results = await self.pipeline.encode_phase(
