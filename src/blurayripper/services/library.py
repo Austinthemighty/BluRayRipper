@@ -14,11 +14,26 @@ from pathlib import Path
 def place(src: Path, dest: Path, *, overwrite: bool = True) -> Path:
     """Move ``src`` to ``dest``, creating parent dirs. Returns ``dest``."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists():
-        if not overwrite:
-            raise FileExistsError(dest)
-        dest.unlink()
-    shutil.move(str(src), str(dest))
+    if dest.exists() and not overwrite:
+        raise FileExistsError(dest)
+    # Move into place via a temp name in the SAME directory, then swap. Deleting
+    # the destination first opened a window where a failed move (a share that
+    # drops, a full disk) left the old file gone and nothing to replace it —
+    # reachable whenever a re-OCR re-places sidecars over good ones.
+    staged = dest.with_name(dest.name + ".partial-replace")
+    try:
+        staged.unlink()
+    except OSError:
+        pass
+    shutil.move(str(src), str(staged))
+    try:
+        staged.replace(dest)          # atomic within a filesystem
+    except OSError:
+        # Cross-device or a filesystem without atomic replace: fall back, but
+        # only now, when the replacement is already written and local.
+        if dest.exists():
+            dest.unlink()
+        shutil.move(str(staged), str(dest))
     return dest
 
 

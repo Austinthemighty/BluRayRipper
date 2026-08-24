@@ -168,7 +168,7 @@ class _MinimalStore(Store):
     def heartbeat(self, job_id, worker_id):
         pass
 
-    def release(self, job_id):
+    def release(self, job_id, owner=None):
         pass
 
 

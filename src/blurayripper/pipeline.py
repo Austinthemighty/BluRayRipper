@@ -277,6 +277,12 @@ class Pipeline:
         # appending to them double-counts every output and reports each problem
         # twice.
         job.results = []
+        # Per-RUN, not per-Job: retry() reuses the same Job object, so a stale
+        # flag from an earlier run made a resume "finish ripping" again — which
+        # re-ejects the drive. The eject target is re-resolved against the drives
+        # as they are NOW, so that could eject a different job's disc, mid-rip,
+        # and always pushed a spurious "safe to swap the next one" notification.
+        job._ripped_this_run = False
         await self._resolve_source_drive(job, report)  # follow the disc across drives
         await self._place_cover_art(job, report)  # before any rip/eject
         await self._place_tmdb_art(job, report)   # real poster/backdrop overrides disc art
@@ -300,6 +306,7 @@ class Pipeline:
         the rip box's serve doesn't kill that long NAS-bound work); the rip box
         then only rips and resolves grain."""
         assert job.disc is not None
+        job._ripped_this_run = False   # per-run; see _process_titles
         # 0) Follow the disc across drives, then grab the disc's cover art while
         #    it's still in the drive, then override it with the real TMDB art.
         await self._resolve_source_drive(job, report)

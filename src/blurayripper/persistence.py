@@ -205,8 +205,11 @@ class Store(ABC):
         """Mark a claimed job alive so it isn't reclaimed by another worker."""
 
     @abstractmethod
-    def release(self, job_id: int) -> None:
-        """Drop a job's claim so another worker can pick it up."""
+    def release(self, job_id: int, owner: str | None = None) -> None:
+        """Drop a job's claim so another worker can pick it up.
+
+        ``owner`` scopes it: a worker releasing its own claim must not be able to
+        drop a claim that has since moved to another box."""
 
     def max_id(self) -> int:
         return max((r.id for r in self.load_all()), default=0)
@@ -276,6 +279,9 @@ class MemoryStore(Store):
     def __init__(self) -> None:
         self._rows: dict[int, dict] = {}
         self._claimed: set[int] = set()
+        # Who holds each claim, so release() can be owner-scoped here too and the
+        # in-memory store keeps the same ownership rules as Postgres.
+        self._claim_owner: dict[int, str] = {}
         self._wsettings: dict[str, dict] = {}
         self._signals: dict[str, int] = {}
         self._shared_config: dict[str, dict] = {}
@@ -322,6 +328,7 @@ class MemoryStore(Store):
     def delete(self, job_id: int) -> None:
         self._rows.pop(job_id, None)
         self._claimed.discard(job_id)
+        self._claim_owner.pop(job_id, None)
 
     def claim_next(
         self, worker_id: str, states: list[str], stale_after_seconds: int = 180
@@ -332,14 +339,18 @@ class MemoryStore(Store):
         for jid, data in ordered:
             if data.get("state") in states and jid not in self._claimed:
                 self._claimed.add(jid)
+                self._claim_owner[jid] = worker_id
                 return JobRecord.from_json(data)
         return None
 
     def heartbeat(self, job_id: int, worker_id: str) -> None:
         pass
 
-    def release(self, job_id: int) -> None:
+    def release(self, job_id: int, owner: str | None = None) -> None:
+        if owner is not None and self._claim_owner.get(job_id) not in (None, owner):
+            return                      # someone else holds it now
         self._claimed.discard(job_id)
+        self._claim_owner.pop(job_id, None)
 
     @property
     def durable(self) -> bool:
@@ -478,9 +489,18 @@ class PostgresStore(Store):
                 (job_id, worker_id),
             )
 
-    def release(self, job_id: int) -> None:
+    def release(self, job_id: int, owner: str | None = None) -> None:
+        # Owner-scoped when we know who is releasing: an unscoped UPDATE let one
+        # box drop another box's claim, and the job then gets picked up a second
+        # time — two encodes writing the same output path.
         with self._connect() as conn, conn.cursor() as cur:
-            cur.execute("UPDATE jobs SET claimed_by = NULL WHERE id = %s", (job_id,))
+            if owner is None:
+                cur.execute("UPDATE jobs SET claimed_by = NULL WHERE id = %s",
+                            (job_id,))
+            else:
+                cur.execute(
+                    "UPDATE jobs SET claimed_by = NULL "
+                    "WHERE id = %s AND claimed_by = %s", (job_id, owner))
 
     def record_worker(self, worker_id: str, version: str | None,
                       job_id: int | None, stage: str | None,

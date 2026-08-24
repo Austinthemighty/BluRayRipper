@@ -84,7 +84,7 @@ class FlakyStore(MemoryStore):
         self._guard("claim_next")
         return super().claim_next(worker_id, states, stale_after_seconds)
 
-    def release(self, job_id):
+    def release(self, job_id, owner=None):
         self._guard("release")
         super().release(job_id)
 

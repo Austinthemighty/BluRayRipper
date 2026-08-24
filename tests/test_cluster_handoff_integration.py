@@ -82,7 +82,7 @@ class ClusterStore(SharedStore):
         if self._owner.get(job_id) == worker_id:
             self._beat[job_id] = self.now
 
-    def release(self, job_id):
+    def release(self, job_id, owner=None):
         self._owner.pop(job_id, None)
         self._beat.pop(job_id, None)
 

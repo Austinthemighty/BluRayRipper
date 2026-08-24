@@ -134,8 +134,8 @@ async def test_worker_releases_job_still_being_ripped(tmp_path, monkeypatch):
 
     orig_release = runner.store.release
 
-    def release_and_stop(jid):
-        orig_release(jid)
+    def release_and_stop(jid, owner=None):
+        orig_release(jid, owner)
         runner.request_stop()
     monkeypatch.setattr(runner.store, "release", release_and_stop)
 

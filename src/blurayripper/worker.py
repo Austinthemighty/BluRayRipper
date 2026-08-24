@@ -299,7 +299,7 @@ class WorkerRunner:
                 # claim back and keep polling, rather than failing it with
                 # "no ripped file to encode" (and stealing it from the rip box).
                 with contextlib.suppress(Exception):
-                    self.store.release(rec.id)
+                    self.store.release(rec.id, self.worker_id)
                 self._register(None, "idle")
                 print(f"Job {rec.id} claimed but not fully ripped yet — "
                       "released for the rip box.", flush=True)
@@ -450,7 +450,7 @@ class WorkerRunner:
             # (default 180s). The state is already non-claimable here, so releasing
             # is safe; it only matters once the manager flips a retry back to READY.
             with contextlib.suppress(Exception):
-                self.store.release(rec.id)
+                self.store.release(rec.id, self.worker_id)
 
     async def _heartbeat(self, reporter: WorkerReporter) -> None:
         while True:
