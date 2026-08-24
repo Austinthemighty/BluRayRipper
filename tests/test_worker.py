@@ -119,6 +119,12 @@ async def test_worker_releases_job_still_being_ripped(tmp_path, monkeypatch):
     monkeypatch.setattr(settings.storage, "staging_dir", tmp_path / "stage")
     monkeypatch.setattr(settings, "database_url", "memory://test")
     settings.cluster.worker_poll_seconds = 0
+    # _apply_worker_settings reloads settings from disk + the store overlay, which
+    # throws the line above away and leaves this test sleeping the default 5s on
+    # every run of the suite. Pin the reload to these settings; the overlay
+    # behaviour is covered elsewhere and is not what this test is about.
+    monkeypatch.setattr("blurayripper.worker.load_settings",
+                        lambda *a, **k: settings)
     runner = WorkerRunner(settings, worker_id="w1")
     runner.store = MemoryStore()
     runner.store.save(JobRecord(

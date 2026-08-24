@@ -21,7 +21,6 @@ real_logs.txt); several of these lines caused real incidents.
 from __future__ import annotations
 
 import asyncio
-import re
 from pathlib import Path
 
 import pytest
@@ -98,12 +97,13 @@ def _msg(text: str, code: int = 5021) -> str:
     return f"MSG:{code},0,1,{quoted},{quoted}"
 
 
-def _fake_run(monkeypatch, stdout_lines, *, capture=None, on_cmd=None,
-              returncode: int = 0):
+def _fake_run(monkeypatch, stdout_lines, *, capture=None, on_cmd=None):
     """Stand in for process.run: stream ``stdout_lines`` to the caller's handler.
 
     Patched on the process module itself, which is what every tool wrapper
-    imported — no subprocess is ever spawned.
+    imported — no subprocess is ever spawned. The signature mirrors the real
+    ``process.run`` exactly, so a keyword the app starts passing shows up here as
+    a TypeError rather than being silently accepted.
     """
     async def run(cmd, *, on_line=None, cwd=None, check=True, low_priority=False,
                   timeout=None):
@@ -115,14 +115,27 @@ def _fake_run(monkeypatch, stdout_lines, *, capture=None, on_cmd=None,
                 res = on_line(line)
                 if res is not None and hasattr(res, "__await__"):
                     await res
-        return process.ProcessResult(returncode=returncode, stdout_lines=list(lines),
-                                     stderr="")
+        return process.ProcessResult(returncode=0, stdout_lines=list(lines), stderr="")
 
     monkeypatch.setattr(process, "run", run)
     return run
 
 
+def _done(value):
+    """A coroutine already holding ``value`` (for one-line async monkeypatches)."""
+    async def _c():
+        return value
+    return _c()
+
+
 def _settings(tmp_path, monkeypatch):
+    """Settings with every value these tests read pinned to the tracked default.
+
+    ``load_settings()`` layers config/settings.local.json (gitignored) and
+    BLURAYRIPPER_* env vars over the checked-in TOML, so a developer whose box
+    keeps subtitles in another language, or who has turned the rip-duration check
+    off, would otherwise get different answers from the same test.
+    """
     s = load_settings()
     monkeypatch.setattr(s.storage, "output_dir", tmp_path / "out")
     monkeypatch.setattr(s.storage, "staging_dir", tmp_path / "stage")
@@ -131,6 +144,11 @@ def _settings(tmp_path, monkeypatch):
     monkeypatch.setattr(s.tools, "mkvextract", "/usr/bin/mkvextract")
     monkeypatch.setattr(s, "auto_eject", False)
     monkeypatch.setattr(s, "database_url", None)
+    monkeypatch.setattr(s, "notify_url", None)
+    monkeypatch.setattr(s, "min_length_seconds", 120)
+    monkeypatch.setattr(s, "rip_duration_tolerance_pct", 3)  # the truncation guard
+    monkeypatch.setattr(s.languages, "keep", ["eng", "pol"])
+    monkeypatch.setattr(s.languages, "default", "eng")
     return s
 
 
@@ -167,7 +185,8 @@ def _manager(tmp_path, monkeypatch, *, retries: int = 2):
 
 
 def _pushes(manager, monkeypatch) -> list[tuple[str, str]]:
-    manager.settings.notify_url = "http://ntfy.example/blurayripper"
+    monkeypatch.setattr(manager.settings, "notify_url",
+                        "http://ntfy.example/blurayripper")
     sent: list[tuple[str, str]] = []
 
     async def fake_notify(url, title, message, priority=None):
@@ -301,13 +320,6 @@ async def test_a_bd_java_rip_that_came_back_short_is_refused_and_no_disc_is_anno
                for _t, msg in ok.notifications)
 
 
-def _done(value):
-    """A coroutine already holding ``value`` (for one-line async monkeypatches)."""
-    async def _c():
-        return value
-    return _c()
-
-
 # ==========================================================================
 # 2. titles skipped for being under the minimum length
 # ==========================================================================
@@ -331,8 +343,9 @@ async def test_the_short_title_cut_off_is_the_configured_one_and_the_skip_is_exp
     seen: list[str] = []
     disc = await MakeMKV(s).scan("disc:0", on_message=seen.append)
 
-    assert "--minlength=300" in cmds[0]
-    assert not [a for a in cmds[0] if a.startswith("--minlength") and a != "--minlength=300"]
+    # Exactly one --minlength, carrying the configured value: makemkvcon takes the
+    # LAST one it is given, so a stray second flag would silently win.
+    assert [a for a in cmds[0] if a.startswith("--minlength")] == ["--minlength=300"]
     assert seen == [MINLENGTH_SKIP]
     # The skipped title left no placeholder: only what TINFO described is offered.
     assert [t.title_id for t in disc.titles] == [0]
@@ -414,6 +427,13 @@ async def test_a_lost_title_line_on_its_own_diagnoses_nothing(tmp_path, monkeypa
 
     assert m._rip_failure_hint(wj) is None
 
+    # Control, because "returns None" would also hold if the run's log were never
+    # read at all: swap that one line for one that does mean something, leave
+    # everything else identical, and the same job is diagnosed.
+    wj.log = [POSIX_NO_DEVICE]
+    hint, _terminal = m._rip_failure_hint(wj)
+    assert "dropped off the bus" in hint
+
 
 # ==========================================================================
 # 4. the share that went away mid-write (jobs 334/335)
@@ -455,26 +475,32 @@ async def test_a_write_failure_on_the_share_is_retried_and_never_blamed_on_the_d
     with pytest.raises(RuntimeError) as err:
         await pipe._ensure_ripped(job, 0, tmp_path / "stage" / "job_334", report)
 
-    # The message the app produced names the real suspect.
+    # The message the app produced quotes MakeMKV's own failure line — not the
+    # "0 titles saved" summary that came after it — and names the real suspect.
     failure = str(err.value)
     assert "could not save title 0" in failure
+    assert "Failed to save title 0 to file" in failure
     assert "staging disk or share went away mid-rip" in failure
     assert "rather than a bad disc" in failure
     assert "ripped_path" not in job.checkpoints.get(0, {})
 
     # Now hand that exact failure to the diagnosis the operator actually sees.
+    # The write errors really are in the log being diagnosed, so the "not blamed
+    # on the disc" assertions below are about a realistic log, not an empty one.
+    assert WRITE_EAGAIN in report.events and SLOW_WRITE_NOTE in report.events
     m = _manager(tmp_path, monkeypatch)
     _pushes(m, monkeypatch)
     wj = _failed_job(m, report.events, error=f"RuntimeError: {failure}", job_id=334)
 
     assert m._rip_failure_hint(wj) is None       # not the disc, not the drive
     m._schedule_auto_retry(wj)
+    await m.shutdown()      # cancel the pending retry before asserting, so a
+                            # failing assertion can't leave the task dangling
     log = "\n".join(wj.log)
     assert "Disc read error" not in log and "Clean the disc" not in log
     assert "dropped off the bus" not in log
     assert m._auto_retries[wj.id] == 1           # it gets its second chance
     assert "Auto-retry 1/2 in 30s" in log
-    await m.shutdown()                           # cancel the pending retry
 
 
 async def test_ten_titles_saved_is_not_read_as_zero_titles_saved(tmp_path, monkeypatch):
@@ -483,35 +509,52 @@ async def test_ten_titles_saved_is_not_read_as_zero_titles_saved(tmp_path, monke
     characters. Matching loosely fails every successful multi-episode rip on the
     shelf, and the operator is told the NAS died on a rip that went perfectly.
 
-    The slow-write note is here too: it is advice about hard drives, printed on
-    healthy rips, and means nothing has failed.
+    Both halves go through the real rip path, and the summary line is the ONLY
+    thing that differs between them: the box-set rip is kept, and the same rip
+    ending in "0 titles saved, 1 failed" is refused — that summary is sometimes
+    all MakeMKV prints, with no "Failed to save title" line to fall back on.
+
+    The slow-write note rides along in both: it is advice about hard drives,
+    printed on healthy rips, and means nothing has failed.
     """
     s = _settings(tmp_path, monkeypatch)
     pipe = Pipeline(s)
-    job = _rip_job(duration=1800)
 
-    async def rip_title(source, title_id, dest_dir, *, on_progress=None, on_message=None):
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        out = dest_dir / "Boxset_t00.mkv"
-        out.write_bytes(b"a complete rip")
-        on_message(SLOW_WRITE_NOTE)
-        on_message("10 titles saved")
-        on_message("Copy complete. 10 titles saved.")
-        return [out]
+    def rip_ending_in(summary: str):
+        async def rip_title(source, title_id, dest_dir, *, on_progress=None,
+                            on_message=None):
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            out = dest_dir / "Boxset_t00.mkv"
+            out.write_bytes(b"a complete rip")
+            on_message(SLOW_WRITE_NOTE)
+            on_message(summary)
+            return [out]
+
+        monkeypatch.setattr(pipe.makemkv, "rip_title", rip_title)
 
     class _Probe:
         duration_seconds = 1800
 
-    monkeypatch.setattr(pipe.makemkv, "rip_title", rip_title)
     monkeypatch.setattr(pipe.mkvtools, "probe", lambda p: _done(_Probe()))
 
-    ripped = await pipe._ensure_ripped(job, 0, tmp_path / "stage" / "job_9", _Rep())
+    job = _rip_job(duration=1800)
+    rip_ending_in("Copy complete. 10 titles saved.")
+    report = _Rep()
+    ripped = await pipe._ensure_ripped(job, 0, tmp_path / "stage" / "job_9", report)
 
     assert ripped.name == "Boxset_t00.mkv"
     assert job.checkpoints[0]["ripped_path"].endswith("Boxset_t00.mkv")
-    # Belt and braces on the pattern itself, which is what does the work.
-    assert re.search(r"\b0 titles saved\b", "Copy complete. 10 titles saved.") is None
-    assert re.search(r"\b0 titles saved\b", "Copy complete. 0 titles saved, 1 failed.")
+    assert SLOW_WRITE_NOTE in report.events       # forwarded to the operator...
+    assert "could not save" not in report.text    # ...but not treated as a failure
+
+    # --- the real thing: the same log, one digit different --------------------
+    dead = _rip_job(duration=1800)
+    rip_ending_in("Copy complete. 0 titles saved, 1 failed.")
+    with pytest.raises(RuntimeError) as err:
+        await pipe._ensure_ripped(dead, 0, tmp_path / "stage" / "job_10", _Rep())
+
+    assert "could not save title 0" in str(err.value)
+    assert "ripped_path" not in dead.checkpoints.get(0, {})
 
 
 # ==========================================================================
@@ -556,7 +599,7 @@ async def test_the_read_error_family_parks_the_job_with_the_clean_the_disc_remed
 # 6. the healthy run — banner, mode lines, and cosmetic notices
 # ==========================================================================
 
-async def test_the_healthy_run_s_banner_and_notices_never_relabel_a_later_failure(
+async def test_a_healthy_runs_banner_and_notices_never_relabel_a_later_failure(
         tmp_path, monkeypatch):
     """A completely successful rip prints thirteen lines, and half of them read
     like trouble to a careless matcher: it loads a "content hash table", it
@@ -577,6 +620,8 @@ async def test_the_healthy_run_s_banner_and_notices_never_relabel_a_later_failur
     assert m._rip_failure_hint(wj) is None
 
     m._schedule_auto_retry(wj)
+    await m.shutdown()      # cancel the pending retry before asserting, so a
+                            # failing assertion can't leave the task dangling
     log = "\n".join(wj.log)
     assert "Disc read error" not in log
     assert "dropped off the bus" not in log
@@ -584,7 +629,6 @@ async def test_the_healthy_run_s_banner_and_notices_never_relabel_a_later_failur
     assert m._auto_retries[wj.id] == 1
     assert "Auto-retry 1/2 in 30s" in log
     assert sent == []          # an ordinary crash does not wake anybody
-    await m.shutdown()         # cancel the pending retry
 
 
 async def test_a_forced_track_makemkv_dropped_does_not_become_a_phantom_sidecar(

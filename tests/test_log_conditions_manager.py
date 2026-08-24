@@ -431,16 +431,20 @@ def test_the_disc_back_alert_says_how_many_parked_jobs_that_label_matches(
     several say how many, because the alert can't pick for you."""
     monkeypatch.setattr(manager, "add_disc", lambda s: None)
     pushes = _pushes(manager, monkeypatch)
-    _job(manager, 20, state=JobState.FAILED, disc=_tv_disc(label="HOUSE"))
+    first = _job(manager, 20, state=JobState.FAILED, disc=_tv_disc(label="HOUSE"))
     manager._auto_open([Drive(1, DRIVE_MODEL_1, "/dev/sr1", "HOUSE")])
 
-    manager._last_disc.clear()
-    _job(manager, 21, state=JobState.FAILED, disc=_tv_disc(label="HOUSE"))
+    manager._last_disc.clear()   # the tray was opened and closed again
+    second = _job(manager, 21, state=JobState.FAILED, disc=_tv_disc(label="HOUSE"))
     manager._auto_open([Drive(1, DRIVE_MODEL_1, "/dev/sr1", "HOUSE")])
 
     assert [p[0] for p in pushes] == ["💿 Disc back for review: HOUSE"] * 2
     assert pushes[0][1] == "Job #20 was waiting for this disc."
     assert pushes[1][1] == "2 parked jobs match this disc."
+    # The alert can't pick, so BOTH candidates have to be pointed at the drive —
+    # otherwise "2 parked jobs match" leaves you with nothing to click.
+    assert "Disc is back in" in first.log[-1] and first.source == "disc:1"
+    assert "Disc is back in" in second.log[-1] and second.source == "disc:1"
 
 
 def test_a_parked_job_that_already_has_its_rip_lets_the_disc_start_a_new_one(
@@ -529,7 +533,8 @@ def test_a_scan_that_already_failed_does_not_block_that_drive_forever(manager):
 # =========================================================================
 
 
-def test_whether_a_job_is_stalled_turns_on_its_own_worker_s_heartbeat(manager):
+def test_a_job_counts_as_stalled_only_when_its_own_worker_stops_heartbeating(
+        manager):
     """"Encoding" with nobody encoding it is the state that looks healthy and
     is not. The verdict has to key off the heartbeat of the worker holding THIS
     job — a fresh heartbeat from a worker busy with a different job proves
@@ -585,15 +590,20 @@ def test_requeuing_a_stalled_encode_keeps_the_rip_and_drops_the_dead_claim(
 def test_requeue_all_only_touches_the_jobs_that_are_actually_stuck(
         manager, monkeypatch):
     """The bulk button is aimed at a shelf of frozen jobs after a worker box
-    rebooted. It must skip the ones still being worked."""
-    _spawns(manager, monkeypatch)
+    rebooted. It must skip the ones still being worked — not just leave their
+    state alone, but not re-run them and not write a misleading "Requeued" line
+    into the log of an encode that is in fact still going."""
+    spawned = _spawns(manager, monkeypatch)
     stuck = _job(manager, 64, state=JobState.ENCODING)
     live = _job(manager, 65, state=JobState.ENCODING)
     manager._workers_cache = [_worker("encoder-A", 65, 1.0)]
 
     assert manager.requeue_stalled() == 1
     assert stuck.state is JobState.READY
+    assert stuck.log[-1].endswith("Requeued (was stalled) — resuming from checkpoints.")
     assert live.state is JobState.ENCODING
+    assert _log(live) == ""
+    assert len(spawned) == 1                 # only the stuck one was re-run
 
 
 # =========================================================================
@@ -719,14 +729,17 @@ async def test_removing_a_parked_job_does_not_claim_to_cancel_anything(manager):
 
 
 def test_a_source_path_left_over_from_the_old_server_says_re_add_it_here(
-        manager, monkeypatch):
+        manager, monkeypatch, tmp_path):
     """A file job stores an ABSOLUTE source, so moving the server leaves it
     pointing at the old box's drive letter. Retry can never fix that — and a
     mapped drive letter from a person's own session was never visible to the
     server in the first place."""
     pushes = _pushes(manager, monkeypatch)
     spawned = _spawns(manager, monkeypatch)
-    wj = _job(manager, 80, source=r"Z:\Media\Rips\Movie (2019).mkv",
+    # tmp_path.name keeps the path unique per run: this box really does have a
+    # Z: mapping, and a path that happened to EXIST would silently take the
+    # "file is fine" branch and make the test vacuous.
+    wj = _job(manager, 80, source=rf"Z:\Media\Rips\{tmp_path.name}\Movie (2019).mkv",
               state=JobState.FAILED, error="FileNotFoundError: [Errno 2]")
 
     manager._schedule_auto_retry(wj)
@@ -742,21 +755,27 @@ def test_a_source_path_left_over_from_the_old_server_says_re_add_it_here(
 
 
 def test_a_local_source_that_merely_vanished_asks_for_the_file_back(
-        manager, monkeypatch):
+        manager, monkeypatch, tmp_path):
     """Same absent file, but a path this server genuinely owns — here putting it
     back and retrying IS the fix, so telling the operator to delete the job and
     re-add it would be gratuitous work."""
-    _pushes(manager, monkeypatch)
-    _spawns(manager, monkeypatch)
-    wj = _job(manager, 81, source="/mnt/TrueNas/rips/Movie (2019).mkv",
+    pushes = _pushes(manager, monkeypatch)
+    spawned = _spawns(manager, monkeypatch)
+    # tmp_path.name keeps it unique: /mnt/TrueNas IS a real mount on the rip
+    # box, and a path that happened to exist would make this test vacuous.
+    wj = _job(manager, 81, source=f"/mnt/TrueNas/rips/{tmp_path.name}/Movie (2019).mkv",
               state=JobState.FAILED, error="FileNotFoundError: [Errno 2]")
 
     manager._schedule_auto_retry(wj)
 
     hint = wj.log[-1]
+    assert "The source file isn't reachable" in hint
     assert "Put the file back" in hint
     assert "another machine" not in hint
-    assert manager._auto_retries == {}
+    assert "re-add the file" not in hint
+    # Same terminal treatment as the foreign path: no retry spent, no timer.
+    assert manager._auto_retries == {} and spawned == []
+    assert len(pushes) == 1 and "needs attention" in pushes[0][0]
 
 
 def test_a_source_that_is_present_or_a_disc_gets_no_file_hint_at_all(
@@ -907,6 +926,7 @@ async def test_a_matching_row_names_every_episode_and_starts_ripping_unattended(
     assert "Box-set plan: House S01E09–E11 from 3 title(s) — ripping automatically." \
         in _log(wj)
     assert "Use Rename if the show is wrong" in _log(wj)
+    assert len(pushes) == 1                  # one alert for the disc, not one per title
     assert pushes[0][0] == "⏩ Auto-ripping: House S01E09–E11"
 
 
@@ -1087,7 +1107,7 @@ async def test_a_confident_subtitle_match_names_every_title_and_carries_on(
     ok = await manager._auto_identify(wj, _Reporter(manager, wj))
 
     assert ok is True
-    assert wj.state is not JobState.AWAITING_MATCH
+    assert wj.state is JobState.READY        # no gate inserted: the caller carries on
     assert [(a.title_id, a.episode, a.season, a.show_or_movie_title, a.year)
             for a in wj.assignments.values()] == [
         (0, 9, 1, "House", 2004), (1, 10, 1, "House", 2004)]

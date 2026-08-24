@@ -19,6 +19,7 @@ alternative — returning no credentials — is indistinguishable from a working
 cluster that simply has none configured.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -56,6 +57,26 @@ def _toml(cfg_dir, text=""):
     return cfg_dir
 
 
+@pytest.fixture(autouse=True)
+def _only_this_tests_config(monkeypatch):
+    """Keep the developer's own machine out of every load_settings() below.
+
+    ``config._load_secrets`` folds TMDB_API_KEY and *every* BLURAYRIPPER_* /
+    OPENSUBTITLES_* process variable in over the config dir a test built, so a
+    shell that exports a real database URL and secrets key decides what these
+    tests read — and a mismatched key there turns them into errors on one
+    machine while they pass on the next. ``_CLUSTER_SECRETS`` is the matching
+    hazard inside the process: a module-level cache of decrypted credentials
+    that would otherwise carry one test's cluster into another's.
+    """
+    for var in [k for k in os.environ
+                if k == "TMDB_API_KEY" or k.startswith(("BLURAYRIPPER_", "OPENSUBTITLES_"))]:
+        monkeypatch.delenv(var, raising=False)
+    config._CLUSTER_SECRETS.clear()
+    yield
+    config._CLUSTER_SECRETS.clear()
+
+
 # --- box-set CSV: headers -------------------------------------------------
 
 def test_a_header_missing_show_refuses_every_row_rather_than_leaving_them_nameless():
@@ -91,10 +112,12 @@ def test_column_order_and_header_spacing_do_not_change_what_a_row_means():
     assert shuffled[0].season == 3 and shuffled[0].episodes == 4
 
 
-def test_a_column_repeated_in_the_header_is_not_mistaken_for_a_repeated_disc():
+def test_a_column_repeated_in_the_header_keeps_the_row_and_the_last_value_typed():
     """A hand-edited header ends up with the same column twice. The header is
-    compared as a SET of names, so the repeat is neither an unknown column nor a
-    duplicate disc_label — both of which would drop the only row in the file."""
+    compared as a SET of names, so the repeat is not reported as a problem and
+    the file's only row survives — an implementation that counted names instead
+    would refuse the whole plan over a cosmetic duplicate. Which of the two
+    cells wins is pinned here because it becomes the library folder name."""
     rows, errors = bp.parse_csv(
         "disc_label,show,show,season,first_episode\n"
         "THE_OFFICE_S3_D2,The Office,The Office US,3,9\n"
@@ -102,6 +125,7 @@ def test_a_column_repeated_in_the_header_is_not_mistaken_for_a_repeated_disc():
 
     assert errors == []
     assert len(rows) == 1
+    assert rows[0].show == "The Office US"        # the rightmost cell wins
     assert bp.match(rows, "THE_OFFICE_S3_D2") is rows[0]
 
 
@@ -122,11 +146,15 @@ def test_a_row_of_two_hundred_columns_is_reduced_to_the_six_that_mean_something(
 
     # The opposite mistake — two declared columns, two hundred values on the
     # line. The surplus must not shift into year/season and renumber episodes.
+    # (csv.DictReader parks the overflow under a None key and parse_csv drops
+    # it, so this guards the header-driven mapping rather than a hand-rolled
+    # split: it is the case that would break first if one were ever written.)
     spilled, spill_errors = bp.parse_csv(
         "disc_label,show\n"
         "THE_OFFICE_S3_D2,The Office," + ",".join("999" for _ in range(198)) + "\n"
     )
     assert len(spilled) == 1 and spill_errors == []
+    assert (spilled[0].disc_label, spilled[0].show) == ("THE_OFFICE_S3_D2", "The Office")
     assert (spilled[0].year, spilled[0].season,
             spilled[0].first_episode, spilled[0].episodes) == (None, None, None, None)
 
@@ -162,6 +190,7 @@ def test_a_catch_all_wildcard_still_cannot_name_a_movie_disc():
     tv = bp.assignments_for(rows[0], _disc("SOME_TV_DISC", n=5))
     assert tv.ok and [a.episode for a in tv.assignments] == [1, 2, 3, 4, 5]
 
+    # One 2.5-hour title: far outside the 18-75 min episode window.
     movie = bp.assignments_for(rows[0], _disc("BLADE_RUNNER_2049", n=1, seconds=9000))
     assert not movie.ok
     assert movie.assignments == [] and "episode-length" in movie.reason
@@ -192,7 +221,10 @@ def test_an_episode_count_of_zero_or_below_parks_the_disc_instead_of_applying():
     for row in rows:
         result = bp.assignments_for(row, _disc(row.disc_label, n=4))
         assert not result.ok and result.assignments == []
-        assert "4" in result.reason           # names the count the disc really has
+        # Both halves of the mismatch, or the operator cannot tell which cell to
+        # fix: what the row claimed, and what the disc in the drive really has.
+        assert str(row.episodes) in result.reason, result.reason
+        assert "4" in result.reason, result.reason
 
 
 def test_a_season_that_is_not_a_number_is_reported_and_the_label_still_supplies_one():
@@ -379,7 +411,7 @@ def test_a_worker_cannot_be_handed_a_setting_that_only_the_rip_box_obeys(tmp_pat
     assert stored == {"encode": {"ffmpeg_crf": 20}}
     assert store.get_worker_settings("worker-1") == {"encode": {"ffmpeg_crf": 20}}
     assert not (tmp_path / ss.OVERLAY_NAME).exists()   # the server's file is untouched
-    assert load_settings(tmp_path).web_port == 8723
+    assert load_settings(tmp_path).web_port == 8723    # the default, not the 9999 posted
 
 
 def test_a_bare_string_in_a_list_field_is_one_entry_not_one_per_character(tmp_path):
@@ -397,37 +429,39 @@ def test_a_bare_string_in_a_list_field_is_one_entry_not_one_per_character(tmp_pa
 
     assert saved["storage"]["path_map"] == [path_rule]
     assert saved["languages"]["keep"] == ["eng"]
-    assert load_settings(tmp_path).languages.keep == ["eng"]
+    # What the worker actually reads, not just what the save returned.
+    loaded = load_settings(tmp_path)
+    assert loaded.storage.path_map == [path_rule]
+    assert loaded.languages.keep == ["eng"]
 
 
-def test_a_url_typed_into_a_folder_box_is_not_treated_as_a_remote_location(tmp_path,
-                                                                           monkeypatch):
+def test_a_url_typed_into_a_folder_box_is_not_treated_as_a_remote_location(tmp_path):
     """Nothing in the app can write to an http:// URL. It is stored as typed
     (see the reported finding), but it must at least resolve to an ordinary
     absolute local path that the library layout still composes onto — rather
     than a half-parsed relative path the placement step would write into the
     working directory of whatever launched the process."""
     _toml(tmp_path)
-    for var in ("BLURAYRIPPER_OUTPUT_DIR", "BLURAYRIPPER_STAGING_DIR"):
-        monkeypatch.delenv(var, raising=False)
 
     ss.save_overlay(tmp_path, {"storage": {"output_dir": "https://nas.local/library"}})
     storage = load_settings(tmp_path).storage
 
     assert isinstance(storage.output_dir, Path)
     assert storage.output_dir.is_absolute()
+    # Anchored at the repo, i.e. the same folder wherever the process was
+    # started from — that is what "not a relative path" has to mean here.
+    assert storage.output_dir.is_relative_to(config.REPO_ROOT)
     assert storage.movies_root == storage.output_dir / "Movies"
     assert storage.tv_root == storage.output_dir / "TV Shows"
 
 
 def test_a_negative_encode_budget_cannot_leave_the_queue_unable_to_start_anything(
-        tmp_path, monkeypatch):
+        tmp_path):
     """The settings page accepts a negative whole number (reported). What must
     hold anyway is the consumer's floor: a capacity of -4 that reached the
     scheduler unclamped would block every encode forever while the queue looked
     perfectly healthy."""
     _toml(tmp_path)
-    monkeypatch.delenv("BLURAYRIPPER_DATABASE_URL", raising=False)
 
     ss.save_overlay(tmp_path, {"queue": {"encode_capacity": "-4"}})
     capacity = load_settings(tmp_path).queue.encode_capacity
@@ -448,35 +482,35 @@ def test_no_damaged_blob_ever_opens_or_quietly_reports_no_credentials():
     KDF cost was lowered to make it guessable. Each must raise, and none may
     return a dict — "no credentials" reads exactly like a cluster that has none
     configured, which is how a wrong passphrase goes unnoticed for weeks."""
-    cases = {}
+    good = _good_blob()          # one real blob; each case damages a copy of it
 
-    blob = _good_blob(); blob["ct"] = blob["ct"][:20]
-    cases["truncated ciphertext"] = blob
-    blob = _good_blob(); blob["ct"] = ""
-    cases["empty ciphertext"] = blob
-    blob = _good_blob()
-    edited = bytearray(secretbox._unb64(blob["ct"])); edited[0] ^= 0xFF
-    blob["ct"] = secretbox._b64(bytes(edited))
-    cases["edited ciphertext"] = blob
-    blob = _good_blob(); blob["salt"] = blob["salt"][:8]
-    cases["truncated salt"] = blob
-    blob = _good_blob(); blob["nonce"] = blob["nonce"][:6]
-    cases["short nonce"] = blob
-    blob = _good_blob(); del blob["ct"]
-    cases["missing ciphertext field"] = blob
-    blob = _good_blob(); blob["ct"] = "!!! not base64 !!!"
-    cases["ciphertext that is not base64"] = blob
-    blob = _good_blob(); blob["params"] = {"n": 2, "r": 8, "p": 1, "dklen": 32}
-    cases["downgraded kdf cost"] = blob
-    blob = _good_blob(); blob["params"] = {"n": "cheap"}
-    cases["kdf params that are not numbers"] = blob
-    blob = _good_blob(); blob["params"] = {"n": 1 << 30, "r": 8, "p": 1, "dklen": 32}
-    cases["kdf params demanding unbounded memory"] = blob
+    def broken(**changes):
+        return {**good, **changes}
+
+    flipped = bytearray(secretbox._unb64(good["ct"])); flipped[0] ^= 0xFF
+    no_ct = {k: v for k, v in good.items() if k != "ct"}
+
+    cases = {
+        "truncated ciphertext": broken(ct=good["ct"][:20]),
+        "empty ciphertext": broken(ct=""),
+        "edited ciphertext": broken(ct=secretbox._b64(bytes(flipped))),
+        "truncated salt": broken(salt=good["salt"][:8]),
+        "short nonce": broken(nonce=good["nonce"][:6]),
+        "missing ciphertext field": no_ct,
+        "ciphertext that is not base64": broken(ct="!!! not base64 !!!"),
+        "downgraded kdf cost": broken(params={"n": 2, "r": 8, "p": 1, "dklen": 32}),
+        "kdf params that are not numbers": broken(params={"n": "cheap"}),
+        "kdf params demanding unbounded memory":
+            broken(params={"n": 1 << 30, "r": 8, "p": 1, "dklen": 32}),
+    }
 
     for name, damaged in cases.items():
-        with pytest.raises(secretbox.SecretsUnavailable) as excinfo:
-            secretbox.decrypt("pw", damaged)
-        message = str(excinfo.value)
+        try:
+            opened = secretbox.decrypt("pw", damaged)
+        except secretbox.SecretsUnavailable as exc:
+            message = str(exc)
+        else:
+            pytest.fail(f"{name}: decrypt returned {opened!r} instead of refusing")
         assert "abc123" not in message, name           # never leaks what it held
         assert secretbox.PASSPHRASE_KEY in message, name   # says what to check
 
@@ -495,8 +529,13 @@ def test_a_blob_from_another_version_is_refused_before_the_slow_key_derivation(
     unversioned = {k: v for k, v in good.items() if k != "v"}
     for damaged in ({**good, "v": 2}, {**good, "v": "1"}, {**good, "v": None},
                     unversioned, ["not", "a", "blob"], None, "a json string"):
-        with pytest.raises(secretbox.SecretsUnavailable, match="Unrecognised"):
-            secretbox.decrypt("pw", damaged)
+        try:
+            opened = secretbox.decrypt("pw", damaged)
+        except secretbox.SecretsUnavailable as exc:
+            # Accuse the version, not the passphrase.
+            assert "Unrecognised" in str(exc), (damaged, str(exc))
+        else:
+            pytest.fail(f"opened {damaged!r} and returned {opened!r}")
 
     assert derivations == []
 
@@ -553,18 +592,13 @@ def test_an_unopenable_cluster_blob_stops_startup_instead_of_dropping_the_api_ke
     store = Durable()
     secretbox.publish(store, "the-right-key", {"TMDB_API_KEY": "abc123"})
 
-    config._CLUSTER_SECRETS.clear()
     monkeypatch.setattr("blurayripper.persistence.make_store", lambda url: store)
-    for var in ("TMDB_API_KEY", "OPENSUBTITLES_API_KEY", "BLURAYRIPPER_DATABASE_URL",
-                secretbox.PASSPHRASE_KEY):
-        monkeypatch.delenv(var, raising=False)
     _toml(tmp_path)
+    # The box's own secrets.env — the only place the passphrase may come from,
+    # and here it is the wrong one.
     (tmp_path / "secrets.env").write_text(
         "BLURAYRIPPER_DATABASE_URL=postgresql://x/y\n"
         f"{secretbox.PASSPHRASE_KEY}=a-different-key\n", encoding="utf-8")
 
-    try:
-        with pytest.raises(secretbox.SecretsUnavailable, match="differing from the box"):
-            load_settings(tmp_path)
-    finally:
-        config._CLUSTER_SECRETS.clear()
+    with pytest.raises(secretbox.SecretsUnavailable, match="differing from the box"):
+        load_settings(tmp_path)

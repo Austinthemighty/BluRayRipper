@@ -76,6 +76,17 @@ HEALTHY_LOG = [
     "Copy complete. 1 titles saved.",
 ]
 
+# The same announcements as they arrive in ``-r`` mode — wrapped in a MSG
+# record. This is the dangerous form: unlike the plain-text lines above they DO
+# split into 6 and 4 comma-separated fields, so a parser matching on field count
+# instead of on the record prefix reads them as disc structure. The 3307 line is
+# REAL (it recurs verbatim in the progress-noise fixture below); the second is
+# the same wrapper around the failed-rip summary.
+ROBOT_MSG_LOG = [
+    'MSG:3307,0,3,"File 00260.mpls was added as title #0","%1","%2"',
+    'MSG:5005,0,0,"0 titles saved, 1 failed"',
+]
+
 # REAL: the NAS write died mid-rip and makemkvcon still exited cleanly.
 FAILED_RIP_LOG = [
     "Program reads data faster than it can write to disk, consider upgrading "
@@ -135,14 +146,17 @@ def _ffmpeg(tmp_path: Path) -> FFmpeg:
     return FFmpeg(settings)
 
 
-def _answer_probe_with(monkeypatch, payload: str, *, returncode: int = 0) -> list:
-    """Make the process layer answer any spawn with ``payload`` on stdout."""
+def _answer_probe_with(monkeypatch, payload: str) -> list[list[str]]:
+    """Make the process layer answer any spawn with ``payload`` on stdout.
+
+    Returns the list the spawned commands accumulate in, so a test can tell
+    "refused what ffprobe said" apart from "never got as far as ffprobe"."""
     calls: list[list[str]] = []
 
     async def fake_run(cmd, *, on_line=None, check=True, **kwargs):
         calls.append(list(cmd))
         return process_mod.ProcessResult(
-            returncode=returncode, stdout_lines=payload.splitlines(), stderr="")
+            returncode=0, stdout_lines=payload.splitlines(), stderr="")
 
     monkeypatch.setattr(process_mod, "run", fake_run)
     assert ffmpeg_mod.process.run is fake_run   # the wrapper shares the module
@@ -232,23 +246,29 @@ def test_a_negative_or_absurd_title_index_does_not_land_on_the_real_title_zero()
 
 
 def test_a_log_line_announcing_a_title_does_not_become_a_title():
-    """MakeMKV's plain-text log says "File 00260.mpls was added as title #0" and
-    "1 titles saved"; the failed-rip log says "0 titles saved, 1 failed". None of
-    that is disc structure — the structure only ever arrives as TINFO/SINFO — and
-    reading titles out of the prose is how a rip that saved nothing gets a title
-    list anyway. Several of these lines contain a colon, so they do split into a
-    prefix and a payload like a robot line.
+    """MakeMKV's log says "File 00260.mpls was added as title #0" and "0 titles
+    saved, 1 failed". None of that is disc structure — the structure only ever
+    arrives as TINFO/SINFO — and reading titles out of the log is how a rip that
+    saved nothing gets a title list anyway.
+
+    ``ROBOT_MSG_LOG`` is what makes this test bite: those two announcements in
+    their ``-r`` MSG form split into 4 and 6 fields, so a parser keying on field
+    count rather than on the record prefix would file MSG 3307 as title 3307
+    (and, in ``parse_drives``, as a drive named "%1" holding a disc "%2"). The
+    plain-text lines are the milder half of the same claim — several carry a
+    colon and so partition into a prefix and a payload just like a robot line.
 
     The genuine TINFO line in the same list proves the parser was reading this
     input at all, rather than the whole list being ignored for some other
     reason."""
-    disc = parse_info(HEALTHY_LOG + FAILED_RIP_LOG + ['TINFO:4,9,0,"1:22:00"'],
-                      "disc:0")
+    noise = HEALTHY_LOG + FAILED_RIP_LOG + ROBOT_MSG_LOG
+
+    disc = parse_info(noise + ['TINFO:4,9,0,"1:22:00"'], "disc:0")
 
     assert [t.title_id for t in disc.titles] == [4]        # the real one only
     assert disc.titles[0].duration_seconds == 82 * 60
     assert disc.disc_name is None                          # no name invented
-    assert parse_drives(HEALTHY_LOG + FAILED_RIP_LOG) == []
+    assert parse_drives(noise) == []
 
 
 def test_a_hundred_thousand_line_log_still_lists_each_drive_once():
@@ -422,16 +442,22 @@ async def test_a_proxy_error_page_stops_the_uhd_encode_with_something_to_act_on(
     the output check passes vacuously — hours of encoding, silently wrong, no
     log line. The refusal has to name the tool that failed, the file, and what
     the operator gets to do about it (the rip is kept; only the encode re-runs)."""
-    _answer_probe_with(monkeypatch, PROXY_ERROR_PAGE)
+    calls = _answer_probe_with(monkeypatch, PROXY_ERROR_PAGE)
 
     with pytest.raises(RuntimeError) as err:
         await _ffmpeg(tmp_path).probe_video(Path("/stage/job_317/t00.mkv"))
 
+    # It refused what ffprobe SAID, having actually run it on this file — not
+    # before spawning, which would be a different failure wearing this message.
+    assert len(calls) == 1
+    assert "ffprobe" in Path(calls[0][0]).name
+    assert calls[0][-1] == str(Path("/stage/job_317/t00.mkv"))
+
     message = str(err.value)
     assert "ffprobe" in message
-    assert "t00.mkv" in message
-    assert "SDR" in message
-    assert "Retry" in message
+    assert "t00.mkv" in message                 # which title, not just "a probe"
+    assert "SDR" in message                     # what goes wrong if it proceeds
+    assert "Retry" in message                   # what the operator does next
 
 
 async def test_probe_output_that_is_json_but_not_a_probe_never_comes_back_as_sdr(

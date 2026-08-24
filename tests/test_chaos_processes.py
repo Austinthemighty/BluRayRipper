@@ -16,13 +16,16 @@ that is the easy half — but what the SYSTEM does with it:
   * a failed encode gives its scheduler slot back, or the queue quietly loses
     capacity every time a tool dies.
 
-Nothing here spawns a real process or sleeps meaningfully: the child is a fake
-object, ``asyncio.create_subprocess_exec`` is replaced, and the two tests that
-must observe a real timeout use a 20-50 ms one or a stubbed ``wait_for``.
+Nothing here spawns a real process, and nothing waits on the clock except the
+one test that has to watch the real ``asyncio.wait_for`` fire (50 ms): the child
+is a fake object, ``asyncio.create_subprocess_exec`` is replaced, and every
+other timeout is expired deterministically by ``_arm_spy`` — no wall-clock
+margin to lose on a loaded machine.
 
 The tool output used as fixtures is verbatim from the production cluster
-(``real_logs.txt``): the drive that dropped off the bus mid-rip, the NAS write
-that died, and the seconv build that wanted a .NET runtime the box didn't have.
+(``real_logs.txt``): the drive that dropped off the bus mid-rip, the BD-Java
+disc that wanted a JRE the box didn't have, and the seconv build that wanted a
+.NET runtime it didn't have either.
 """
 
 from __future__ import annotations
@@ -43,11 +46,11 @@ from blurayripper.config import (
     ToolPaths,
 )
 from blurayripper.models import DiscInfo, EpisodeAssignment, MediaKind, Title
-from blurayripper.pipeline import Job, Pipeline
+from blurayripper.pipeline import Job, Pipeline, TitleResult
 from blurayripper.scheduler import EncodeScheduler
 from blurayripper.tools import process
 from blurayripper.tools.makemkv import MakeMKV
-from blurayripper.tools.mkvtools import MkvTools
+from blurayripper.tools.mkvtools import MkvTools, SubtitleTrack
 from blurayripper.tools.process import ProcessError
 from blurayripper.tools.subtitleedit import SubtitleEdit
 
@@ -150,16 +153,39 @@ def _spawn(monkeypatch, child):
     return calls
 
 
-def _arm_spy(monkeypatch, *, run_with: float | None = None):
-    """Record every timeout armed via ``asyncio.wait_for``. With ``run_with`` the
-    real wait_for is called with that (tiny) timeout instead, so a bound of 1800
-    seconds can be observed without waiting 1800 seconds."""
+# Event-loop turns given to a wrapped awaitable before ``_arm_spy`` expires it.
+# The fake child spawns and blocks on its pipe within a handful of turns; the
+# rest are slack, and cost microseconds because every turn is a bare yield.
+_SETTLE_TURNS = 100
+
+
+def _arm_spy(monkeypatch, *, expire: bool = False):
+    """Record every timeout armed via ``asyncio.wait_for``.
+
+    With ``expire``, a bound of 1800 seconds is observed without waiting 1800
+    seconds: the wrapped awaitable is let run until it has settled (spawned its
+    child and blocked on it), then cancelled and reported as a timeout — exactly
+    what wait_for does when it fires, but off the event loop's turns rather than
+    the clock, so a busy machine cannot expire it before the child exists.
+    """
     armed: list[float | None] = []
     real = asyncio.wait_for
 
     async def spy(awaitable, timeout):
         armed.append(timeout)
-        return await real(awaitable, timeout if run_with is None else run_with)
+        if not expire:
+            return await real(awaitable, timeout)
+        task = asyncio.ensure_future(awaitable)
+        for _ in range(_SETTLE_TURNS):
+            if task.done():
+                return task.result()   # it finished on its own; no timeout
+            await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        raise asyncio.TimeoutError
 
     monkeypatch.setattr(asyncio, "wait_for", spy)
     return armed
@@ -183,7 +209,7 @@ class _Report:
         self.checkpoints += 1
 
 
-def _settings(tmp_path: Path, **over) -> Settings:
+def _settings(tmp_path: Path) -> Settings:
     s = Settings(
         tools=ToolPaths(
             makemkvcon="makemkvcon", handbrakecli="HandBrakeCLI", mkvmerge="mkvmerge",
@@ -199,8 +225,6 @@ def _settings(tmp_path: Path, **over) -> Settings:
     )
     s.auto_eject = False
     s.write_nfo = False
-    for key, value in over.items():
-        setattr(s, key, value)
     return s
 
 
@@ -437,7 +461,7 @@ async def test_a_wedged_probe_is_bounded_and_the_child_is_killed_not_orphaned(
     has to take the child with it."""
     child = _Child(never_ends=True)
     _spawn(monkeypatch, child)
-    armed = _arm_spy(monkeypatch, run_with=0.02)
+    armed = _arm_spy(monkeypatch, expire=True)
 
     with pytest.raises(asyncio.TimeoutError):
         await MkvTools(_settings(tmp_path)).probe(tmp_path / "t.mkv")
@@ -527,7 +551,7 @@ async def test_a_hung_ocr_is_killed_at_the_configured_per_track_timeout(
         return children[-1]
 
     _spawn(monkeypatch, make_child)
-    armed = _arm_spy(monkeypatch, run_with=0.02)
+    armed = _arm_spy(monkeypatch, expire=True)
 
     with pytest.raises(TimeoutError) as excinfo:
         await se.ocr_to_srt(sup, "eng", out_dir)
@@ -568,6 +592,7 @@ async def test_an_ocr_that_died_on_stderr_names_the_real_problem(monkeypatch, tm
     with pytest.raises(ProcessError) as excinfo:
         await se.ocr_to_srt(sup, "eng", out_dir)
 
+    assert excinfo.value.result.returncode == 150   # the tool's own exit, surfaced
     text = str(excinfo.value)
     assert "You must install or update .NET" in text
     assert "seconv" in text
@@ -639,12 +664,11 @@ async def test_a_hung_ocr_costs_the_track_not_the_extraction(monkeypatch, tmp_pa
     settings.subtitles.ocr_timeout_seconds = 900
     pipe = Pipeline(settings)
     _spawn(monkeypatch, lambda: _Child(never_ends=True))
-    _arm_spy(monkeypatch, run_with=0.02)
+    _arm_spy(monkeypatch, expire=True)
 
     sup = settings.storage.staging_dir / "sub" / "t.eng.sup"
     sup.parent.mkdir(parents=True, exist_ok=True)
     sup.write_bytes(b"pgs")
-    from blurayripper.tools.mkvtools import SubtitleTrack
     track = SubtitleTrack(track_id=2, codec="HDMV PGS", language="eng", is_pgs=True)
 
     job = Job(source="disc:0")
@@ -655,8 +679,7 @@ async def test_a_hung_ocr_costs_the_track_not_the_extraction(monkeypatch, tmp_pa
 
     ocr = await pipe._ocr_all(
         job, [(3, None, None, sup.parent, [(sup, track)])], report)
-    result = type("R", (), {"subtitle_paths": []})()
-    pipe._record_if_complete(cp, [(sup, track)], ocr[3], result, report)
+    pipe._record_if_complete(cp, [(sup, track)], ocr[3], TitleResult(title_id=3), report)
 
     assert ocr[3] == []                                   # the track was dropped
     # Named in full: it was OUR watchdog that ended it, at the configured bound,
@@ -711,4 +734,7 @@ async def test_an_encode_killed_by_a_signal_places_nothing_and_frees_its_slot(
     assert scheduler._in_use == 0                      # the slot came back
     assert "placed" not in job.checkpoints.get(0, {})  # a retry re-encodes
     assert not pipe._video_path_for(assignment).exists()
-    assert report.progress and report.progress[0][1] == 0.31  # it did report before dying
+    # ...and nothing landed anywhere else in the library either.
+    assert [p for p in settings.storage.output_dir.rglob("*") if p.suffix == ".mkv"] == []
+    # It did report progress before dying, tagged with the stage the operator sees.
+    assert ("Encode: working", 0.31) in report.progress

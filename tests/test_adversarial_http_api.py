@@ -108,8 +108,9 @@ def cluster(tmp_path):
 
 
 def _async_client(app):
-    """An ASGI client that shares the test's event loop, so two requests really
-    are in flight at the same time (TestClient serialises through a portal)."""
+    """An ASGI client that runs on the test's own event loop, so two gathered
+    requests interleave at every await point inside the handlers. TestClient
+    serialises through a portal, which would hide any ordering bug entirely."""
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                              base_url="http://brr")
 
@@ -223,7 +224,7 @@ def test_deleting_a_job_that_is_already_gone_is_a_no_op_not_an_error(client, man
     assert r.status_code == 200 and r.json() == {"ok": True}
     assert manager.jobs == {}
     r = client.delete("/api/jobs/-1")
-    assert r.status_code == 200
+    assert r.status_code == 200 and r.json() == {"ok": True}
     assert manager.jobs == {}
 
 
@@ -240,17 +241,26 @@ def test_a_body_of_the_wrong_type_is_refused_without_touching_the_job(
     wj = _job(manager, 1, JobState.AWAITING_TITLES)
     r = client.post("/api/jobs/1/titles", json=body)
     assert r.status_code == 422, r.text[:200]
+    # Pin it to the BODY: a 422 raised for some other reason (a path parameter,
+    # a query parameter) would otherwise satisfy the status check by accident.
+    locs = [tuple(e["loc"]) for e in r.json()["detail"]]
+    assert any(loc and loc[0] == "body" for loc in locs), locs
     assert wj.state is JobState.AWAITING_TITLES
     assert wj.selected_title_ids == []
 
 
 def test_malformed_json_is_a_422_not_a_parser_traceback(client, manager):
+    """A request cut off mid-flight (or a hand-written ``fetch()`` with a typo)
+    arrives as bytes that aren't JSON. That has to be the same tidy 422 as any
+    other bad body — a json.JSONDecodeError escaping the handler is a 500 whose
+    body is a stack trace naming server paths."""
     wj = _job(manager, 1, JobState.AWAITING_TITLES)
     r = client.post("/api/jobs/1/titles", content="{not json",
                     headers={"content-type": "application/json"})
     assert r.status_code == 422
     assert "Traceback" not in r.text
     assert wj.state is JobState.AWAITING_TITLES
+    assert wj.selected_title_ids == []
 
 
 def test_a_missing_required_field_names_the_field_and_queues_nothing(
@@ -309,10 +319,17 @@ def test_a_rejected_mapping_leaves_no_half_written_assignments(client, manager):
 
 @pytest.mark.parametrize("source", ["", "   ", "/definitely/not/here/disc.mkv"])
 def test_a_source_that_does_not_resolve_is_refused_and_queues_nothing(
-        client, manager, source):
+        client, manager, source, monkeypatch, tmp_path):
     """add_source refuses a path it can't resolve rather than handing it to
     makemkvcon. The refusal must leave nothing behind: a job row written before
-    the failure would sit in the queue forever with a source nobody can rip."""
+    the failure would sit in the queue forever with a source nobody can rip.
+
+    The blank sources are chdir'd onto an empty directory on purpose: ``Path("")``
+    is ``Path(".")``, so a blank source is resolved against the SERVER'S working
+    directory. Without the chdir this test would pass or fail on whether the
+    developer happened to be sitting in a folder with a .mkv in it.
+    """
+    monkeypatch.chdir(tmp_path)
     r = client.post("/api/jobs", json={"source": source})
     assert r.status_code == 400, r.text[:200]
     assert isinstance(_detail(r), str) and _detail(r).strip()
@@ -321,9 +338,15 @@ def test_a_source_that_does_not_resolve_is_refused_and_queues_nothing(
 
 
 def test_a_source_of_the_wrong_type_never_reaches_the_filesystem(client, manager):
+    """A ``source`` that arrives as an object goes straight into ``Path(...)`` and
+    a ``.strip()`` if validation lets it past — an AttributeError 500 instead of a
+    422 the form can render next to the field."""
     r = client.post("/api/jobs", json={"source": {"path": "/x"}})
     assert r.status_code == 422
+    locs = [tuple(e["loc"]) for e in r.json()["detail"]]
+    assert ("body", "source") in locs, locs
     assert manager.jobs == {}
+    assert manager.store.load_all() == []
 
 
 def test_a_very_large_body_is_parsed_in_full_and_a_dry_run_writes_nothing(
@@ -385,6 +408,9 @@ def test_query_values_of_the_wrong_type_are_refused_before_the_handler_runs(
 
 
 def test_a_missing_query_parameter_is_a_422_naming_it(client):
+    """A search box that fires before it has any text drops ``query`` entirely. It
+    must be a 422 naming the parameter, not a default-to-empty that sends a
+    blank search to TMDB and comes back with "no matches" for no visible reason."""
     r = client.get("/api/tmdb/search", params={"kind": "movie"})
     assert r.status_code == 422
     locs = [tuple(e["loc"]) for e in r.json()["detail"]]
@@ -466,6 +492,9 @@ def test_a_rejected_settings_write_does_not_touch_the_overlay_file_at_all(cluste
 
 
 def test_a_non_numeric_value_for_a_numeric_setting_is_refused_by_name(cluster):
+    """Typing prose into a number box must be refused by name rather than coerced
+    to some fallback: an encode capacity that silently became 0 (or 1) would
+    throttle the whole cluster, and nothing in the UI would say why."""
     _app, client, manager, _store = cluster
     overlay = manager.settings.config_dir / "settings.local.json"
     client.post("/api/settings", json={"queue": {"encode_capacity": 3}})
@@ -534,6 +563,10 @@ def test_clearing_settings_requires_a_real_worker_scope(client, tmp_path, body,
 
 
 def test_clearing_settings_with_no_body_at_all_is_a_422(client):
+    """No body at all is a different bug from a body with no scope, and it must
+    stop at validation. A handler that defaulted the body to None would fall
+    through to ``(body or {}).get("scope")`` — one refactor away from clearing
+    something."""
     r = client.post("/api/settings/clear")
     assert r.status_code == 422
     assert ("body",) in [tuple(e["loc"]) for e in r.json()["detail"]]
@@ -586,6 +619,11 @@ def test_controlling_workers_without_postgres_is_refused_not_silently_dropped(
     assert r.status_code == 400
     assert "Postgres" in _detail(r)
     assert manager.store.cluster_signals() == {}
+
+    # Control: this store DOES record signals when one is written, so the
+    # emptiness above is the refusal and not a store that can never show one.
+    manager.store.request_cluster_signal("update", "*")
+    assert manager.store.cluster_signals() != {}
 
 
 def test_removing_by_an_unknown_state_removes_nothing(client, manager):
@@ -642,6 +680,10 @@ def test_the_preview_download_can_only_serve_the_two_files_on_the_job(
 
 
 def test_the_preview_clip_download_is_closed_the_same_way(client, manager, tmp_path):
+    """The clip endpoint is a second, separately-written copy of the same lookup —
+    and it streams with Range support, so a traversal here hands out arbitrary
+    bytes of an arbitrary file. ``which`` must select between the job's two
+    recorded clips and nothing else."""
     secret = tmp_path / "private.mp4"
     secret.write_text("NOT-FOR-THE-BROWSER", encoding="utf-8")
     clip = tmp_path / "off.mp4"
@@ -804,11 +846,15 @@ def test_an_empty_title_selection_is_refused_before_anything_moves(client, manag
 def test_requeueing_a_job_that_is_not_stalled_is_refused(client, manager):
     """Requeue restarts work from checkpoints. Aimed at a job that is genuinely
     running, it would race a live encode — so it must be refused, and must not
-    have already reset the state on its way to the refusal."""
+    have already reset the state on its way to the refusal.
+
+    The message is pinned exactly because requeue has a second guard right behind
+    this one ("no scan state"); a substring match would let the wrong guard take
+    the credit and hide the removal of the stalled check."""
     wj = _job(manager, 1, JobState.AWAITING_MAPPING)
     r = client.post("/api/jobs/1/requeue")
     assert r.status_code == 400
-    assert "stalled" in _detail(r), _detail(r)
+    assert _detail(r) == "Job 1 isn't stalled — nothing to requeue.", _detail(r)
     assert wj.state is JobState.AWAITING_MAPPING
     assert wj.error is None
 

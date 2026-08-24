@@ -204,6 +204,16 @@ def _settings(tmp_path: Path, *, auto_eject: bool = False):
     s.fetch_tmdb_artwork = False
     s.write_nfo = False
     s.subtitles.upload_export_dir = None
+    # load_settings() reads the repo's config/ — including the gitignored
+    # settings.local.json and BLURAYRIPPER_* env overrides a developer may have
+    # set. Pin the two knobs these scenarios hinge on so they mean the same
+    # thing on every box:
+    #   * a zero tolerance turns off the read-back check that catches a
+    #     truncated/empty rip, so the zero-byte scenario would stop testing it;
+    #   * worker_does_subs moves subtitle work onto the encode worker, which
+    #     changes what the worker scenario is allowed to touch.
+    s.rip_duration_tolerance_pct = 3
+    s.cluster.worker_does_subs = False
     return s
 
 
@@ -265,6 +275,15 @@ def _watch_eject(monkeypatch) -> list:
     return calls
 
 
+def _the_nas_write_dies(dest_dir: Path, on_message) -> None:
+    """MakeMKV's EAGAIN: a progressively-written fragment is left on disk and the
+    tool reports the failure in its own words rather than by exiting non-zero."""
+    partial = dest_dir / RIP_NAME.format(0)
+    partial.write_bytes(b"the first 3GB")
+    for line in EAGAIN_LOG:
+        on_message(line.format(path=partial))
+
+
 def _enospc(dst: Path) -> None:
     """HandBrake wrote 40 minutes of video and then the volume filled."""
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -272,16 +291,23 @@ def _enospc(dst: Path) -> None:
     raise OSError(errno.ENOSPC, "No space left on device", str(dst))
 
 
-def _deny_writes(monkeypatch, folder: Path):
+def _deny_writes(request, monkeypatch, folder: Path):
     """Make new files in ``folder`` fail, the way an output share that came back
-    read-only does. Returns a callable that puts it back."""
+    read-only does. Returns an idempotent callable that puts it back.
+
+    The chmod is registered as a teardown finalizer as well as being returned:
+    an assertion that fires before the caller restores it would otherwise leave
+    a 0o500 directory behind for pytest's tmp_path reaper to trip over.
+    """
     folder.mkdir(parents=True, exist_ok=True)
     mode = folder.stat().st_mode
     folder.chmod(0o500)
+    request.addfinalizer(lambda: folder.chmod(mode))
     if not os.access(folder, os.W_OK):
         return lambda: folder.chmod(mode)
-    # Running as root: the mode bits are advisory there, so refuse at the call
-    # the placer actually makes instead.
+    # Running as root (CI containers usually are): the mode bits are advisory
+    # there, so refuse at the call the placer actually makes instead. monkeypatch
+    # undoes this at teardown even if an assertion fires first.
     real_move = shutil.move
 
     def denied(src, dst, *a, **k):
@@ -371,13 +397,7 @@ async def test_the_eagain_write_error_that_queued_two_failed_rips_as_ready(
     ejects = _watch_eject(monkeypatch)
     job = _job()
 
-    def the_nas_write_dies(dest_dir, on_message):
-        partial = dest_dir / RIP_NAME.format(0)
-        partial.write_bytes(b"the first 3GB")
-        for line in EAGAIN_LOG:
-            on_message(line.format(path=partial))
-
-    tools.rip_fault = the_nas_write_dies
+    tools.rip_fault = _the_nas_write_dies
 
     report = Report(job)
     failure = await _run(pipeline, job, report)
@@ -433,15 +453,10 @@ async def test_the_fragment_from_the_failed_rip_is_cleared_before_the_re_rip(
     job = _job()
     rip_dir = pipeline.settings.storage.staging_dir / JOB_NAME / "rip" / "t000"
 
-    def the_nas_write_dies(dest_dir, on_message):
-        (dest_dir / RIP_NAME.format(0)).write_bytes(b"the first 3GB")
-        for line in EAGAIN_LOG:
-            on_message(line.format(path=dest_dir / RIP_NAME.format(0)))
-
-    tools.rip_fault = the_nas_write_dies
+    tools.rip_fault = _the_nas_write_dies
     assert isinstance(await _run(pipeline, job, Report(job)), RuntimeError)
     # The fragment is still sitting there under the name the next rip will use.
-    assert [p.name for p in rip_dir.glob("*.mkv")] == [RIP_NAME.format(0)]
+    assert sorted(p.name for p in rip_dir.glob("*.mkv")) == [RIP_NAME.format(0)]
 
     _click_retry(job)
     tools.rip_fault = None
@@ -514,8 +529,13 @@ async def test_enospc_partway_through_an_encode_keeps_the_rip_and_places_nothing
     assert not job.checkpoints[0].get("placed")
     # The disc was released back when the rip finished, so nobody is standing
     # over a drive waiting for a volume to be cleared.
-    assert DEVICE in ejects
+    assert ejects == [DEVICE]
     assert any("Finished ripping" in t for t, _m in report.notifications)
+    # The rip was saved DURABLY before any encode work began: the first
+    # checkpoint the reporter was asked to persist already names the ripped file
+    # and carries nothing else yet. Deferring that save to the next stage is how
+    # an hour of drive time gets lost to a crash that happens in between.
+    assert report.snapshots[0] == {0: {"ripped_path": job.checkpoints[0]["ripped_path"]}}
     # And the rip itself is still there: staging is only cleaned on success.
     ripped = staging / job.checkpoints[0]["ripped_path"]
     assert ripped.exists()
@@ -569,7 +589,7 @@ async def test_an_encoder_that_exits_zero_on_a_full_disk_does_not_report_done(tm
 # --- the output share comes back read-only ----------------------------------
 
 async def test_the_output_share_going_read_only_never_marks_the_title_placed(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, request):
     """The encode finished and then the move into the library was refused.
 
     Nothing is in the library, so nothing may claim it is: a "placed" flag here
@@ -587,7 +607,7 @@ async def test_the_output_share_going_read_only_never_marks_the_title_placed(
         nonlocal restore
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_text("a finished x265 encode")
-        restore = _deny_writes(monkeypatch, _movie_dir(pipeline))
+        restore = _deny_writes(request, monkeypatch, _movie_dir(pipeline))
 
     tools.encode_fault = encode_then_the_share_turns_read_only
 
@@ -716,7 +736,7 @@ async def test_a_job_added_from_a_file_that_vanished_says_so_instead_of_blaming_
 # --- the share drops between the rip box and the worker ---------------------
 
 async def test_the_share_dropping_before_the_worker_starts_leaves_the_job_reclaimable(
-        tmp_path, monkeypatch):
+        tmp_path):
     """The rip box finished and queued the job; by the time a worker claimed it
     the NAS had dropped, so the ripped file the checkpoint names is not there.
 
@@ -724,7 +744,9 @@ async def test_the_share_dropping_before_the_worker_starts_leaves_the_job_reclai
     worker that has already given up — would each cost the operator the disc.
     """
     settings = _settings(tmp_path)
-    monkeypatch.setattr(settings, "database_url", "postgresql://cluster/blurayripper")
+    # A URL only so the runner is built the way a clustered one is; the store is
+    # replaced below with the in-memory stand-in, so nothing ever dials Postgres.
+    settings.database_url = "postgresql://cluster/blurayripper"
     runner = WorkerRunner(settings, worker_id="encoder-A")
     runner.store = _SharedStore()
     tools = Tools()

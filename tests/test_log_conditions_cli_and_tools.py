@@ -91,6 +91,11 @@ usage: seconv [options] <input>
 
 _BOX_DRAWING = ("\u2500", "\u257f")
 
+# shutil.which insists on the +x bit on POSIX and on a PATHEXT suffix on
+# Windows. Read once, at import, so a test that pins sys.platform for the code
+# under test cannot change what the fake binaries on disk are called.
+_EXE_SUFFIX = ".exe" if sys.platform == "win32" else ""
+
 
 def _flat(text: str) -> str:
     """Rich lays the check out as tables, so the same sentence can arrive split
@@ -102,10 +107,10 @@ def _flat(text: str) -> str:
 
 
 def _exe(tmp_path: Path, name: str) -> str:
-    """A file that ``shutil.which`` will resolve (it insists on the +x bit)."""
+    """A file that ``shutil.which`` will resolve."""
     tools = tmp_path / "tools"
     tools.mkdir(exist_ok=True)
-    path = tools / name
+    path = tools / (name + _EXE_SUFFIX)
     path.write_text("#!/bin/sh\n", encoding="utf-8")
     path.chmod(0o755)
     return str(path)
@@ -116,8 +121,12 @@ def _settings(tmp_path: Path, *, container: str = "mkv", preset_format: str | No
 
     That is the whole point of the fixture: with something else also broken the
     command returns non-zero no matter what, so "assert rc != 0" would hold
-    whether or not the row under test failed it."""
-    s = load_settings()
+    whether or not the row under test failed it.
+
+    Loaded from ``tmp_path`` rather than the repo's config dir: the real one
+    picks up gitignored settings.local.json / secrets.env, so on a developer box
+    that has them these tests would run against that box's tuning."""
+    s = load_settings(tmp_path)
     s.config_dir = tmp_path
     s.storage.staging_dir = tmp_path / "staging"
     s.storage.output_dir = tmp_path / "out"
@@ -140,6 +149,8 @@ def _settings(tmp_path: Path, *, container: str = "mkv", preset_format: str | No
     s.encode.dovi = False
     s.subtitles.fix_common_errors = False
     s.subtitles.remove_text_for_hi = False
+    s.subtitles.split_long_lines = False
+    s.subtitles.balance_lines = False
     s.subtitles.upload_export_dir = None
     s.subtitles.dictionary_folder = None
     s.languages.keep = ["eng"]
@@ -154,7 +165,10 @@ def _check(monkeypatch, capsys, settings, *, java="/usr/bin/java",
     """Run `blurayripper check` against ``settings``, with this machine's real
     answers (which tools are on PATH, what tesseract reports, what the
     subtitleedit binary does when launched) replaced by the arguments."""
-    monkeypatch.setattr(cli, "console", Console(width=240))
+    # Pin the console: rich turns colour on from FORCE_COLOR/TTY_COMPATIBLE in
+    # the ambient environment, and every assertion below reads the plain text.
+    monkeypatch.setattr(
+        cli, "console", Console(width=240, force_terminal=False, no_color=True))
     monkeypatch.setattr(cli, "load_settings", lambda *a, **k: settings)
 
     async def _help(self):
@@ -362,9 +376,10 @@ def test_the_ocr_fix_dictionary_is_only_demanded_where_it_would_be_used(
     rc_unset, out_unset = _check(monkeypatch, capsys, s, se_help=NEW_HELP,
                                  tesseract=tess, tess_langs=("eng",))
 
-    s.subtitles.dictionary_folder = str(tmp_path / "no-such-dir")
-    _, out_bad = _check(monkeypatch, capsys, s, se_help=NEW_HELP,
-                        tesseract=tess, tess_langs=("eng",))
+    bad_dir = str(tmp_path / "no-such-dir")
+    s.subtitles.dictionary_folder = bad_dir
+    rc_bad, out_bad = _check(monkeypatch, capsys, s, se_help=NEW_HELP,
+                             tesseract=tess, tess_langs=("eng",))
 
     real_dir = tmp_path / "Dictionaries"
     real_dir.mkdir()
@@ -377,14 +392,17 @@ def test_the_ocr_fix_dictionary_is_only_demanded_where_it_would_be_used(
     _, out_gui = _check(monkeypatch, capsys, off, se_help="",
                         tesseract=tess, tess_langs=("eng",))
 
-    assert rc_unset == 0                    # never fatal, only ever a warning
+    assert rc_unset == 0 and rc_bad == 0    # never fatal, only ever a warning
     assert "unset — OCR glyph fixes" in out_unset
     # The config key names a TOML section; rich must not swallow the brackets
     # the way it does elsewhere, or the hint points at nothing.
     assert "[subtitles] dictionary_folder" in out_unset
-    assert f"{s.subtitles.dictionary_folder} — configured but NOT a folder" not in out_unset
+    # "unset" must read as unset, not as a path this box has lost.
+    assert "NOT a folder" not in out_unset
 
-    assert "configured but NOT a folder on this machine" in out_bad
+    # The offending path is named: the usual cause is a shared config pointing
+    # at the OTHER box's SubtitleEdit install.
+    assert f"{bad_dir} — configured but NOT a folder on this machine" in out_bad
     assert str(real_dir) in out_good and "NOT a folder" not in out_good
     assert "OCR-fix dictionary" not in out_gui
 
@@ -392,10 +410,19 @@ def test_the_ocr_fix_dictionary_is_only_demanded_where_it_would_be_used(
 def test_the_windows_only_runtime_row_stays_off_a_non_windows_box(
         tmp_path, monkeypatch, capsys):
     """vcruntime140.dll is meaningless on the Linux serve box. A permanent
-    "n/a" row is the kind of noise that trains people to skim the table."""
-    _, out = _check(monkeypatch, capsys, _settings(tmp_path))
+    "n/a" row is the kind of noise that trains people to skim the table.
 
-    assert ("vcruntime140.dll" in out) == (sys.platform == "win32")
+    The platform is pinned rather than inherited, so this asserts the row's
+    ABSENCE wherever it runs — read off the developer's own OS it would quietly
+    assert the opposite claim on a Windows worker."""
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    rc, out = _check(monkeypatch, capsys, settings)
+
+    assert rc == 0
+    assert "vcruntime140.dll" not in out
+    assert "n/a (not Windows)" not in out
 
 
 # ==========================================================================
@@ -571,20 +598,33 @@ def test_lossless_audio_copied_into_mp4_is_warned_about_not_blocked(
         tmp_path, monkeypatch, capsys):
     """TrueHD/DTS-HD cannot live in mp4, so `copy` there silently costs the HD
     audio track. It is still a legal configuration for a box that only rips
-    stereo discs, so it warns rather than refusing to start."""
-    s = _settings(tmp_path, container="mp4")
-    s.encode.ffmpeg_uhd = True
-    s.encode.ffmpeg_audio = "copy"
-    s.tools.ffmpeg = _exe(tmp_path, "ffmpeg")
-    rc_warn, out_warn = _check(monkeypatch, capsys, s)
+    stereo discs, so it warns rather than refusing to start.
 
-    s.encode.ffmpeg_audio = "aac"
-    rc_quiet, out_quiet = _check(monkeypatch, capsys, s)
+    Both halves of the pair are varied, because either one alone raising it
+    would be wrong: `copy` into mkv is the RECOMMENDED setup on every UHD box
+    here, and a row that scolds the recommended setup gets skimmed past."""
+    mp4 = _settings(tmp_path, container="mp4")
+    mp4.encode.ffmpeg_uhd = True
+    mp4.encode.ffmpeg_audio = "copy"
+    mp4.tools.ffmpeg = _exe(tmp_path, "ffmpeg")
+    rc_warn, out_warn = _check(monkeypatch, capsys, mp4)
+
+    mp4.encode.ffmpeg_audio = "aac"     # transcoded: mp4 can hold it
+    rc_aac, out_aac = _check(monkeypatch, capsys, mp4)
+
+    # NB: rewrites tmp_path/presets.json to av_mkv, so it must come last.
+    mkv = _settings(tmp_path, container="mkv")
+    mkv.encode.ffmpeg_uhd = True
+    mkv.encode.ffmpeg_audio = "copy"    # the recommended combination
+    mkv.tools.ffmpeg = _exe(tmp_path, "ffmpeg")
+    rc_mkv, out_mkv = _check(monkeypatch, capsys, mkv)
 
     assert rc_warn == 0
     assert "ffmpeg_audio='copy' needs container='mkv' (yours is 'mp4')" in out_warn
-    assert rc_quiet == 0
-    assert "needs container='mkv'" not in out_quiet
+    assert rc_aac == 0
+    assert "needs container='mkv'" not in out_aac
+    assert rc_mkv == 0
+    assert "needs container='mkv'" not in out_mkv
 
 
 def test_dolby_vision_names_whichever_half_of_the_chain_is_absent(
@@ -696,7 +736,8 @@ def test_the_closing_verdict_and_the_exit_code_never_disagree(
 
 
 def _se(tmp_path: Path, *, exe: str = "/usr/local/bin/seconv", runner=None):
-    s = load_settings()
+    # From tmp_path, not the repo config dir: see _settings.
+    s = load_settings(tmp_path)
     s.tools.subtitleedit = exe
     s.tools.subtitleedit_runner = runner
     s.subtitles.dictionary_folder = None
@@ -944,15 +985,18 @@ def test_a_close_that_failed_is_reported_as_a_close_not_as_an_eject(monkeypatch)
 def test_the_macos_tray_commands_are_checked_just_as_hard(monkeypatch):
     """drutil is a different binary on a different branch; the exit status was
     dropped there too, and macOS is where the reference discs get ripped."""
-    _posix(monkeypatch, "darwin", returncode=1, stderr="drutil: no drive found\n")
+    fake = _posix(monkeypatch, "darwin", returncode=1,
+                  stderr="drutil: no drive found\n")
 
     with pytest.raises(RuntimeError) as eject_exc:
         ej.eject("disk3")
 
-    _posix(monkeypatch, "darwin", returncode=1, stderr="drutil: no drive found\n")
     with pytest.raises(RuntimeError) as close_exc:
         ej.close_tray(None)
 
+    # drutil addresses the default drive and takes no device argument, so the
+    # macOS disk id must not be appended the way /dev/srN is on Linux.
+    assert fake.argvs == [["drutil", "tray", "eject"], ["drutil", "tray", "close"]]
     assert "Could not eject" in str(eject_exc.value)
     assert "drutil tray eject" in str(eject_exc.value)
     assert "Could not close the tray" in str(close_exc.value)

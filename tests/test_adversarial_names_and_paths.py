@@ -109,7 +109,6 @@ def test_traversal_in_a_title_collapses_to_a_single_folder_component(tmp_path, t
 
     assert _normpath_inside(movies, dest), dest
     assert dest.relative_to(movies).parts == (dest.parent.name, dest.name)
-    assert len(dest.relative_to(movies).parts) == 2
     for part in dest.relative_to(movies).parts:
         assert "/" not in part and "\\" not in part
         assert part not in (".", "..")
@@ -256,9 +255,10 @@ def test_no_component_ends_in_a_dot_or_space_windows_would_quietly_drop(tmp_path
     dest = naming.movie_video_path(movies, title, None, "mkv")
 
     assert dest.parent.name == "The Movie"
-    assert dest.parent.name == dest.parent.name.rstrip(". ")
-    assert dest.stem == dest.stem.rstrip(". ")
-    assert library.place(src, dest).exists()
+    assert dest.name == "The Movie.mkv"      # the filename needs the same trim
+    placed = library.place(src, dest)
+    # Windows would have created "The Movie" for a name we recorded as "The Movie ."
+    assert [p.name for p in placed.parent.iterdir()] == ["The Movie.mkv"]
 
 
 def test_runs_of_whitespace_are_collapsed_so_two_labels_cannot_differ_invisibly(tmp_path):
@@ -333,16 +333,20 @@ def test_a_title_over_255_bytes_fails_loudly_and_places_nothing(tmp_path):
 
 def test_an_over_long_edition_leaves_the_encode_where_a_retry_can_find_it(tmp_path):
     """Same limit, but only the *filename* is over it, so ``mkdir`` succeeds and
-    the failure happens during the move. The recoverable state is what counts:
-    the video must not be half-moved, and the source must survive."""
+    the movie folder really is created before the failure. The recoverable state
+    is what counts: the new folder is left empty (no half-moved video, no
+    ``.partial-replace`` stub for the next run to trip over) and the encode is
+    still in staging for a retry."""
     movies, src = _lib(tmp_path)
     dest = naming.movie_video_path(movies, "Short", 2020, "mkv", "E" * 300)
 
-    assert len(dest.parent.name) < 255 and len(dest.name) > 255
+    assert len(dest.parent.name) < 255       # the folder is fine ...
+    assert len(dest.name) > 255              # ... only the filename is over
     with pytest.raises(OSError):
         library.place(src, dest)
 
-    assert list(movies.rglob("*.mkv")) == []          # nothing placed
+    assert [p.name for p in movies.iterdir()] == ["Short (2020)"]
+    assert list(dest.parent.iterdir()) == []                 # nothing half-written
     assert src.exists() and src.read_bytes() == b"VIDEO-A"   # retryable
 
 
@@ -439,11 +443,12 @@ def test_the_same_title_in_nfc_and_nfd_does_not_silently_lose_a_film(tmp_path):
         with pytest.raises(FileExistsError):
             library.place(src_b, nfd, overwrite=False)
         assert nfc.read_bytes() == b"VIDEO-A"
+        assert src_b.read_bytes() == b"VIDEO-B"   # refused, so still retryable
     else:
         library.place(src_b, nfd, overwrite=False)
         assert nfc.read_bytes() == b"VIDEO-A"
         assert nfd.read_bytes() == b"VIDEO-B"
-    assert not src_b.exists() or src_b.read_bytes() == b"VIDEO-B"
+        assert not src_b.exists()                 # moved out of staging, not copied
 
 
 # --------------------------------------------------------------------------- #
@@ -462,17 +467,35 @@ def test_a_language_code_holding_a_separator_cannot_write_outside_the_folder(lan
         naming.subtitle_sidecar_path(video, lang)
 
 
-@pytest.mark.parametrize("lang", ["eng", "..", "", "   ", "\x00", "a\\b", "zz zz", "." * 40])
-def test_no_language_code_moves_the_sidecar_out_of_the_video_folder(lang):
-    """The rest of the hostile codes are legal filename text, so they are kept —
-    but the sidecar must stay next to the video, because that adjacency is the
-    entire mechanism by which Plex associates it."""
+@pytest.mark.parametrize(
+    ("lang", "suffix"),
+    [
+        ("eng", "en"),            # the one mapped code: ISO 639-2/B -> 639-1
+        ("..", ".."),             # kept, but as *text* inside the name
+        ("", ""),
+        ("   ", ""),              # whitespace-only is stripped to nothing
+        ("\x00", "\x00"),         # unmapped codes fall through verbatim
+        ("a\\b", "a\\b"),
+        ("zz zz", "zz zz"),
+        ("." * 40, "." * 40),
+    ],
+)
+def test_a_hostile_language_code_stays_text_inside_the_sidecar_name(lang, suffix):
+    """The rest of the hostile codes are legal filename text, so they are kept
+    verbatim (only the ISO 639-2/B -> 639-1 mapping rewrites a code) and they land
+    *inside* one filename that keeps the video's stem.
+
+    Both halves matter: the stem and the folder are how Plex pairs a sidecar with
+    its video, and a code that silently became something else — dropped, or
+    sanitized to a different language — would mislabel the track in the UI.
+    """
     video = Path("/library/Movies/WarGames (1983)/WarGames (1983).mkv")
     sidecar = naming.subtitle_sidecar_path(video, lang)
 
     assert sidecar.parent == video.parent
-    assert sidecar.name.endswith(".srt")
-    assert ".." not in sidecar.parts
+    assert sidecar.name == f"WarGames (1983).{suffix}.srt"
+    assert ".." not in sidecar.parts        # ".." is text in the name, not a component
+    assert len(sidecar.parts) == len(video.parts)
 
 
 def test_the_sidecar_follows_a_hostile_title_into_the_sanitized_folder(tmp_path):

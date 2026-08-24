@@ -26,6 +26,7 @@ stall detection and requeue, and the presence protocol are all the real thing.
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
 import time
 from pathlib import Path
@@ -127,6 +128,12 @@ class ChaosStore(MemoryStore):
             self._beat[job_id] = self.clock
 
     def release(self, job_id, owner=None):
+        # Owner-scoped exactly like PostgresStore.release: a worker dropping its
+        # OWN claim must not be able to drop one that has since moved to another
+        # box (that is how the same job gets encoded twice). An unscoped release
+        # — what serve's Requeue does — still clears whoever holds it.
+        if owner is not None and self._owner.get(job_id) not in (None, owner):
+            return
         self._owner.pop(job_id, None)
         self._beat.pop(job_id, None)
 
@@ -147,12 +154,15 @@ class ChaosStore(MemoryStore):
             self._presence[worker_id] = row
         row.update(version=version, job_id=job_id, stage=stage, last_seen=self.clock)
 
+    # PostgresStore.list_workers only returns rows seen in the last 10 minutes.
+    FORGET_AFTER = 600
+
     def list_workers(self):
         return [
             WorkerInfo(box_id, row["version"], row["job_id"], row["stage"],
                        self.clock - row["last_seen"], self.clock - row["started_at"])
             for box_id, row in sorted(self._presence.items())
-            if self.clock - row["last_seen"] <= 600
+            if self.clock - row["last_seen"] <= self.FORGET_AFTER
         ]
 
 
@@ -165,8 +175,14 @@ def _config_dir(tmp_path: Path, monkeypatch, **cluster) -> Path:
     between jobs, so anything only poked onto a Settings object is thrown away
     on the first poll.
     """
-    monkeypatch.delenv("BLURAYRIPPER_DATABASE_URL", raising=False)
-    monkeypatch.delenv("BLURAYRIPPER_NOTIFY_URL", raising=False)
+    # load_settings lets ANY BLURAYRIPPER_*/OPENSUBTITLES_*/TMDB_API_KEY process
+    # variable override the file, so a developer with (say)
+    # BLURAYRIPPER_STAGING_DIR or BLURAYRIPPER_STALE_AFTER_SECONDS exported would
+    # silently run these tests against a different cluster than the one written
+    # below. Scrub the whole namespace rather than the two that bit us first.
+    for name in list(os.environ):
+        if name == "TMDB_API_KEY" or name.startswith(("BLURAYRIPPER_", "OPENSUBTITLES_")):
+            monkeypatch.delenv(name, raising=False)
     cfg = dict(use_workers=True, worker_poll_seconds=0, heartbeat_seconds=0,
                stale_after_seconds=180, offline_alert_seconds=0,
                local_encode_max_height=0, worker_restart_after_days=0,
@@ -294,6 +310,22 @@ async def _run(runner: WorkerRunner) -> None:
     await asyncio.wait_for(runner.run(), timeout=10)
 
 
+async def _yield_until(ready, turns: int = 50) -> bool:
+    """Yield to the event loop until `ready()` holds; report whether it did.
+
+    Cooperative only — no wall-clock sleep, so nothing here gets slower or
+    flakier on a busy machine, and `turns` is a generous ceiling rather than a
+    tuned number. Returns a bool instead of raising because the callers run
+    INSIDE the system under test, which would swallow an exception into a
+    failed job and hide the real assertion.
+    """
+    for _ in range(turns):
+        if ready():
+            return True
+        await asyncio.sleep(0)
+    return ready()
+
+
 def _rip_box(cfg: Path, store: ChaosStore, monkeypatch):
     """The serve box's JobManager, with its outbound pushes captured."""
     monkeypatch.setattr(socket, "gethostname", lambda: RIP_BOX)
@@ -336,8 +368,14 @@ def _serve_side(manager: JobManager, store: ChaosStore, job_id: int) -> WebJob:
     return wj
 
 
-async def _refresh_until(manager: JobManager, ready, timeout=2.0) -> None:
-    """Run serve's REAL store-refresh loop until `ready()` holds, then stop it."""
+async def _refresh_until(manager: JobManager, ready, timeout=10.0) -> None:
+    """Run serve's REAL store-refresh loop until `ready()` holds, then stop it.
+
+    This one does have to wait on the clock: the refresh loop hands its store
+    reads to ``asyncio.to_thread``, so plain event-loop yields can't make them
+    land. It polls a condition with a generous ceiling rather than sleeping a
+    fixed amount, so a slow machine takes longer and still passes.
+    """
     manager.closing = False
     task = asyncio.ensure_future(manager._refresh_from_store())
     deadline = time.monotonic() + timeout
@@ -390,12 +428,19 @@ async def test_a_box_that_dies_mid_encode_is_reclaimed_only_once_its_claim_expir
     reporter.touch()
     store.cut_off("encoder-A")
 
-    # 170 seconds of silence, inside this cluster's 180s window.
+    # 170 seconds of silence, inside this cluster's 180s window. An idle box's
+    # REAL loop polls right then — the row is in a claimable state, so nothing
+    # but the unexpired claim can stop it walking off with a live 4K encode.
     store.tick(170)
     assert _record(store, 317).state == "encoding"
-    assert "encoding" in CLAIMABLE_STATES  # the state itself is not what blocks B
-    assert store.claim_next("encoder-B", CLAIMABLE_STATES, 180) is None
+    assert "encoding" in CLAIMABLE_STATES  # the state itself is not what blocks C
+    box_c = _worker(cfg, store, "encoder-C")
+    _stop_after(box_c, monkeypatch, polls=2)
+    await _run(box_c)
+
+    assert encoded == []                    # encoder-C started nothing
     assert store.owner_of(317) == "encoder-A"
+    assert _record(store, 317).worker == "encoder-A"
 
     # Past the window the claim has expired, and encoder-B's real loop takes over.
     store.tick(30)
@@ -403,6 +448,8 @@ async def test_a_box_that_dies_mid_encode_is_reclaimed_only_once_its_claim_expir
     _stop_after(box_b, monkeypatch, polls=1)
     await _run(box_b)
 
+    # Exactly two boxes ever held it, in that order — encoder-C never got in.
+    assert store.claim_log == [("encoder-A", 317), ("encoder-B", 317)]
     assert encoded == ["Aliens (1986).mkv"]  # the placed title was NOT re-encoded
     assert already_placed.read_text() == "placed by encoder-A before the lights went out"
     finished = _record(store, 317)
@@ -495,14 +542,16 @@ async def test_two_boxes_polling_at_the_same_moment_encode_the_output_path_once(
     seen_mid_encode: dict = {}
 
     box_b = _worker(cfg, store, "encoder-B")
-    _stop_after(box_b, monkeypatch, polls=2)
+    _stop_after(box_b, monkeypatch, polls=2)  # two polls, both while A is encoding
 
     async def poll_the_other_box(_name):
         # Ten minutes into the encode — well past the 180s stale window — with
         # encoder-A's heartbeat the only thing holding the claim open.
         store.tick(600)
-        for _ in range(3):
-            await asyncio.sleep(0)  # let A's heartbeat land
+        # Give A's heartbeat task a chance to land — then look, whether it did
+        # or not, so a heartbeat that never fires shows up as the 600s of
+        # silence it really is instead of a hang.
+        await _yield_until(lambda: store._beat.get(700) == store.clock)
         seen_mid_encode["state"] = _record(store, 700).state
         seen_mid_encode["owner"] = store.owner_of(700)
         seen_mid_encode["silence"] = store.clock - store._beat[700]
@@ -522,8 +571,8 @@ async def test_two_boxes_polling_at_the_same_moment_encode_the_output_path_once(
     assert seen_mid_encode["state"] in CLAIMABLE_STATES
     assert seen_mid_encode["owner"] == "encoder-A"
     assert seen_mid_encode["silence"] < 180
-    assert store.claim_log == [("encoder-A", 700)]
-    assert encoded == ["Dune (1984).mkv"]
+    assert store.claim_log == [("encoder-A", 700)]  # B never got a look-in
+    assert encoded == ["Dune (1984).mkv"]           # ...so one encode, not two
 
     # A finished and dropped its claim; the row is done, so the next box to poll
     # must not pick it up again.
@@ -627,10 +676,16 @@ async def test_a_box_whose_rip_file_vanished_hands_the_job_back_untouched(
     ripped[0].unlink()  # the share went away
 
     box_a = _worker(cfg, store, "encoder-A")
+    # Two trips round the loop: the second proves the hand-back really put the
+    # job back on the queue (this box can claim it again) rather than parking it.
     _stop_after(box_a, monkeypatch, polls=2)
     await _run(box_a)
 
     assert encoded == []
+    # It genuinely claimed the job and gave it back — not "never saw it", which
+    # would satisfy the state assertions below for entirely the wrong reason.
+    assert set(store.claim_log) == {("encoder-A", 334)}
+    assert store.claim_log.count(("encoder-A", 334)) >= 2  # re-claimable, not parked
     handed_back = _record(store, 334)
     assert handed_back.state == "ready"
     assert handed_back.error is None
@@ -682,8 +737,10 @@ async def test_serve_restarting_mid_encode_leaves_the_job_with_the_box_encoding_
     monkeypatch.setattr(manager.pipeline, "_persist_mapping", lambda job, report: None)
 
     resumed = manager.recover()
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    # Wait on the one resumption serve did start, instead of guessing at a number
+    # of event-loop turns. Job 500 must never get a task to wait on at all — that
+    # is what the assertions below check.
+    await asyncio.wait_for(manager.jobs[501]._task, timeout=10)
 
     assert resumed == 1                      # only the rip serve owns itself
     assert prepped == [501]                  # the encode was never touched here
@@ -732,9 +789,10 @@ async def test_serve_restarting_mid_rip_resumes_from_the_titles_already_ripped(
     monkeypatch.setattr(manager.pipeline, "_persist_mapping", lambda job, report: None)
 
     resumed = manager.recover()
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-    await manager.shutdown()
+    try:
+        await asyncio.wait_for(manager.jobs[502]._task, timeout=10)
+    finally:
+        await manager.shutdown()
 
     assert resumed == 1
     assert len(prepped) == 1
@@ -807,7 +865,13 @@ def test_liveness_is_measured_by_the_database_clock_not_by_either_box(monkeypatc
     _store().record_worker("encoder-A", BUILD, 317, "encoding", "run-1")
     _store().heartbeat(317, "encoder-A")
     _store().claim_next("encoder-B", ["ready"], 180)
-    _store([("encoder-A", BUILD, 317, "encoding", 3.5, 7200.0)]).list_workers()
+    # The two trailing columns are what the SELECT below computes in SQL.
+    seen = _store([("encoder-A", BUILD, 317, "encoding", 3.5, 7200.0)]).list_workers()
+
+    # Serve gets the database's numbers back unaltered — it must never re-derive
+    # an age from its own clock on the way out, or the SQL above buys nothing.
+    assert [(w.worker_id, w.job_id, w.seconds_since_seen, w.uptime_seconds)
+            for w in seen] == [("encoder-A", 317, 3.5, 7200.0)]
 
     presence_write, beat, claim = sql[0], sql[1], sql[2]
     ages = sql[-1][0]
@@ -843,6 +907,7 @@ async def test_the_stall_verdict_follows_the_stores_clock_not_serves_own(
     box._register(800, "encoding title 0")
 
     manager._workers_cache = store.list_workers()
+    assert [w.worker_id for w in manager._workers_cache] == ["encoder-A"]
     assert manager._workers_cache[0].seconds_since_seen == 0.0
     assert manager._is_stalled(wj, manager._live_state(wj)) is False
 
@@ -861,8 +926,12 @@ async def test_the_stall_verdict_follows_the_stores_clock_not_serves_own(
     box._register(800, "encoding title 0")
     manager._workers_cache = store.list_workers()
     assert manager._is_stalled(wj, manager._live_state(wj)) is False
-    with pytest.raises(ValueError):
+    # ...and the verdict is what actually guards Requeue, so the button is shut
+    # again too, with a reason an operator can act on.
+    with pytest.raises(ValueError) as refused:
         manager.requeue(800)
+    assert "800" in str(refused.value) and "stalled" in str(refused.value)
+    assert getattr(wj, "_task", None) is None   # nothing was started behind it
 
 
 async def test_a_box_reporting_a_different_job_does_not_vouch_for_this_one(
@@ -905,6 +974,11 @@ async def test_a_box_on_an_older_build_finishes_its_job_then_stops_claiming(
 
     manager, _alerts = _rip_box(cfg, store, monkeypatch)
     manager._record_serve_presence()  # serve publishes the build it is now on
+    # The worker finds serve by the reserved id, not by hostname. Pinning it here
+    # means a regression in how serve registers fails with "serve isn't in the
+    # presence table" rather than an inscrutable "the box never updated".
+    assert [w.worker_id for w in store.list_workers()
+            if presence.is_serve(w.worker_id)] == [presence.serve_id(RIP_BOX)]
 
     old_box = _worker(cfg, store, "encoder-A")
 

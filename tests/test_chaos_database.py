@@ -58,7 +58,6 @@ class FlakyStore(MemoryStore):
         self.calls: Counter = Counter()
         self.hooks: dict = {}          # op -> fn(call_number), fired before the guard
         self.workers: list[WorkerInfo] = []
-        self.presence: list[tuple] = []
         self.on_tick = lambda: None    # fired once per _refresh_from_store pass
 
     def _guard(self, op: str) -> None:
@@ -86,7 +85,10 @@ class FlakyStore(MemoryStore):
 
     def release(self, job_id, owner=None):
         self._guard("release")
-        super().release(job_id)
+        # Owner-scoped, exactly like MemoryStore/Postgres: a release naming the
+        # wrong worker must NOT drop someone else's claim, or a test could "pass"
+        # on a release the real store would have refused.
+        super().release(job_id, owner)
 
     def heartbeat(self, job_id, worker_id):
         self._guard("heartbeat")
@@ -94,15 +96,14 @@ class FlakyStore(MemoryStore):
     def record_worker(self, worker_id, version, job_id, stage, run_token=None):
         self.on_tick()
         self._guard("record_worker")
-        self.presence.append((worker_id, job_id, stage))
 
     def list_workers(self):
         self._guard("list_workers")
         return list(self.workers)
 
 
-def _disc(name="WarGames"):
-    return DiscInfo(source="disc:0", disc_name=name,
+def _disc():
+    return DiscInfo(source="disc:0", disc_name="WarGames",
                     titles=[Title(title_id=0, duration_seconds=6762, chapter_count=12)])
 
 
@@ -114,6 +115,15 @@ def manager(tmp_path, monkeypatch):
     settings.notify_url = None
     settings.cluster.use_workers = True
     settings.cluster.worker_poll_seconds = 0
+    # Pin every cluster knob these tests reason about, rather than inheriting
+    # whatever config/settings.local.json this box happens to carry:
+    #  - stale_after_seconds: how fresh a worker row must be to count as "live"
+    #    (the WorkerInfo ages below are chosen relative to THIS number).
+    #  - local_encode_max_height 0: this box always hands the encode to a worker,
+    #    so a rip never detours into a local encode (which would shell out to a
+    #    real ffprobe on the fake .mkv files these tests write).
+    settings.cluster.stale_after_seconds = 60
+    settings.cluster.local_encode_max_height = 0
     return JobManager(settings, store=FlakyStore())
 
 
@@ -269,7 +279,8 @@ def test_the_breaker_closes_again_when_postgres_comes_back(monkeypatch):
 
     assert store._down_until == 0.0     # healthy again, no cooldown for the next call
     assert any("INSERT INTO jobs" in sql for sql, _ in log)
-    assert log[-1][1][0] == 42 and log[-1][1][2] == "ready"  # id + claimable state
+    assert log[-1][1][0] == 42          # the row it wrote is this job…
+    assert log[-1][1][2] == "ready"     # …in the state a worker can claim
 
 
 # --- serve keeps running --------------------------------------------------
@@ -287,6 +298,7 @@ def test_a_persist_failure_never_kills_the_job_and_names_the_cause(manager):
 
     assert wj.state is JobState.AWAITING_MAPPING     # the decision was taken
     assert wj.selected_title_ids == [0]
+    assert manager.store.load_all() == []            # …and really didn't reach the DB
     assert any(f"persist failed: {DB_DOWN}" in line for line in wj.log)
 
 
@@ -299,6 +311,8 @@ async def test_an_outage_must_not_make_a_live_remote_encode_look_stalled(manager
     wj = _job(manager, 3, state=JobState.ENCODING)
     wj._pipeline_job.state = JobState.ENCODING
     wj.progress = 0.42
+    # enc1 heartbeated 4s ago — comfortably inside the fixture's 60s stale window,
+    # so this row is what "a live worker is on job 3" looks like.
     manager._workers_cache = [WorkerInfo("enc1", "v1", 3, "encode", 4.0)]
     manager._spawn = lambda coro: coro.close()
 
@@ -423,12 +437,16 @@ def test_serve_starts_with_the_database_down_instead_of_refusing_to_boot(
     settings.cluster.use_workers = True
     settings.notify_url = None
 
-    with TestClient(create_app(settings)) as client:
+    app = create_app(settings)
+    with TestClient(app) as client:
         body = client.get("/api/jobs").json()
 
     assert body["jobs"] == []                       # nothing recovered, but…
-    assert "Job recovery skipped" in capsys.readouterr().out
-    assert refreshing, "the store poll must still start, so serve can reconverge"
+    out = capsys.readouterr().out
+    assert "Job recovery skipped" in out
+    assert DB_DOWN in out                           # …and it says WHY, not just that
+    assert refreshing == [app.state.manager], (
+        "the store poll must still start for this manager, so serve can reconverge")
 
 
 # --- the divergence: serve says READY, the database never heard ------------
@@ -496,7 +514,8 @@ async def test_when_the_database_returns_the_next_persist_makes_the_job_claimabl
     assert rec.state == "ready"
     assert rec.checkpoints == {"0": {"ripped_path": str(ripped)}}
     claimed = manager.store.claim_next("enc2", ["ready"])
-    assert claimed is not None and claimed.id == 12
+    assert claimed is not None, "the republished row must be claimable"
+    assert claimed.id == 12
 
     runner = _runner(manager.settings)
     assert runner._fully_ripped(claimed) is True   # encodes; does NOT re-rip
@@ -541,7 +560,8 @@ async def test_a_worker_rides_out_a_queue_outage_and_claims_once_the_db_returns(
     store.down.add("claim_next")
 
     def db_returns(n):
-        if n == 3:                    # three blind polls, then the host answers
+        # Polls 1 and 2 fail; the host is back in time to answer poll 3.
+        if n == 3:
             store.down.discard("claim_next")
             events.append("db_back")
 
@@ -556,8 +576,9 @@ async def test_a_worker_rides_out_a_queue_outage_and_claims_once_the_db_returns(
     await runner.run()
 
     assert events == ["db_back", "processed 7"]     # nothing taken while blind
+    assert store.calls["claim_next"] == 3           # it kept polling, it didn't exit
     out = capsys.readouterr().out
-    assert out.count("Queue unavailable, will retry") == 1   # three failures, one line
+    assert out.count("Queue unavailable, will retry") == 1   # two failures, one line
     assert DB_DOWN in out
 
 
@@ -598,11 +619,16 @@ async def test_a_worker_that_cannot_report_its_result_still_finishes_and_frees_t
     await runner._process(rec)
 
     assert placed.exists()                    # the encode completed and was placed
+    # …and _process ran all the way past the encode: the post-encode staging
+    # cleanup only happens on the path that finishes, so a store outage that
+    # aborted the job mid-flight would leave job_9/ behind.
+    assert not (tmp_path / "staging" / "job_9").exists()
     assert {r.id: r.state for r in store.load_all()}[9] == "ready"  # DB never learned
     # The claim is dropped anyway, so the job is immediately reclaimable rather
     # than orphaned until its heartbeat ages out.
     again = store.claim_next("enc2", ["ready"])
-    assert again is not None and again.id == 9
+    assert again is not None, "the finished job must be reclaimable at once"
+    assert again.id == 9
 
 
 def test_checkpoints_taken_during_the_outage_all_land_on_the_first_save_after_it(tmp_path):
