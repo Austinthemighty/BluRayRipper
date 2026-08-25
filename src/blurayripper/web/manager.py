@@ -243,6 +243,13 @@ class JobManager:
         # triggers a scan immediately instead of waiting out the full poll interval.
         self._media_snapshot: dict[str, str] | None = None
         self._workers_cache: list = []  # WorkerInfo, refreshed by the store poll
+        # Jobs whose last save to the store failed, retried once it is back.
+        self._unpersisted: set[int] = set()
+        # Last reported store error, PER OPERATION (see _log_store_error).
+        self._last_store_error: dict[str, str] = {}
+        # True when recover() could not read the store at startup, so the queue
+        # in memory is not the queue that exists. Retried on the first good poll.
+        self._recover_pending = False
         # Presence: this box heartbeats so workers can spot the server going down,
         # and watches the workers for the reverse. run_token distinguishes a fresh
         # process from a heartbeat, so restarting resets the uptime clock.
@@ -273,6 +280,33 @@ class JobManager:
             self.store.save(self._to_record(wj))
         except Exception as exc:  # never let a persistence hiccup kill a job
             wj.log.append(stamp_log(f"persist failed: {exc}"))
+            # ...but do not forget it happened. A rip that finished during an
+            # outage otherwise sits at READY in memory while the store has no
+            # row for it, so no worker can ever claim it and the UI shows a
+            # queued job that never moves. Nothing retried the save, and the
+            # refresh loop only READS. Two discs were stranded exactly this way.
+            self._unpersisted.add(wj.id)
+            return
+        self._unpersisted.discard(wj.id)
+
+    def _flush_unpersisted(self) -> int:
+        """Re-save jobs whose last save failed. Returns how many were recovered."""
+        done = 0
+        for job_id in sorted(self._unpersisted):
+            wj = self.jobs.get(job_id)
+            if wj is None:
+                self._unpersisted.discard(job_id)
+                continue
+            try:
+                self.store.save(self._to_record(wj))
+            except Exception:
+                return done          # still down; keep the rest for next time
+            self._unpersisted.discard(job_id)
+            wj.log.append(stamp_log(
+                "Saved to the database (an earlier save had failed, so this job "
+                "was invisible to workers until now)."))
+            done += 1
+        return done
 
     def _to_record(self, wj: WebJob) -> JobRecord:
         job = wj._pipeline_job
@@ -645,19 +679,48 @@ class JobManager:
             except Exception as exc:
                 tick_ok = False
                 self._log_store_error("load_all", exc)
-            if tick_ok and getattr(self, "_last_store_error", None) is not None:
+            if tick_ok and self._last_store_error:
                 print("[store] reconnected — database reachable again")
-                self._last_store_error = None
+                self._last_store_error.clear()
+            if tick_ok:
+                # Reconverge, rather than only reading. Both of these left the
+                # box wrong in a way no amount of waiting fixed: a save that
+                # failed during the outage (the job is invisible to workers) and
+                # a recover() that could not run at startup (the queue reads as
+                # empty while workers encode jobs it never loaded).
+                try:
+                    saved = await asyncio.to_thread(self._flush_unpersisted)
+                except Exception:
+                    saved = 0
+                if self._recover_pending:
+                    try:
+                        await asyncio.to_thread(self.recover)
+                        self._recover_pending = False
+                        print("[store] loaded the jobs that were unreachable at startup")
+                        saved += 1
+                    except Exception as exc:
+                        self._log_store_error("recover", exc)
+                if saved:
+                    self.bus.publish()
             await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
 
     def _log_store_error(self, op: str, exc: Exception) -> None:
         # A persistent store failure (schema drift, bad row) would otherwise make
         # the UI silently stop reflecting worker progress with zero diagnostics.
         # Log the cause once per distinct message, not every poll.
+        # Keyed PER OPERATION. With one shared slot a total outage failed
+        # list_workers and load_all alternately with different messages, so each
+        # call saw a different "last" and printed again — two lines every poll,
+        # forever, which is the every-tick spam this exists to prevent, and only
+        # in the total-outage case that actually matters.
         msg = f"[store] {op} failed: {type(exc).__name__}: {exc}"
-        if msg != getattr(self, "_last_store_error", None):
+        if self._last_store_error.get(op) != msg:
             print(msg)
-            self._last_store_error = msg
+            self._last_store_error[op] = msg
+
+    def _clear_store_error(self, op: str) -> None:
+        """A clean call: forget the last error so a NEW outage is reported."""
+        self._last_store_error.pop(op, None)
 
     async def _watch_drives(self) -> None:
         while not self.closing:

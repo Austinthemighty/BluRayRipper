@@ -128,7 +128,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if n:
                 print(f"Recovered {n} in-flight job(s) from the last run.")
         except Exception as exc:  # don't block startup on a recovery hiccup
-            print(f"Job recovery skipped: {exc}")
+            # Flag it so the refresh loop retries once the store is reachable.
+            # Without that the UI comes up with an EMPTY queue and stays that
+            # way -- the refresh only updates jobs it already knows about -- so
+            # the operator sees no jobs while workers are encoding them, until
+            # serve happens to be restarted a second time.
+            manager._recover_pending = True
+            print(f"Job recovery skipped ({exc}); will retry when the database "
+                  "is reachable.")
         manager.start_drive_watch()  # background drive polling + auto-open
         manager.start_store_refresh()  # reflect remote worker progress (clustered)
 
