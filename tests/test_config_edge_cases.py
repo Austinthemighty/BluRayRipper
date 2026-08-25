@@ -156,9 +156,12 @@ def test_a_choice_field_rejects_anything_off_the_list_and_names_the_options(tmp_
         ss.save_overlay(tmp_path, {"encode": {"ffmpeg_preset": "insane"}})
     assert ss.read_overlay(tmp_path) == {}          # nothing was written
 
-    # Blank is allowed through: it means "not set", not "invalid".
-    assert ss.save_overlay(
-        tmp_path, {"encode": {"ffmpeg_preset": ""}})["encode"]["ffmpeg_preset"] == ""
+    # Blank is rejected too. None of these fields has a blank option, and a
+    # stored blank does NOT mean "not set": load_settings reads the overlay with
+    # .get(key, default) and finds the key present, so the default never applies.
+    with pytest.raises(ValueError, match="ultrafast"):
+        ss.save_overlay(tmp_path, {"encode": {"ffmpeg_preset": ""}})
+    assert ss.read_overlay(tmp_path) == {}
 
 
 def test_a_pasted_tool_path_is_stripped_and_a_missing_value_becomes_blank(tmp_path):

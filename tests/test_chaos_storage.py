@@ -557,9 +557,14 @@ async def test_enospc_partway_through_an_encode_keeps_the_rip_and_places_nothing
 
 async def test_an_encoder_that_exits_zero_on_a_full_disk_does_not_report_done(tmp_path):
     """The nastier half of ENOSPC: the encoder hit the wall, wrote nothing, and
-    exited 0 anyway. Every stage reported success, the file has the right name
-    in the right folder, and only its size says otherwise — which is why the
-    end-of-job check weighs the file instead of trusting that it is there."""
+    exited 0 anyway. Every stage reported success and the file has the right name
+    in the right folder — only its size says otherwise.
+
+    The file is weighed BEFORE the move now (it used to be placed, and only the
+    end-of-job check caught it — after "placed" had been checkpointed on an empty
+    video, which made every later Retry skip the encode that would replace it and
+    re-fail identically forever). So: nothing reaches the library, and freeing
+    space and retrying finishes the job."""
     pipeline = _pipeline(tmp_path)
     tools = Tools()
     tools.install(pipeline)
@@ -574,16 +579,22 @@ async def test_an_encoder_that_exits_zero_on_a_full_disk_does_not_report_done(tm
     report = Report(job)
     failure = await _run(pipeline, job, report)
 
-    # The trap: the encode "succeeded", the move succeeded, and the log says
-    # the video was placed.
-    placed = _movie_dir(pipeline) / VIDEO_NAME
-    assert placed.exists() and placed.stat().st_size == 0
-    assert "Placed video:" in report.log
-    # It is still not done.
+    # Nothing empty in the library, and nothing claiming there is.
+    assert not (_movie_dir(pipeline) / VIDEO_NAME).exists()
+    assert "Placed video:" not in report.log
+    assert not job.checkpoints[0].get("placed")
     assert isinstance(failure, RuntimeError)
     assert job.state is JobState.FAILED
-    assert "Encoding finished but the output is incomplete" in str(failure)
-    assert f"video is 0 bytes: {placed}" in str(failure)
+    # ...and the reason points at the volume that filled, not at the encoder.
+    assert "produced an empty file" in str(failure)
+    assert "staging disk filling up" in str(failure)
+
+    # Space freed: the retry re-encodes and the job completes.
+    _click_retry(job)
+    tools.encode_fault = None
+    assert await _run(pipeline, job, Report(job)) is None
+    assert job.state is JobState.DONE
+    assert _library_files(pipeline) == [SRT_NAME, VIDEO_NAME]
 
 
 # --- the output share comes back read-only ----------------------------------
@@ -781,9 +792,17 @@ async def test_the_share_dropping_before_the_worker_starts_leaves_the_job_reclai
     saved.state = "ready"
     runner.store.save(saved)
 
-    retry = runner.store.claim_next("encoder-B", CLAIMABLE_STATES)
+    # A genuinely different box takes the retry. It has to be its own runner:
+    # a worker's progress writes are scoped to the claim it holds, so driving
+    # encoder-B's job through encoder-A's runner is a cluster state that cannot
+    # happen and would hide whether the retry was really recorded.
+    second = WorkerRunner(settings, worker_id="encoder-B")
+    second.store = runner.store
+    tools.install(second.pipeline)
+
+    retry = second.store.claim_next("encoder-B", CLAIMABLE_STATES)
     assert retry is not None and retry.id == 334
-    await runner._process(retry)
+    await second._process(retry)
 
     done = {r.id: r for r in runner.store.load_all()}[334]
     assert done.state == "done"

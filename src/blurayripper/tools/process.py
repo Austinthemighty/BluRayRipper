@@ -48,6 +48,20 @@ async def _maybe_await(value) -> None:
         await value
 
 
+async def _kill_and_reap(proc) -> None:
+    """End the child and wait for it, tolerating one that has already exited.
+
+    ProcessLookupError is swallowed because this only ever runs while another
+    exception is in flight; letting a lost race replace it would hide the real
+    reason the run failed.
+    """
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    await proc.wait()
+
+
 def _low_priority_kwargs() -> dict:
     """Spawn kwargs to run a child below normal priority, so CPU-heavy work
     (encodes) yields to ripping and the UI instead of starving them.
@@ -115,7 +129,18 @@ async def run(
     async def _pump_stdout() -> None:
         assert proc.stdout is not None
         while True:
-            raw = await proc.stdout.readline()
+            try:
+                raw = await proc.stdout.readline()
+            except ValueError:
+                # asyncio's StreamReader caps a line at 64 KiB and raises past
+                # it. A tool that emits binary noise with no newline (a crashing
+                # makemkvcon, a driver dumping a buffer) would otherwise take
+                # the whole rip or scan down with one unreadable line. readline
+                # has already dropped the over-long data, so the next call
+                # resumes at the following line; note the loss so a later
+                # failure tail says why a line is missing.
+                stdout_lines.append("[line dropped: longer than 64 KiB]")
+                continue
             if not raw:
                 break
             line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
@@ -134,18 +159,36 @@ async def run(
             stderr_chunks.append(chunk)
 
     async def _drive() -> int:
-        await asyncio.gather(_pump_stdout(), _pump_stderr())
+        pumps = asyncio.gather(_pump_stdout(), _pump_stderr())
+        try:
+            await pumps
+        except BaseException:
+            # gather() propagates the first failure but leaves its siblings
+            # running; without this the stderr pump outlives the call and reads
+            # a pipe nobody will ever look at.
+            pumps.cancel()
+            raise
         return await proc.wait()
 
     try:
-        returncode = await (asyncio.wait_for(_drive(), timeout) if timeout else _drive())
+        # ``timeout is not None``, not ``if timeout``: 0 means "expire at once",
+        # and reading it as "no timeout" would let a caller that meant to cap a
+        # tool run it forever. Callers that use 0 as "disabled" map it to None
+        # themselves (see SubtitleEdit.ocr_to_srt).
+        returncode = await (asyncio.wait_for(_drive(), timeout)
+                            if timeout is not None else _drive())
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+        await _kill_and_reap(proc)
         raise TimeoutError(f"{cmd[0]} exceeded {timeout:.0f}s and was killed")
-    except asyncio.CancelledError:
-        proc.kill()
-        await proc.wait()
+    except BaseException:
+        # Anything else that escapes — in practice the caller's on_line handler,
+        # which writes progress to Postgres and pushes SSE and so raises when
+        # the database is unreachable — used to leave the child RUNNING with
+        # nobody holding a reference. On Windows a dead parent does not reap its
+        # children, so one raising progress callback orphaned a full-speed
+        # HandBrake/makemkvcon and the next job was queued onto a box still
+        # burning its CPU on the last one. Covers CancelledError too.
+        await _kill_and_reap(proc)
         raise
 
     result = ProcessResult(

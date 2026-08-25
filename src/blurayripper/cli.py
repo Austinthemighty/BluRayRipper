@@ -24,11 +24,36 @@ from .config import Settings, ToolNotFoundError, load_settings
 from .models import DiscInfo, EpisodeAssignment, MediaKind
 from .pipeline import Pipeline
 from .scheduler import EncodeScheduler
-from .services.metadata import MetadataError, TMDBClient
+from .services.metadata import TMDBClient
 from .tools import discinfo
 from .tools.makemkv import MakeMKV
 
 console = Console()
+
+
+def _error(message: str) -> None:
+    """Print an error in red WITHOUT re-reading it as rich markup.
+
+    Every ToolNotFoundError ends "set its path under [tools] in
+    config/settings.toml", and the missing-web-extra message names the ".[web]"
+    extra. Interpolated into a markup string, rich reads "[tools]" / "[web]" as
+    style tags and DROPS them -- so the one piece of information the message
+    exists to convey is the piece that never reaches the screen.
+    """
+    console.print(message, style="red", markup=False)
+
+
+def _tmdb_unavailable(exc: Exception) -> None:
+    """Report a failed TMDB lookup and carry on with manual naming.
+
+    Only a MISSING key raises MetadataError; a revoked key (401), a TMDB 5xx, a
+    proxy's HTML error page and a DNS failure all come out as httpx / JSON
+    errors. Those used to escape the whole command and kill an interactive
+    session with a traceback AFTER the disc had been scanned -- losing the
+    scan and the title selection over a lookup the user can do by hand.
+    """
+    console.print(f"TMDB lookup unavailable ({type(exc).__name__}: {exc}). "
+                  "Type the name by hand.", style="yellow", markup=False)
 
 
 class CliCallbacks:
@@ -125,8 +150,8 @@ class CliCallbacks:
         if self.tmdb.configured:
             try:
                 candidates = await self.tmdb.search_movie(query)
-            except MetadataError as exc:
-                console.print(f"[yellow]{exc}[/yellow]")
+            except Exception as exc:
+                _tmdb_unavailable(exc)
                 candidates = []
             if candidates:
                 table = Table("#", "Title", "Year")
@@ -151,8 +176,8 @@ class CliCallbacks:
         if tv_id is not None and self.tmdb.configured:
             try:
                 episodes = await self.tmdb.get_season(tv_id, season)
-            except MetadataError as exc:
-                console.print(f"[yellow]{exc}[/yellow]")
+            except Exception as exc:
+                _tmdb_unavailable(exc)
         if episodes:
             table = Table("Ep", "Title")
             for e in episodes:
@@ -182,8 +207,8 @@ class CliCallbacks:
         if self.tmdb.configured:
             try:
                 candidates = await self.tmdb.search_tv(query)
-            except MetadataError as exc:
-                console.print(f"[yellow]{exc}[/yellow]")
+            except Exception as exc:
+                _tmdb_unavailable(exc)
                 candidates = []
             if candidates:
                 table = Table("#", "Name", "Year")
@@ -567,8 +592,19 @@ async def _cmd_check(args: argparse.Namespace) -> int:
     # UHD / HDR / Dolby Vision encoding path
     enc = settings.encode
     if enc.ffmpeg_uhd:
-        if not settings.tools.ffmpeg:
-            console.print("[red]ffmpeg_uhd is on but ffmpeg not found — UHD titles can't encode.[/red]")
+        # _on_disk, not truthiness, like every neighbouring gate. A CONFIGURED
+        # path proves nothing here: the shared cluster config routinely names
+        # the other box's ffmpeg, so a merely-configured path used to print the
+        # green row and "All checks passed" on a machine where every UHD title
+        # then fails to spawn mid-encode — and uhd_require_ffmpeg means
+        # HandBrake won't take them either, so the disc just parks.
+        if not _on_disk(settings.tools.ffmpeg):
+            where = (f" (configured here as {settings.tools.ffmpeg}, which is "
+                     "not on this machine)" if settings.tools.ffmpeg else "")
+            # _error, not markup: the path is interpolated, and a Windows path
+            # with a bracket in it would otherwise be eaten as a style tag.
+            _error(f"ffmpeg_uhd is on but ffmpeg not found{where} — "
+                   "UHD titles can't encode.")
             ok = False
         else:
             console.print(
@@ -853,11 +889,16 @@ async def _cmd_queue(args: argparse.Namespace) -> int:
         display.stop()
 
     done = [j for j in results if j is not None]
-    console.print(f"[bold green]Queue finished[/bold green] — {len(done)}/{len(prepared)} succeeded.")
+    # Count against the sources ASKED for, not the ones that made it through
+    # setup. Comparing to `prepared` hid a skipped disc entirely: `queue disc:0
+    # disc:1` with nothing in drive 1 exited 0 having ripped one disc of two,
+    # so a nightly batch reported success and nobody went back for the disc.
+    console.print(f"[bold green]Queue finished[/bold green] — "
+                  f"{len(done)}/{len(args.sources)} succeeded.")
     for j in done:
         for r in j.results:
             console.print(f"  {r.video_path}")
-    return 0 if len(done) == len(prepared) else 1
+    return 0 if len(done) == len(args.sources) else 1
 
 
 def _is_update_key(ch: str) -> bool:
@@ -1092,7 +1133,7 @@ async def _cmd_worker(args: argparse.Namespace) -> int:
         return 130
     except ToolNotFoundError as exc:
         keys.stop()
-        console.print(f"[red]{exc}[/red]")
+        _error(str(exc))
         return 2
     keys.stop()
     if runner.restart_requested:  # 'u' key, or a server restart/update signal
@@ -1165,10 +1206,10 @@ async def _cmd_resub(args: argparse.Namespace) -> int:
     try:
         placed = await Pipeline(settings).resubtitle(video, _Console(), source_mkv=source)
     except FileNotFoundError as exc:
-        console.print(f"[red]{exc}[/red]")
+        _error(str(exc))
         return 2
     except ToolNotFoundError as exc:
-        console.print(f"[red]{exc}[/red]")
+        _error(str(exc))
         return 2
     if not placed:
         console.print("[yellow]No subtitle sidecars were produced.[/yellow]")
@@ -1231,7 +1272,7 @@ async def _cmd_secrets(args: argparse.Namespace) -> int:
     try:
         stored = secretbox.fetch(store, passphrase)
     except secretbox.SecretsUnavailable as exc:
-        console.print(f"[red]{exc}[/red]")
+        _error(str(exc))
         return 2
     if not stored:
         console.print("[yellow]No credentials stored in the cluster.[/yellow] "
@@ -1290,7 +1331,7 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     try:
         import uvicorn
     except ImportError:
-        console.print("[red]Web UI needs extra deps. Install with: pip install -e \".[web]\"[/red]")
+        _error('Web UI needs extra deps. Install with: pip install -e ".[web]"')
         return 2
     from .web.app import create_app
 
@@ -1656,7 +1697,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return asyncio.run(args.func(args))
     except ToolNotFoundError as exc:
-        console.print(f"[red]{exc}[/red]")
+        _error(str(exc))
         return 2
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")

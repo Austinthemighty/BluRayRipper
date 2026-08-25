@@ -28,12 +28,19 @@ SHARED_KEY = "settings.global"
 class Field:
     section: str
     key: str
-    type: str  # "bool" | "int" | "str" | "choice" | "list"
+    type: str  # "bool" | "int" | "float" | "str" | "choice" | "list"
     label: str
     default: object
     help: str = ""
     choices: tuple[str, ...] = ()
     env: str | None = None  # secrets.env var that shadows this field, if any
+    # Bounds for numeric fields. A value outside them is rejected at save time
+    # rather than stored: the consumers clamp (EncodeScheduler floors capacity at
+    # 1, the OCR semaphore at 1), so an out-of-range save reported success for a
+    # number that could never be in effect — and a port outside 1-65535 stops
+    # serve binding at all.
+    min: float | None = None
+    max: float | None = None
 
 
 # Editable fields grouped for the UI, mirroring the settings.toml structure.
@@ -63,10 +70,10 @@ SCHEMA: list[tuple[str, list[Field]]] = [
         Field("encode", "tune_grain", "bool", "Tune grain (default)", False, "Default film-grain tuning for encodes (preserves grain, larger files). Overridable per job."),
         Field("encode", "low_priority", "bool", "Low-priority encodes", True, "Run encodes below normal OS priority so live rips and the UI stay responsive."),
         Field("encode", "deinterlace", "choice", "Deinterlace", "auto", "'auto' decombs only SD/DVD-era sources (see max height); 'on' forces it; 'off' never.", choices=("auto", "on", "off")),
-        Field("encode", "deinterlace_max_height", "int", "Deinterlace max height", 576, "With 'auto', deinterlace only sources at/below this height (576 = PAL/NTSC DVD). Taller HD is left alone."),
+        Field("encode", "deinterlace_max_height", "int", "Deinterlace max height", 576, "With 'auto', deinterlace only sources at/below this height (576 = PAL/NTSC DVD). Taller HD is left alone.", min=0),
         Field("encode", "ffmpeg_uhd", "bool", "ffmpeg UHD path", False, "Encode titles >= the min height with ffmpeg+x265 instead of HandBrake, to preserve HDR10 metadata. Needs ffmpeg."),
-        Field("encode", "uhd_min_height", "int", "UHD min height", 2160, "Titles at/above this height take the ffmpeg UHD path (when enabled). 2160 = 4K UHD."),
-        Field("encode", "ffmpeg_crf", "int", "ffmpeg CRF", 18, "x265 quality for the UHD path; lower = better quality and bigger files. ~18 is near-transparent for UHD."),
+        Field("encode", "uhd_min_height", "int", "UHD min height", 2160, "Titles at/above this height take the ffmpeg UHD path (when enabled). 2160 = 4K UHD.", min=0),
+        Field("encode", "ffmpeg_crf", "int", "ffmpeg CRF", 18, "x265 quality for the UHD path; lower = better quality and bigger files. ~18 is near-transparent for UHD.", min=0, max=51),
         Field("encode", "ffmpeg_preset", "choice", "ffmpeg x265 preset", "medium", "Speed/efficiency dial for the UHD path (not quality). Slower = smaller file, same quality, much more time.",
               choices=("ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow")),
         Field("encode", "ffmpeg_audio", "choice", "ffmpeg audio", "copy", "UHD-path audio: 'copy' keeps the originals (needs container = mkv); 'aac' re-encodes.", choices=("copy", "aac")),
@@ -88,50 +95,50 @@ SCHEMA: list[tuple[str, list[Field]]] = [
         Field("subtitles", "balance_lines", "bool", "Balance subtitle lines", True,
               "Even out the two lines after splitting (seconv only)."),
         Field("subtitles", "remove_text_for_hi", "bool", "Strip SDH (hearing-impaired)", False, "Remove hearing-impaired cues (sound effects, [MUSIC], speaker labels) from the SRT."),
-        Field("subtitles", "ocr_concurrency", "int", "OCR concurrency", 4, "How many subtitle tracks OCR at the same time. Higher = faster but more CPU/RAM."),
+        Field("subtitles", "ocr_concurrency", "int", "OCR concurrency", 4, "How many subtitle tracks OCR at the same time. Higher = faster but more CPU/RAM.", min=1, max=64),
         Field("subtitles", "keep_extracted", "bool", "Cache extracted subs", True, "Keep the extracted .sup images so re-OCR (e.g. 'Re-OCR all subtitles') doesn't need a re-rip."),
-        Field("subtitles", "extract_concurrency", "int", "Extract concurrency", 2, "How many titles read the rip + extract subtitle tracks at once."),
-        Field("subtitles", "ocr_timeout_seconds", "int", "OCR timeout (s)", 3600, "Kill a single track's OCR if it runs longer than this — SubtitleEdit can hang on an error dialog and pile up memory."),
+        Field("subtitles", "extract_concurrency", "int", "Extract concurrency", 2, "How many titles read the rip + extract subtitle tracks at once.", min=1, max=64),
+        Field("subtitles", "ocr_timeout_seconds", "int", "OCR timeout (s)", 3600, "Kill a single track's OCR if it runs longer than this — SubtitleEdit can hang on an error dialog and pile up memory.", min=1),
         Field("subtitles", "upload_export_dir", "str", "Subtitle upload export dir", "", "Copy each placed SRT here with an OpenSubtitles upload sheet. Blank = off.", env="BLURAYRIPPER_SUB_UPLOAD_DIR"),
     ]),
     ("Audio", [
         Field("audio", "tracks", "choice", "Audio tracks", "all", "Which audio to keep per language: 'all' keeps commentaries + extras; 'main' keeps only the first track per language.", choices=("all", "main")),
     ]),
     ("Queue", [
-        Field("queue", "encode_capacity", "int", "Encode capacity", 3, "Total concurrent-encode budget. UHD encodes cost 2 units, others 1 — so 3 allows 1 UHD + 1 lighter, or 3 DVDs."),
+        Field("queue", "encode_capacity", "int", "Encode capacity", 3, "Total concurrent-encode budget. UHD encodes cost 2 units, others 1 — so 3 allows 1 UHD + 1 lighter, or 3 DVDs.", min=1, max=64),
     ]),
     ("Cluster", [
         Field("cluster", "use_workers", "bool", "Use workers", False, "Clustered mode: this box rips + preps and enqueues jobs; separate `blurayripper worker` machines do the heavy encodes.", env="BLURAYRIPPER_USE_WORKERS"),
-        Field("cluster", "worker_poll_seconds", "int", "Worker poll (s)", 5, "How often an idle worker checks the shared queue for a job to claim."),
-        Field("cluster", "heartbeat_seconds", "int", "Heartbeat (s)", 15, "How often a busy worker proves it's still alive on its claimed job."),
-        Field("cluster", "stale_after_seconds", "int", "Stale reclaim (s)", 180, "Reclaim a job for another worker if its worker goes silent this long (crash/restart/power-off)."),
-        Field("cluster", "local_encode_max_height", "int", "Local encode max height", 0, "In clustered mode, the rip box encodes a job itself if every title is <= this height (e.g. 1080). 0 = rip box never encodes (workers do all).", env="BLURAYRIPPER_LOCAL_ENCODE_MAX_HEIGHT"),
+        Field("cluster", "worker_poll_seconds", "int", "Worker poll (s)", 5, "How often an idle worker checks the shared queue for a job to claim.", min=0),
+        Field("cluster", "heartbeat_seconds", "int", "Heartbeat (s)", 15, "How often a busy worker proves it's still alive on its claimed job.", min=0),
+        Field("cluster", "stale_after_seconds", "int", "Stale reclaim (s)", 180, "Reclaim a job for another worker if its worker goes silent this long (crash/restart/power-off).", min=0),
+        Field("cluster", "local_encode_max_height", "int", "Local encode max height", 0, "In clustered mode, the rip box encodes a job itself if every title is <= this height (e.g. 1080). 0 = rip box never encodes (workers do all).", env="BLURAYRIPPER_LOCAL_ENCODE_MAX_HEIGHT", min=0),
         Field("cluster", "worker_does_subs", "bool", "Workers do subtitles", False, "Move subtitle extraction + OCR off the rip box onto the workers (so restarting serve never kills that work). Needs Use workers.", env="BLURAYRIPPER_WORKER_DOES_SUBS"),
-        Field("cluster", "offline_alert_seconds", "int", "Offline alert (s)", 300, "Push a notification when a box that was online stops reporting for this long. The rip box watches the workers; each worker watches the rip box (an offline server can't report itself). 0 = off. Needs a shared database and a Notify URL."),
-        Field("cluster", "worker_restart_after_days", "float", "Worker restart after (days)", 0, "Restart a worker once it has been up this long, for hygiene. It drains first — the restart happens between jobs, never mid-encode — so it can take longer if a job is running. 0 = off."),
+        Field("cluster", "offline_alert_seconds", "int", "Offline alert (s)", 300, "Push a notification when a box that was online stops reporting for this long. The rip box watches the workers; each worker watches the rip box (an offline server can't report itself). 0 = off. Needs a shared database and a Notify URL.", min=0),
+        Field("cluster", "worker_restart_after_days", "float", "Worker restart after (days)", 0, "Restart a worker once it has been up this long, for hygiene. It drains first — the restart happens between jobs, never mid-encode — so it can take longer if a job is running. 0 = off.", min=0),
         Field("cluster", "worker_auto_update", "bool", "Workers auto-update", False, "When the rip box reports a NEWER version than a worker, that worker drains, git pulls, and restarts by itself. Update serve and the workers follow. Needs a shared database.", env="BLURAYRIPPER_WORKER_AUTO_UPDATE"),
     ]),
     ("Disc", [
         Field("disc", "auto_eject", "bool", "Auto-eject after rip", True, "Eject the disc automatically once its last title finishes ripping, so you know it's safe to swap."),
         Field("disc", "auto_open", "bool", "Auto-scan on insert", True, "Start scanning a disc automatically when it's inserted into a drive."),
         Field("disc", "auto_rip", "bool", "Auto-rip clear discs", False, "Fully hands-off: after an auto-scan, if the disc is a single-movie disc with exactly one exact-name TMDB match, confirm + rip it automatically. Anything ambiguous (e.g. two 'Dumbo' movies) or multi-title still stops for you. Needs Auto-scan on insert + a TMDB key."),
-        Field("disc", "poll_seconds", "int", "Drive poll (s)", 15, "How often to re-check the optical drives for inserted/removed discs."),
+        Field("disc", "poll_seconds", "int", "Drive poll (s)", 15, "How often to re-check the optical drives for inserted/removed discs.", min=1),
         Field("disc", "extract_cover_art", "bool", "Extract disc cover art", True, "Pull the disc's own cover art while it's in the drive (the real TMDB poster overrides it later if available)."),
         Field("disc", "rip_duration_tolerance_pct", "int", "Rip duration tolerance (%)", 3,
               "Re-rip if the output runs shorter than the disc title by more than this "
-              "(catches truncated rips from disc read errors). 0 = off."),
+              "(catches truncated rips from disc read errors). 0 = off.", min=0, max=100),
     ]),
     ("Serve", [
         Field("serve", "cleanup_stale_tools", "bool", "Clean up stale tools at startup", True, "Kill leftover MakeMKV/HandBrake/OCR processes orphaned by a prior crash before starting, so they don't exhaust memory."),
-        Field("serve", "prep_concurrency", "int", "Prep concurrency", 2, "How many jobs rip + extract subs + resolve grain at once (bounds a recovery stampede after a restart)."),
-        Field("serve", "auto_retry_max", "int", "Auto-retry max", 2, "How many times a failed job auto-retries (with backoff) before it stops and waits for you. 0 = never auto-retry."),
+        Field("serve", "prep_concurrency", "int", "Prep concurrency", 2, "How many jobs rip + extract subs + resolve grain at once (bounds a recovery stampede after a restart).", min=1, max=64),
+        Field("serve", "auto_retry_max", "int", "Auto-retry max", 2, "How many times a failed job auto-retries (with backoff) before it stops and waits for you. 0 = never auto-retry.", min=0),
     ]),
     ("Notifications", [
         Field("serve", "notify_url", "str", "ntfy URL", "", "Where alerts are pushed: https://ntfy.sh/your-topic, or your own server, e.g. https://ntfy.example.com/blurayripper. Any endpoint taking a plain-text POST works. Blank = notifications off. Save, then use Send test to confirm it arrives.", env="BLURAYRIPPER_NOTIFY_URL"),
         Field("serve", "notify_priority", "choice", "Priority", "default", "ntfy priority. 'high' or 'urgent' break through a phone's silent mode; 'low'/'min' arrive without a sound. Alerts only fire when a job needs you, fails, or a box goes offline.", choices=("min", "low", "default", "high", "urgent"), env="BLURAYRIPPER_NOTIFY_PRIORITY"),
     ]),
     ("Scan", [
-        Field("scan", "min_length_seconds", "int", "Min title length (s)", 120, "Ignore disc titles shorter than this — drops menus, trailers, and studio logos."),
+        Field("scan", "min_length_seconds", "int", "Min title length (s)", 120, "Ignore disc titles shorter than this — drops menus, trailers, and studio logos.", min=0),
     ]),
     ("Metadata", [
         Field("metadata", "language", "str", "Metadata language", "en-US", "Language for TMDB title/metadata lookups (e.g. en-US, de-DE)."),
@@ -141,7 +148,7 @@ SCHEMA: list[tuple[str, list[Field]]] = [
     ]),
     ("Web", [
         Field("web", "host", "str", "Bind host", "127.0.0.1", "Address the web UI binds to. 127.0.0.1 = this machine only; 0.0.0.0 = reachable on the LAN (there's no login!)."),
-        Field("web", "port", "int", "Port", 8723, "TCP port the web UI listens on."),
+        Field("web", "port", "int", "Port", 8723, "TCP port the web UI listens on.", min=1, max=65535),
     ]),
 ]
 
@@ -188,7 +195,11 @@ def read_overlay(cfg_dir: Path) -> dict:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             return data if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, OSError):
+        # UnicodeDecodeError too: a half-written overlay (a box losing power
+        # mid-save) is bytes that aren't UTF-8, and it is neither an OSError nor
+        # a JSONDecodeError — the one corruption this guard existed for was the
+        # one that still took the settings page down.
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             return {}
     return {}
 
@@ -243,7 +254,7 @@ def _configured(cfg_dir: Path) -> dict:
         try:
             with toml_file.open("rb") as fh:
                 data = tomllib.load(fh)
-        except (OSError, tomllib.TOMLDecodeError):
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
             data = {}
     for section, values in read_overlay(cfg_dir).items():
         if isinstance(values, dict):
@@ -251,25 +262,65 @@ def _configured(cfg_dir: Path) -> dict:
     return data
 
 
+def _in_range(f: Field, value):
+    """Reject a number outside the field's bounds, naming them."""
+    if f.min is not None and value < f.min:
+        raise ValueError(f"{f.section}.{f.key} must be at least {_num(f.min)}")
+    if f.max is not None and value > f.max:
+        raise ValueError(f"{f.section}.{f.key} must be at most {_num(f.max)}")
+    return value
+
+
+def _num(n):
+    return int(n) if float(n) == int(n) else n
+
+
 def _coerce(f: Field, raw: object):
-    """Validate/convert a raw form value to the field's type. Raises ValueError."""
+    """Validate/convert a raw form value to the field's type. Raises ValueError.
+
+    The save endpoint takes arbitrary JSON from the browser, so ``raw`` can be
+    any JSON type — not just the string an HTML form posts. Anything that isn't
+    a scalar is rejected rather than str()'d: languages.keep = null used to
+    become ['None'], which matches no track, so every audio and subtitle stream
+    was dropped from an encode that still reported success.
+    """
+    if isinstance(raw, (list, tuple, dict)) and f.type != "list":
+        raise ValueError(f"{f.section}.{f.key} must be a single value, not a list or object")
     if f.type == "bool":
         if isinstance(raw, bool):
             return raw
         return str(raw).strip().lower() in ("1", "true", "yes", "on")
     if f.type == "int":
         try:
-            return int(str(raw).strip())
+            value = int(str(raw).strip())
         except (TypeError, ValueError):
             raise ValueError(f"{f.section}.{f.key} must be a whole number")
+        return _in_range(f, value)
+    if f.type == "float":
+        # Its own branch: without one this fell through to the string case and
+        # stored whatever was typed, so a typo in a "days" box was only found by
+        # config.load_settings' float() at startup — i.e. serve refused to boot.
+        try:
+            value = float(str(raw).strip())
+        except (TypeError, ValueError):
+            raise ValueError(f"{f.section}.{f.key} must be a number")
+        return _in_range(f, value)
     if f.type == "list":
-        if isinstance(raw, list):
+        if raw is None:
+            return []       # JSON null means "nothing", not the text "None"
+        if isinstance(raw, dict):
+            raise ValueError(f"{f.section}.{f.key} must be a list or a comma-separated string")
+        if isinstance(raw, (list, tuple)):
             items = [str(x).strip() for x in raw]
         else:
             items = [p.strip() for p in str(raw).split(",")]
         return [x for x in items if x]
     value = "" if raw is None else str(raw).strip()
-    if f.type == "choice" and value and value not in f.choices:
+    if f.type == "choice" and value not in f.choices:
+        # Blank included: none of these fields has a blank option, and a blank
+        # was PERSISTED — after which load_settings' .get(key, default) finds the
+        # key present and returns "". encode.container="" placed a file with no
+        # extension that Plex cannot index, from a job that reported success.
         raise ValueError(f"{f.section}.{f.key} must be one of {', '.join(f.choices)}")
     return value
 

@@ -52,7 +52,17 @@ def rename_movie(old_video: Path, new_video: Path) -> None:
     old_stem, new_stem = old_video.stem, new_video.stem
     new_dir.mkdir(parents=True, exist_ok=True)
     # Video + sidecars share the stem: "Old (Year).mkv", "Old (Year).en.srt", ".nfo".
-    for f in sorted(old_dir.glob(old_stem + "*")):
+    # Matched by a plain prefix test, NOT a glob: the stem is a movie title, and
+    # glob reads "[", "]", "?" and "*" as wildcards. "Movie [Extended] (2020)"
+    # became a character class that matches nothing, so the video and every
+    # sidecar stayed behind while the fixed-name artwork below moved — the film
+    # ended up split across two folders and the rename reported success.
+    #
+    # The is_dir() guard keeps glob's old answer for a folder that isn't there:
+    # iterdir() would raise, and re-running a rename that already happened has to
+    # stay a no-op.
+    old_entries = sorted(old_dir.iterdir()) if old_dir.is_dir() else []
+    for f in [p for p in old_entries if p.name.startswith(old_stem)]:
         dest = new_dir / (new_stem + f.name[len(old_stem):])
         place(f, dest)
     # Folder artwork keeps its fixed name; just move it into the new folder.

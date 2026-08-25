@@ -138,8 +138,11 @@ def parse_drives(lines: list[str]) -> list[Drive]:
         fields = _split_robot_line(payload)
         if len(fields) < 6 or not fields[4]:  # require a non-empty drive name
             continue
+        index = _to_id(fields[0])
+        if index is None:
+            continue  # junk index: it would take over (and rename) drive 0
         drive = Drive(
-            index=_to_int(fields[0]),
+            index=index,
             name=fields[4],
             device=fields[6] if len(fields) >= 7 and fields[6] else None,
             disc_name=fields[5] or None,
@@ -174,6 +177,12 @@ def _split_robot_line(payload: str) -> list[str]:
     try:
         return next(reader)
     except StopIteration:
+        return []
+    except csv.Error:
+        # csv refuses a single field longer than 131072 chars. A crashing
+        # makemkvcon that dumps a buffer with no newline hits that, and the
+        # error would escape the stdout pump and lose the whole scan or rip
+        # over one unparseable line.
         return []
 
 
@@ -225,23 +234,27 @@ def parse_info(lines: list[str], source: str) -> DiscInfo:
                 disc.volume_label = value
 
         elif prefix == "DRV" and len(fields) >= 6:
-            drv_index = _to_int(fields[0])
+            drv_index = _to_id(fields[0])
             disc_name = fields[5]
             if disc_name and not disc.disc_name:
                 disc.disc_name = disc_name
-            if len(fields) >= 7 and fields[6]:
+            if drv_index is not None and len(fields) >= 7 and fields[6]:
                 drv_devices[drv_index] = fields[6]
 
         elif prefix == "TINFO" and len(fields) >= 4:
-            title_id = _to_int(fields[0])
+            title_id = _to_id(fields[0])
+            if title_id is None:
+                continue  # junk id: it would be filed under (and overwrite) title 0
             attr_id = _to_int(fields[1])
             value = fields[3]
             title = titles.setdefault(title_id, Title(title_id=title_id))
             _apply_title_attr(title, attr_id, value)
 
         elif prefix == "SINFO" and len(fields) >= 5:
-            title_id = _to_int(fields[0])
-            stream_id = _to_int(fields[1])
+            title_id = _to_id(fields[0])
+            stream_id = _to_id(fields[1])
+            if title_id is None or stream_id is None:
+                continue
             attr_id = _to_int(fields[2])
             value = fields[4]
             stream = streams.setdefault(
@@ -297,6 +310,23 @@ def _to_int(value: str) -> int:
         return int(value.strip())
     except (ValueError, AttributeError):
         return 0
+
+
+def _to_id(value: str) -> int | None:
+    """A robot line's IDENTITY field (title id, stream id, drive index), or None.
+
+    Deliberately not _to_int. Answering 0 for junk is harmless for a VALUE, but
+    for an id it silently files a garbage line under entry 0: a truncated or
+    interleaved 'TINFO:junk,9,0,"0:00:07"' overwrote the main feature's duration
+    (a 1:47:12 title became 7 seconds and dropped under the min-length cut), and
+    a junk DRV line renamed drive 0 or pointed auto-eject at the wrong device.
+    Everywhere else a junk field degrades to "unknown"; here it degraded to
+    "the main feature".
+    """
+    try:
+        return int(value.strip())
+    except (ValueError, AttributeError):
+        return None
 
 
 class MakeMKV:

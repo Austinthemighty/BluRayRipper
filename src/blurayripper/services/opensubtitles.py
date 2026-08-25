@@ -167,9 +167,15 @@ class OpenSubtitlesClient:
         A cached SRT is returned without touching the network, so it costs no
         download quota."""
         if not self._api_key:
+            # fatal: a missing key fails EVERY episode identically, which is this
+            # flag's definition. Without it gather_references skipped its early
+            # break and re-raised once per candidate episode, then reported the
+            # whole run as a non-fatal (i.e. retryable) failure. user_info()
+            # already marks the same condition fatal.
             raise OpenSubtitlesError(
                 "OpenSubtitles API key not configured. Set OPENSUBTITLES_API_KEY in "
-                "config/secrets.env."
+                "config/secrets.env.",
+                fatal=True,
             )
         # OpenSubtitles uses ISO 639-1 (en, pl) for both the search filter and the
         # response's language field; our config uses 639-2/B (eng, pol). Passing
@@ -231,12 +237,23 @@ class OpenSubtitlesClient:
     def _remember_quota(self, body: dict, *, exhausted: bool = False) -> None:
         """Record the download-quota fields OpenSubtitles returns on /download, so
         the UI can show them without needing /login (which some API keys can't)."""
-        self._last_quota = {
-            "remaining": 0 if exhausted else body.get("remaining"),
-            "requests": body.get("requests"),
-            "reset_time": body.get("reset_time"),
-            "reset_time_utc": body.get("reset_time_utc"),
-        }
+        # MERGE onto the last snapshot instead of rebuilding it. Not every reply
+        # carries every field, and rebuilding meant one link-less or partial
+        # /download reply wiped a good snapshot to all-None — the quota panel then
+        # showed "remaining: null" from source 'last-download' instead of the last
+        # real figure. A field is only overwritten when the reply actually states
+        # it (0 is a statement; absent is not).
+        snap = dict(self._last_quota or {
+            "remaining": None, "requests": None,
+            "reset_time": None, "reset_time_utc": None,
+        })
+        for key in ("remaining", "requests", "reset_time", "reset_time_utc"):
+            value = body.get(key)
+            if value is not None:
+                snap[key] = value
+        if exhausted:
+            snap["remaining"] = 0
+        self._last_quota = snap
 
     def last_known_quota(self) -> dict | None:
         """The most recent quota snapshot captured from a /download response, or

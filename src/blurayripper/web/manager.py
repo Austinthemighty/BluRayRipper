@@ -409,7 +409,12 @@ class JobManager:
             # forever, showing "ready" while progressing never. Only serve can rip,
             # so serve takes it back. With the disc absent it now fails fast with a
             # reason instead of looping.
-            needs_rip = (wj.state is JobState.READY
+            #
+            # An interrupted FAILED job with no rip belongs here too. Reclaiming it
+            # as READY (the branch below) MANUFACTURED that same orphan: nothing had
+            # been ripped, so a worker claimed it, refused it and released it, and it
+            # sat showing "ready" until the NEXT restart finally caught it as one.
+            needs_rip = ((wj.state is JobState.READY or interrupted_fail)
                          and (wj.source or "").startswith(("disc:", "dev:"))
                          and self._rip_pending(wj))
             if clustered and needs_rip:
@@ -424,10 +429,9 @@ class JobManager:
                     wj._pipeline_job.state = JobState.FAILED
                 wj.error = ("Rip never completed — no ripped file for this job.")
                 wj.log.append(stamp_log(
-                    "Needs review: this job was queued as ready but its rip never "
-                    "finished, so no worker can encode it. Put the disc in a drive "
-                    "and click “Rip this disc”, or Remove it. Nothing has been read "
-                    "or re-ripped."))
+                    "Needs review: this job's rip never finished, so there is nothing "
+                    "for a worker to encode. Put the disc in a drive and click “Rip "
+                    "this disc”, or Remove it. Nothing has been read or re-ripped."))
                 self._persist(wj)
             elif clustered:
                 if (wj.state in prep_states
@@ -643,7 +647,16 @@ class JobManager:
             try:
                 # Prove this box is alive in the same table, so the workers can
                 # tell when the rip box drops — it can't report that itself.
+                # Its OWN try block: this is a WRITE, and sharing one with the read
+                # below reported a failed heartbeat as "list_workers failed", so a
+                # write-only outage (a read replica still answering, a permissions
+                # or disk-full error on the workers table) blamed the wrong call —
+                # on the very line that exists to explain the failure.
                 await asyncio.to_thread(self._record_serve_presence)
+            except Exception as exc:
+                tick_ok = False
+                self._log_store_error("record_worker", exc)
+            try:
                 self._workers_cache = await asyncio.to_thread(self.store.list_workers)
                 self._check_worker_presence()
             except Exception as exc:
@@ -933,8 +946,22 @@ class JobManager:
         — a wrong auto-rip costs a whole disc. Returns True if it took over."""
         if job.disc is None:
             return False
-        rows = boxset_plan.load_rows(self.settings)
         label = (job.disc.volume_label or job.disc.disc_name or "").strip()
+        try:
+            rows = boxset_plan.load_rows(self.settings)
+        except Exception as exc:
+            # parse_csv promises never to raise, but it does: one unbalanced quote
+            # makes csv swallow the rest of the file into a single field and blow
+            # the 128 KiB field limit, and a plan saved as Windows-1252 raises
+            # UnicodeDecodeError. This runs on EVERY scanned disc, so a stray quote
+            # in the plan otherwise fails every disc you insert with a csv error.
+            # A plan we cannot read means "no plan": name this one manually.
+            reporter.on_event(
+                f"Box-set plan: couldn't read {boxset_plan.plan_path(self.settings)} "
+                f"({type(exc).__name__}: {exc}) — naming this one manually. Fix the "
+                "CSV (a stray double-quote or a non-UTF-8 save is the usual cause) "
+                "to get hands-off ripping back.")
+            return False
         if not rows:
             # Say so rather than silently falling through: "the CSV isn't working"
             # is otherwise indistinguishable from "no row matched this disc".
@@ -950,6 +977,15 @@ class JobManager:
                 f"label “{label}” — naming this one manually. "
                 "(Check the disc_label column; a trailing * covers a whole set.)")
             return False
+        if row.year is not None and row.year <= 0:
+            # A "0" in the year cell parses as the integer 0, which is falsy but not
+            # None — so it silently skipped the year-matched TMDB lookup, reported
+            # "No “Show” from 0 on TMDB" without ever having searched, and suppressed
+            # the no-year warning below (which tests `is None`). Treat it as absent.
+            reporter.on_event(
+                f"Box-set plan: ignoring the year “{row.year}” for “{row.show}” — "
+                "that isn't a year. Treating the row as having none.")
+            row = replace(row, year=None)
         result = boxset_plan.assignments_for(row, job.disc)
         if not result.ok:
             reporter.on_event(
@@ -1131,9 +1167,18 @@ class JobManager:
         raw = source[4:].strip() if explicit_file else source
         if not explicit_file and source.startswith(SOURCE_SELECTORS):
             return [self.add_disc(source).id]
+        if not raw:
+            # Path("") is Path("."), which IS a directory — so a blank source used
+            # to glob the SERVE PROCESS'S working directory and queue a job for
+            # every .mkv it happened to contain. Refuse it like any other source
+            # that doesn't resolve.
+            raise ValueError(
+                "No source given — enter a drive (disc:0), a path to an .mkv, or a "
+                "folder of .mkv files.")
 
         path = Path(raw)
-        if path.is_dir():
+        kind = self._path_kind(path)
+        if kind == "dir":
             mkvs = sorted(path.glob("*.mkv"))
             if mkvs:
                 # One show's episodes (MakeMKV's <base>_tNN.mkv) become ONE job with
@@ -1147,7 +1192,7 @@ class JobManager:
             if not explicit_file and ((path / "BDMV").is_dir() or (path / "VIDEO_TS").is_dir()):
                 return [self.add_disc(f"file:{path}").id]  # a ripped disc folder
             raise ValueError(f"No .mkv files found in {path}")
-        if path.is_file():
+        if kind == "file":
             if path.suffix.lower() == ".mkv":
                 return [self._add_mkv(path).id]
             if not explicit_file and path.suffix.lower() == ".iso":
@@ -1155,10 +1200,35 @@ class JobManager:
             raise ValueError(
                 f"{path.name} isn't a .mkv. Only .mkv files can be added directly; "
                 f"for a disc image use iso:{path}.")
+        longest = max((len(part) for part in path.parts), default=0)
+        if longest > 255:
+            raise ValueError(
+                f"That path has a {longest}-character name in it, which is longer "
+                "than any common filesystem allows (255). Nothing can exist at "
+                "it — check for a pasted line-wrap or a missing separator.")
         raise ValueError(
             f"Nothing at {path}. Check the path — and note the server only sees "
             f"drives IT has mounted, so a mapped drive letter (Z:) from your own "
             f"session usually isn't visible to it. Use the UNC path instead.")
+
+    @staticmethod
+    def _path_kind(path: Path) -> str | None:
+        """``'dir'``, ``'file'``, or None for anything the OS can't resolve.
+
+        pathlib only swallows ENOENT/ENOTDIR/EBADF/ELOOP and re-raises the rest,
+        so a source with a component past the OS name limit (~255 chars) threw
+        OSError straight out of add_source — a 500 from POST /api/jobs instead of
+        the 400 the endpoint promises for a source it can't resolve. Any errno
+        here means the same thing to the caller: there is nothing usable there.
+        """
+        try:
+            if path.is_dir():
+                return "dir"
+            if path.is_file():
+                return "file"
+        except OSError:
+            return None
+        return None
 
     def add_disc(self, source: str) -> WebJob:
         wj = WebJob(id=next(self._ids), source=source)
@@ -2031,26 +2101,46 @@ class JobManager:
                 new_device = drv.device if drv else None
             except ValueError:
                 pass
+        elif new_source.startswith("dev:"):
+            # A dev: selector IS the OS device — the same reading makemkv.scan does.
+            new_device = new_source.split(":", 1)[1].strip() or None
+        # Whatever we worked out, the OLD device must go: it names the drive this
+        # job just moved OFF. Keeping it (which is what `if new_device:` did when
+        # the cache was cold — right after a restart, or a drive makemkvcon hasn't
+        # enumerated yet) pointed auto-eject and cover-art at a drive now holding
+        # someone else's disc. None just means "re-resolve it", which the eject
+        # path already does from the source selector.
         job = wj._pipeline_job
         if job is not None:
             job.source = new_source
             if getattr(job, "disc", None) is not None:
                 job.disc.source = new_source
-                if new_device:
-                    job.disc.drive_device = new_device
+                job.disc.drive_device = new_device
         if wj.disc is not None:  # same object as job.disc when both exist; be safe
             wj.disc.source = new_source
-            if new_device:
-                wj.disc.drive_device = new_device
+            wj.disc.drive_device = new_device
         wj.log.append(stamp_log(f"Rip source changed to {new_source} — click Retry to rip from it."))
+        if not new_device and new_source.startswith("disc:"):
+            wj.log.append(stamp_log(
+                f"(No OS device known for {new_source} yet — it is resolved when the "
+                "rip starts. The previous drive's device was dropped, so nothing can "
+                "eject the disc that is in the OLD drive now.)"))
         self._persist(wj)
         self.bus.publish()
 
     def _rip_pending(self, wj: WebJob) -> bool:
         """True if this disc job still has a selected title left to rip — i.e. the
         disc is still needed. False once every selected title has a ripped-file
-        checkpoint (an encode/subtitle/place failure no longer needs the disc)."""
-        if not (wj.source or "").startswith("disc:"):
+        checkpoint (an encode/subtitle/place failure no longer needs the disc).
+
+        ``dev:`` counts as a disc source. It was excluded here while the three
+        callers (recover's review gate, retry_rips, needs_review) all tested for
+        ``disc:`` OR ``dev:``, so the dev: half of every one of them was dead: a
+        dev:-sourced job whose rip never finished was never parked for review,
+        never flagged, and re-inserting its disc created a duplicate job because
+        _jobs_awaiting_this_disc couldn't match it either.
+        """
+        if not (wj.source or "").startswith(("disc:", "dev:")):
             return False
         job = wj._pipeline_job
         selected = wj.selected_title_ids or (getattr(job, "selected_title_ids", []) if job else [])
@@ -2256,6 +2346,17 @@ class JobManager:
             return f"{title} ({first.year})" if first.year else title
         seasons = sorted({a.season for a in assigns if a.season is not None})
         episodes = sorted({a.episode for a in assigns if a.episode is not None})
+        if len(seasons) > 1:
+            # A disc that spans a season boundary (S01E22 + S02E01 + S02E02) must
+            # not have its two spans read independently: "S01–S02E01–E22" says
+            # episodes 1–22 of BOTH seasons, when what is on the disc is the end of
+            # one season and the start of the next — the opposite of the shelf hint
+            # this name exists to give. Qualify each end of the span with its season.
+            pairs = sorted((a.season, a.episode) for a in assigns
+                           if a.season is not None and a.episode is not None)
+            if pairs:
+                (s0, e0), (s1, e1) = pairs[0], pairs[-1]
+                return f"{title} S{s0:02d}E{e0:02d}–S{s1:02d}E{e1:02d}"
         parts = []
         if len(seasons) == 1:
             parts.append(f"S{seasons[0]:02d}")
@@ -2320,8 +2421,14 @@ class JobManager:
         """Season + disc-in-set read off the disc label, e.g.
         ``HAWAII_FIVE_0_S1_D4`` -> season 1, disc 4. Both are hints for the mapping
         form to pre-fill — the user still confirms, so a mislabeled disc can't
-        silently rip as the wrong episodes."""
-        label = (wj.disc.disc_name if wj.disc else None) or ""
+        silently rip as the wrong episodes.
+
+        Reads the volume label first, then the disc name — the same key the
+        box-set plan matches on. Reading only disc_name meant that on a disc where
+        MakeMKV reports a friendly name ("Hawaii Five-O") alongside the ISO label
+        ("HAWAII_FIVE_0_S1_D4"), the form came up blank on exactly the fallback
+        path where retyping the season for every disc hurts most."""
+        label = ((wj.disc.volume_label or wj.disc.disc_name) if wj.disc else None) or ""
         if not label:
             return {"label_season": None, "label_disc": None}
         _title, _year, season = naming.clean_tmdb_query(label, "tv")

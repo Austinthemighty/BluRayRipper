@@ -1106,8 +1106,14 @@ def test_saving_global_settings_writes_the_overlay_and_needs_a_restart(client, t
 
 def test_saving_a_worker_scope_applies_on_its_next_job(client, manager):
     """A worker picks up its override when it claims work — telling the user to
-    restart the server would be wrong (and pointless)."""
+    restart the server would be wrong (and pointless).
+
+    The box has to be one the cluster has actually seen: a scope naming a worker
+    that never checked in is refused now (tests/test_fix_web_cli.py), so this
+    registers it first rather than relying on any string being accepted."""
     manager.store = DurableMem()
+    manager.store.list_workers = lambda: [
+        WorkerInfo("SteamMachine", "v1", None, "idle", 1.0)]
     r = client.post("/api/settings", params={"scope": "SteamMachine"},
                     json={"encode": {"ffmpeg_preset": "veryslow"}})
     assert r.json() == {"ok": True, "scope": "SteamMachine", "restart_required": False,

@@ -218,6 +218,17 @@ class HandBrake:
             on_line=handle,
             low_priority=self._settings.encode.low_priority,
         )
+        if not dst.exists() or dst.stat().st_size == 0:
+            # HandBrake can exit 0 having written nothing (a preset whose audio
+            # or subtitle selection conflicts, a source it opened but could not
+            # read). Without this the caller moves the empty file into the Plex
+            # library and checkpoints the title as placed, so the job finishes
+            # green with no video and every later retry skips it. Raising here
+            # keeps the rip and lets the encode be re-run.
+            raise RuntimeError(
+                f"HandBrake reported success but produced no usable file at "
+                f"{dst}. The rip is kept, so Retry re-runs only the encode."
+            )
         return dst
 
     async def encode_clip(

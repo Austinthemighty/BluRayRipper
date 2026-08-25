@@ -340,13 +340,14 @@ def test_windows_eject_of_a_device_path_skips_the_letter_only_shell_verb(monkeyp
 
 
 def test_windows_eject_without_any_device_reports_instead_of_no_opping(monkeypatch):
-    """No device hint means no method can run. Returning quietly would look
-    like a successful eject and the user would wait for a tray that never
-    moved."""
-    calls = _stub_eject_methods(monkeypatch)
-    with pytest.raises(OSError, match="no eject method available"):
+    """No device hint leaves only MCI, whose default-CDAudio form needs no drive
+    name — so it is attempted rather than skipped. When it fails, the failure
+    still has to be reported: returning quietly would look like a successful
+    eject and the user would wait for a tray that never moved."""
+    calls = _stub_eject_methods(monkeypatch, fail=("mci",))
+    with pytest.raises(OSError, match="mci: mci said no"):
         ej._eject_windows(None)
-    assert calls == []
+    assert calls == [("mci", "")]
 
 
 def test_windows_forced_method_runs_only_that_method(monkeypatch):

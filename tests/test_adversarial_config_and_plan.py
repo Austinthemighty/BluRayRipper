@@ -457,17 +457,19 @@ def test_a_url_typed_into_a_folder_box_is_not_treated_as_a_remote_location(tmp_p
 
 def test_a_negative_encode_budget_cannot_leave_the_queue_unable_to_start_anything(
         tmp_path):
-    """The settings page accepts a negative whole number (reported). What must
-    hold anyway is the consumer's floor: a capacity of -4 that reached the
-    scheduler unclamped would block every encode forever while the queue looked
-    perfectly healthy."""
+    """A capacity of -4 that reached the scheduler unclamped would block every
+    encode forever while the queue looked perfectly healthy. Two independent
+    guards: the settings page refuses to store it (it used to report a
+    successful save of a number the scheduler would silently floor at 1), and
+    the consumer's floor still holds for a value from any other source."""
     _toml(tmp_path)
 
-    ss.save_overlay(tmp_path, {"queue": {"encode_capacity": "-4"}})
-    capacity = load_settings(tmp_path).queue.encode_capacity
+    with pytest.raises(ValueError, match="at least 1"):
+        ss.save_overlay(tmp_path, {"queue": {"encode_capacity": "-4"}})
+    assert ss.read_overlay(tmp_path) == {}                       # nothing stored
+    assert load_settings(tmp_path).queue.encode_capacity >= 1    # still usable
 
-    assert capacity == -4
-    assert EncodeScheduler(capacity).capacity == 1
+    assert EncodeScheduler(-4).capacity == 1
 
 
 # --- secretbox: blobs that arrive damaged ---------------------------------

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import csv
 import json
 from pathlib import Path
 
@@ -246,6 +247,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ids = manager.add_source(body.source)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        except OSError as exc:
+            # add_source promises ValueError for a source it can't resolve, but
+            # some paths never get that far: pathlib re-raises ENAMETOOLONG (a
+            # pasted path with one component past ~255 chars) straight out of
+            # is_dir(). Without this the "add a folder" box answers 500 and the
+            # UI shows nothing the operator can act on.
+            raise HTTPException(
+                status_code=400,
+                detail=f"Couldn't read that source: {exc.strerror or exc}")
         return {"ids": ids}
 
     @contextlib.contextmanager
@@ -343,9 +353,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/jobs/{job_id}/rename")
     async def rename_job(job_id: int, body: dict = Body(...)):
         year = body.get("year")
+        # int() on a JSON list/object raises TypeError, which _job_errors does
+        # not map -- so a hand-edited fetch() came back 500 instead of the 400
+        # the UI can render. ("abc" was always a 400: that is a ValueError.)
+        if year in (None, ""):
+            year = None
+        else:
+            try:
+                year = int(year)
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Year must be a number (got {type(year).__name__}).")
         with _job_errors():
-            manager.rename_job(job_id, body.get("title", ""),
-                               int(year) if year not in (None, "") else None)
+            manager.rename_job(job_id, body.get("title", ""), year)
         return {"ok": True}
 
     @app.get("/api/jobs/{job_id}/aacs-dump")
@@ -550,11 +571,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 pass  # the local save still succeeded
         return {"ok": True, "restart_required": True, "shared": shared}
 
+    def _parse_plan(text: str):
+        """parse_csv, but honouring its "never raises" contract.
+
+        The csv module does raise: one unmatched double quote swallows every
+        following line into a single field, and past 128 KB that is a csv.Error.
+        Letting it out 500s the box-set editor, which is the only place the bad
+        quote can be FIXED -- so report it as a parse error like any other bad
+        line and still hand the raw text back.
+        """
+        from .. import boxset_plan
+        try:
+            return boxset_plan.parse_csv(text)
+        except csv.Error as exc:
+            return [], [f"Couldn't read the plan ({exc}). Look for an unmatched "
+                        'double quote (") — everything after it is read as one '
+                        "field."]
+
     @app.get("/api/boxsets")
     async def get_boxsets():
         from .. import boxset_plan
         text = boxset_plan.load_plan(settings)
-        rows, errors = boxset_plan.parse_csv(text)
+        rows, errors = _parse_plan(text)
         return {"csv": text, "rows": [r.as_dict() for r in rows], "errors": errors,
                 "columns": list(boxset_plan.COLUMNS), "example": boxset_plan.EXAMPLE_CSV,
                 "path": str(boxset_plan.plan_path(settings))}
@@ -567,7 +605,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         text = body.get("csv", "")
         if not isinstance(text, str):
             raise HTTPException(status_code=400, detail="csv must be text.")
-        rows, errors = boxset_plan.parse_csv(text)
+        rows, errors = _parse_plan(text)
         dry_run = bool(body.get("dry_run"))
         if not dry_run:
             try:
@@ -604,14 +642,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/settings")
     async def post_settings(updates: dict = Body(...), scope: str = "global"):
+        # `bool(scope) and ...` is what settings_store uses to route the save.
+        # Without the truthiness half, `?scope=` (what the UI sends before its
+        # worker dropdown has loaded) edited the SERVER's overlay while the
+        # reply said "per-worker, applies next job" — so the operator waited for
+        # a change that needed a restart.
+        is_worker = bool(scope) and scope not in ("global", "server")
+        if is_worker and getattr(manager.store, "durable", False):
+            # A typo'd worker id would otherwise create a worker_settings row
+            # that no worker ever reads, and the Settings page lists every row
+            # forever — so the phantom name outlives the typo. request_worker_
+            # action already refuses an unknown target for the same reason.
+            known, checked = set(), True
+            try:
+                known |= {w.worker_id for w in manager.store.list_workers()}
+                known |= set(manager.store.all_worker_settings().keys())
+            except Exception:
+                checked = False  # can't tell right now — don't block the save
+            if checked and scope not in known:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No worker named “{scope}” has checked in. Pick one "
+                           "from the worker list — a box appears there once it "
+                           "has connected.")
         try:
             save_settings(settings.config_dir, updates, scope, manager.store)
         except (ValueError, OSError) as exc:
             raise HTTPException(status_code=400, detail=str(exc))
-        is_worker = scope not in ("global", "server")
         return {
             "ok": True,
-            "scope": scope,
+            "scope": scope if is_worker else "global",
             # The server applies on restart; a worker picks up its override when
             # it starts its next job (no restart needed).
             "restart_required": not is_worker,

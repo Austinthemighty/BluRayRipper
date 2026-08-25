@@ -16,9 +16,14 @@ class DriveNames:
         self._names: dict[str, str] = {}
         if path.exists():
             try:
-                self._names = json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                self._names = {}
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+                data = None
+            # A file that parses but isn't an object ("null", "[]", a hand-edit
+            # gone wrong) used to be stored as-is, and the AttributeError only
+            # surfaced later at .get() — taking out the drives panel rather than
+            # falling back to no custom names, which is what the guard is for.
+            self._names = data if isinstance(data, dict) else {}
 
     def get(self, device: str | None) -> str | None:
         return self._names.get(device or "")

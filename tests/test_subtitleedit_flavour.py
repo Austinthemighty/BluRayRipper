@@ -9,6 +9,7 @@ arguments — every option rejected, mid-job, after the extract had already run.
 from pathlib import Path
 
 from blurayripper.config import load_settings
+from blurayripper.tools.process import ProcessResult
 from blurayripper.tools.subtitleedit import SubtitleEdit
 
 # Trimmed from subtitleedit-cli's own help.
@@ -92,13 +93,9 @@ def test_the_help_probe_runs_once_and_is_reused(tmp_path, monkeypatch):
     se = _se(tmp_path)
     calls = []
 
-    class _Out:
-        stdout_lines = ["--ocr-engine tesseract"]
-        stderr_lines = []
-
     async def fake_run(cmd, **kw):
         calls.append(cmd)
-        return _Out()
+        return ProcessResult(0, ["--ocr-engine tesseract"], "")
 
     monkeypatch.setattr("blurayripper.tools.subtitleedit.process.run", fake_run)
 
@@ -126,15 +123,17 @@ def test_a_tool_that_cannot_be_probed_falls_back_instead_of_failing(tmp_path, mo
 
 def test_stderr_help_is_read_too(tmp_path, monkeypatch):
     """Plenty of CLIs print usage to stderr; reading only stdout would see an
-    empty help and silently pick the wrong dialect."""
+    empty help and silently pick the wrong dialect.
+
+    The stub returns the REAL ``ProcessResult`` on purpose: this test used to
+    hand back a hand-made object carrying a ``stderr_lines`` list that the
+    production type has never had, so it passed against code that could not
+    read stderr at all."""
     se = _se(tmp_path)
 
-    class _Out:
-        stdout_lines = []
-        stderr_lines = ["usage: seconv <pattern> <format>", " /ocrdb:<ocr db>"]
-
     async def fake_run(cmd, **kw):
-        return _Out()
+        return ProcessResult(
+            0, [], "usage: seconv <pattern> <format>\n /ocrdb:<ocr db>\n")
 
     monkeypatch.setattr("blurayripper.tools.subtitleedit.process.run", fake_run)
     assert "/ocrdb:" in _run(se.help_text())

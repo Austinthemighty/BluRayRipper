@@ -11,8 +11,10 @@ up automatically.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import stat
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -193,10 +195,35 @@ class DiscArt:
     fanart: Path | None = None   # best landscape, written as fanart.<ext>
 
 
+def _make_writable(dest: Path) -> bool:
+    """Add owner-write to ``dest`` (on Windows that clears the read-only
+    attribute), keeping its other permission bits. True if the caller should
+    retry a write that just failed.
+
+    Overwriting art raises PermissionError even in a writable folder when the
+    existing poster.jpg/fanart.jpg is read-only, and that is the normal case here
+    rather than an exotic one: disc files are read-only and ``shutil.copy2``
+    copies the mode across, so the FIRST extraction leaves art that no later run
+    can replace. Plex and other taggers set the attribute on the Z: share too.
+    ``metadata._replace_bytes`` already does this for TMDB-sourced art.
+    """
+    try:
+        os.chmod(dest, os.stat(dest).st_mode | stat.S_IWUSR)
+        return True
+    except OSError:
+        return False
+
+
 def _copy_as(src: Path, dest_dir: Path, stem: str) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / (stem + src.suffix.lower())  # keep real ext (.png vs .jpg)
-    shutil.copy2(src, dest)
+    try:
+        shutil.copy2(src, dest)
+    except PermissionError:
+        if not _make_writable(dest):
+            raise
+        shutil.copy2(src, dest)
+    _make_writable(dest)  # don't hand the disc's read-only mode to the next run
     return dest
 
 
@@ -256,7 +283,12 @@ def _write_bytes(item: tuple[str, bytes], dest_dir: Path, stem: str) -> Path:
     name, data = item
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / (stem + (Path(name).suffix.lower() or ".jpg"))
-    dest.write_bytes(data)
+    try:
+        dest.write_bytes(data)
+    except PermissionError:  # same read-only destination as _copy_as
+        if not _make_writable(dest):
+            raise
+        dest.write_bytes(data)
     return dest
 
 

@@ -65,18 +65,28 @@ class FFmpeg:
 
     @property
     def available(self) -> bool:
-        # Confirm the binary exists on this machine (a configured path is trusted
-        # without a check), so the UHD path cleanly falls back to HandBrake rather
-        # than failing to spawn a missing ffmpeg.
+        # Confirm the binary exists on THIS machine. The shared cluster config
+        # routinely names the other box's tool paths, and a merely-configured
+        # ffmpeg would otherwise fail to spawn mid-encode instead of letting the
+        # UHD path fall back to HandBrake.
         p = self._settings.tools.ffmpeg
         return bool(p) and shutil.which(p) is not None
 
     def _ffprobe_bin(self) -> str:
         ff = self._settings.tools.require("ffmpeg")
-        cand = Path(ff).with_name(Path(ff).name.replace("ffmpeg", "ffprobe"))
-        if cand.exists():
-            return str(cand)
-        return shutil.which("ffprobe") or str(cand)
+        name = Path(ff).name
+        probe_name = name.replace("ffmpeg", "ffprobe")
+        if probe_name != name:
+            cand = Path(ff).with_name(probe_name)
+            if cand.exists():
+                return str(cand)
+            return shutil.which("ffprobe") or str(cand)
+        # The rewrite renamed nothing, so the "sibling" IS the ffmpeg binary —
+        # a wrapper script, a renamed static build, avconv. It exists, so the
+        # old code returned it and then ran ffmpeg with ffprobe's arguments:
+        # the probe failed, the error blamed ffprobe, and the working ffprobe
+        # on PATH was never tried. Only the PATH one can be right here.
+        return shutil.which("ffprobe") or "ffprobe"
 
     async def extract_frame(self, video: Path, out_png: Path, at_seconds: float) -> Path:
         out_png.parent.mkdir(parents=True, exist_ok=True)
@@ -90,6 +100,13 @@ class FFmpeg:
             str(out_png),
         ]
         await process.run(cmd)
+        if not out_png.exists() or out_png.stat().st_size == 0:
+            # Seeking past the end of a short clip makes ffmpeg exit 0 with no
+            # frame written. Returning the path anyway hands the grain preview a
+            # file the browser cannot load, and the UI shows a broken image with
+            # no explanation of which side failed.
+            raise RuntimeError(f"ffmpeg extracted no frame at {at_seconds:.2f}s "
+                               f"from {video.name}")
         return out_png
 
     async def probe_video(self, video: Path) -> tuple[hdr_mod.HdrInfo, float]:
@@ -100,24 +117,40 @@ class FFmpeg:
             "-show_frames", "-read_intervals", "%+#1", str(video),
         ]
         result = await process.run(cmd, check=False)
+        # NOT an empty HdrInfo on failure. That is indistinguishable from a
+        # genuinely SDR source, so the encode would drop HDR10 with no colour
+        # flags at all AND the output check would pass vacuously (it returns
+        # early when the SOURCE is not HDR) — the exact silent loss this path
+        # exists to prevent, with nothing in the log.
+        unreadable = (
+            f"ffprobe could not read {video.name}, so this title's HDR "
+            "metadata is unknown. Encoding it now would silently produce "
+            "SDR. Check that ffprobe works on this machine, then Retry — "
+            "the rip is kept, so only the encode re-runs."
+        )
         try:
             data = json.loads("\n".join(result.stdout_lines))
-        except (ValueError, TypeError):
-            # NOT an empty HdrInfo. That is indistinguishable from a genuinely
-            # SDR source, so the encode would drop HDR10 with no colour flags at
-            # all AND the output check would pass vacuously (it returns early
-            # when the SOURCE is not HDR) — the exact silent loss this path
-            # exists to prevent, with nothing in the log.
-            raise RuntimeError(
-                f"ffprobe could not read {video.name}, so this title's HDR "
-                "metadata is unknown. Encoding it now would silently produce "
-                "SDR. Check that ffprobe works on this machine, then Retry — "
-                "the rip is kept, so only the encode re-runs."
-            ) from None
-        info = hdr_mod.parse_hdr(data)
+        except (ValueError, TypeError, RecursionError):
+            # RecursionError: json.loads itself gives up on deeply nested input.
+            raise RuntimeError(unreadable) from None
+        if not isinstance(data, dict):
+            # Decoding is not enough. Output that parses but is not an ffprobe
+            # document (a bare array from some other tool run with these
+            # arguments) used to escape as AttributeError from the field walk
+            # below, losing the operator instructions above.
+            raise RuntimeError(unreadable)
         try:
+            info = hdr_mod.parse_hdr(data)
+        except (AttributeError, TypeError, ValueError):
+            # A dict whose "streams" is not a list of stream objects walks just
+            # as badly as a bare array; same verdict, same instructions.
+            raise RuntimeError(unreadable) from None
+        try:
+            # Deliberately softer than the HDR walk: the duration only drives
+            # the progress fraction, so "N/A" costs a progress bar, not the
+            # colour metadata the encode is built from.
             duration = float(data.get("format", {}).get("duration") or 0)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, AttributeError):
             duration = 0.0
         return info, duration
 
@@ -171,6 +204,11 @@ class FFmpeg:
         cmd = [self._settings.tools.require("ffmpeg"), "-y", "-i", str(src),
                "-map", "0:v:0", "-c:v", "copy", "-f", "hevc", str(out)]
         await process.run(cmd)
+        if not out.exists() or out.stat().st_size == 0:
+            # Same guard the two encode wrappers carry. An empty stream here
+            # reaches dovi_tool, which reports a confusing RPU-extraction error
+            # instead of "the source video track never came out".
+            raise RuntimeError(f"ffmpeg produced no HEVC stream at {out}")
         return out
 
     def build_hevc_encode_command(

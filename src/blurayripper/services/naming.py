@@ -39,7 +39,13 @@ def sanitize(name: str) -> str:
     cleaned = _ILLEGAL.sub("", name)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     cleaned = cleaned.rstrip(". ")  # Windows forbids trailing dot/space
-    if cleaned.upper() in _WINDOWS_RESERVED:
+    # Windows resolves a device name by the part BEFORE the first dot, so CON.mkv,
+    # NUL.2020 and LPT1.x are the same devices as CON, NUL and LPT1. Testing the
+    # whole component missed those: the deploy target is a Windows VM, where
+    # mkdir("NUL.2020") fails and a write to "NUL.mkv" goes to the bit bucket and
+    # reports success. Splitting on the first dot keeps "Conan"/"Console" safe —
+    # they are one dot-free part that simply isn't a device name.
+    if cleaned.split(".", 1)[0].upper() in _WINDOWS_RESERVED:
         cleaned = f"_{cleaned}"
     return cleaned or "Untitled"
 

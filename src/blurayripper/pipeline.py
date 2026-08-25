@@ -10,6 +10,7 @@ fingerprint is already known, the confirm gate is skipped automatically.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import shutil
@@ -316,7 +317,7 @@ class Pipeline:
         todo: list[tuple[int, EpisodeAssignment, Path, Path]] = []
         for title_id, assignment in _assigned_titles(job):
             cp = job.checkpoints.setdefault(title_id, {})
-            if cp.get("placed") and self._video_path_for(assignment).exists():
+            if self._title_done(cp, assignment) is not None:
                 continue
             ripped = await self._ensure_ripped(job, title_id, staging_root, report)
             sub_dir = staging_root / "sub" / f"t{title_id:03d}"
@@ -516,7 +517,10 @@ class Pipeline:
             cp = job.checkpoints.setdefault(title_id, {})
             prior = cp.get("ripped_path")
             ripped = _resolve_path(self.settings.storage.staging_dir, prior) if prior else None
-            if (not cp.get("placed")) and (ripped is None or not ripped.exists()):
+            # _placed_video, not cp["placed"]: a placed file that is missing or
+            # empty has to be re-encoded, and that needs the rip.
+            if (self._placed_video(cp, assignment) is None
+                    and (ripped is None or not ripped.exists())):
                 raise RuntimeError(f"Title {title_id} has no ripped file to encode.")
             results.append(await self._encode_title(
                 job, title_id, assignment, staging_root, ripped, scheduler, report))
@@ -528,7 +532,7 @@ class Pipeline:
         todo: list[tuple[int, EpisodeAssignment, Path, Path]] = []
         for title_id, assignment in _assigned_titles(job):
             cp = job.checkpoints.setdefault(title_id, {})
-            if cp.get("placed") and self._video_path_for(assignment).exists():
+            if self._title_done(cp, assignment) is not None:
                 continue
             prior = cp.get("ripped_path")
             ripped = _resolve_path(self.settings.storage.staging_dir, prior) if prior else None
@@ -541,7 +545,7 @@ class Pipeline:
 
     def _sub_cache_dir(self, video_dest: Path) -> Path:
         return (self.settings.storage.output_dir / ".blurayripper" / "subcache"
-                / _slug(str(video_dest)))
+                / _path_key(video_dest))
 
     def _cache_subs(self, video_dest: Path, sub_jobs: list[tuple[Path, SubtitleTrack]]) -> None:
         """Persist extracted .sup subs next to a tiny manifest so a later re-OCR
@@ -588,7 +592,7 @@ class Pipeline:
         Uses the cached .sup subs from the original rip when available (no re-rip);
         otherwise extracts from ``source_mkv`` (a MakeMKV rip — the placed video
         has no subtitle tracks). Writes .srt sidecars next to ``video_dest``."""
-        sub_dir = self.settings.storage.staging_dir / "resub" / _slug(str(video_dest))
+        sub_dir = self.settings.storage.staging_dir / "resub" / _path_key(video_dest)
         if source_mkv is not None:
             if not source_mkv.exists():
                 raise FileNotFoundError(f"Source MKV not found: {source_mkv}")
@@ -725,14 +729,15 @@ class Pipeline:
         scheduler: EncodeScheduler, report,
     ) -> TitleResult:
         cp = job.checkpoints.setdefault(title_id, {})
-        if cp.get("placed") and self._video_path_for(assignment).exists():
+        done = self._title_done(cp, assignment)
+        if done is not None:
             report.on_event(f"Title {title_id} already done (resume) — skipping.")
             # Carry the recorded sidecars, and mark where they came from. Without
             # this the result looks like a title that produced no subtitles at
             # all, and the end-of-job check fails a job that is already complete
             # — every time it is resumed.
             return TitleResult(
-                title_id=title_id, video_path=self._video_path_for(assignment),
+                title_id=title_id, video_path=done,
                 subtitle_paths=list(self._subs_already_done(cp) or []),
                 from_checkpoint=True)
         ripped_mkv = await self._ensure_ripped(job, title_id, staging_root, report)
@@ -927,8 +932,9 @@ class Pipeline:
         sub_dir = staging_root / "sub" / f"t{title_id:03d}"
         cp = job.checkpoints.setdefault(title_id, {})
         video_dest = self._video_path_for(assignment)
-        if cp.get("placed") and video_dest.exists():
-            result.video_path = video_dest
+        done = self._title_done(cp, assignment)
+        if done is not None:
+            result.video_path = done
             return result
 
         # Extract subtitle images, OCR them, and place the SRT sidecars. (The
@@ -956,7 +962,15 @@ class Pipeline:
         # if a prior run already decided it, so a resume doesn't re-prompt (which
         # otherwise loops the grain gate on a box that restarts mid-job).
         if "tune_grain" not in cp:
-            cp["tune_grain"] = await self._resolve_grain(job, ripped_mkv, title_id, staging_root, report)
+            decision = await self._resolve_grain(job, ripped_mkv, title_id, staging_root, report)
+            # ONCE per disc, not per title. A disc's titles share one source and
+            # one encode, so asking per episode re-opens the preview gate for
+            # every episode of a season disc — which reads as an endless "pick
+            # grain" loop. prep_phase does this for the clustered path; this is
+            # the same decision for the single-box path. setdefault, so a title
+            # that already has a saved choice keeps it.
+            for tid, _a in _assigned_titles(job):
+                job.checkpoints.setdefault(tid, {}).setdefault("tune_grain", decision)
             _checkpoint(report)
         return result
 
@@ -1002,16 +1016,25 @@ class Pipeline:
             report.on_event(
                 f"Could not verify HDR on the output ({type(exc).__name__}: {exc}).")
             return
-        missing = [name for name, src_v, out_v in (
-            ("transfer", want.transfer, got.transfer),
-            ("primaries", want.colorprim, got.colorprim),
-            ("matrix", want.colormatrix, got.colormatrix),
-            ("master-display", want.master_display, got.master_display),
-            ("max-cll", want.max_cll, got.max_cll),
-        ) if src_v and not out_v]
-        if missing:
+        # Compare VALUES, not just presence. A stripped encode is tagged SDR —
+        # colorprim/transfer/colormatrix are all there, all saying bt709 — so
+        # "is the field present?" called that a PASS and printed "output carries
+        # SDR (bt709)" as the success line. That is the whole silent loss this
+        # check exists to catch, and it is the ONLY evidence for a source with no
+        # mastering metadata to lose (HLG, or HDR10 whose side data ffprobe
+        # didn't report): nothing goes missing, the values just change.
+        lost = [f"{name} ({src_v} → {out_v or 'absent'})"
+                for name, src_v, out_v in (
+                    ("transfer", want.transfer, got.transfer),
+                    ("primaries", want.colorprim, got.colorprim),
+                    ("matrix", want.colormatrix, got.colormatrix),
+                    ("master-display", want.master_display, got.master_display),
+                    ("max-cll", want.max_cll, got.max_cll),
+                ) if src_v and src_v != out_v]
+        if lost:
             report.on_event(
-                "HDR CHECK FAILED — the output is missing " + ", ".join(missing)
+                f"HDR CHECK FAILED — the output carries {got.summary()}; it lost "
+                + ", ".join(lost)
                 + ". It will play, but look washed out on an HDR TV. The file is "
                 "kept so you can judge it; the usual cause is an ffmpeg built "
                 "without x265 HDR support (check `ffmpeg -h encoder=libx265`).")
@@ -1057,14 +1080,25 @@ class Pipeline:
         encode_dir = staging_root / "encode"
         cp = job.checkpoints.setdefault(title_id, {})
         video_dest = self._video_path_for(assignment)
-        if cp.get("placed") and video_dest.exists():
-            result.video_path = video_dest
+        placed = self._placed_video(cp, assignment)
+        if placed is not None:
+            result.video_path = placed
             return result
 
         tune_grain = cp.get("tune_grain")
         if tune_grain is None:
             tune_grain = (self.settings.encode.tune_grain
                           if job.tune_grain is None else job.tune_grain)
+        # A run that encoded fine and then failed to PLACE left the finished file
+        # in staging (staging is only swept on success). Re-encoding it costs the
+        # whole multi-hour encode again to fix a share that was full or read-only.
+        finished = self._finished_encode(cp, bool(tune_grain))
+        if finished is not None:
+            report.on_event(
+                f"Reusing the finished encode from the previous run "
+                f"({finished.name}) — only placing it failed last time.")
+            return await self._place_encoded(
+                job, cp, finished, video_dest, assignment, result, report)
         height = await self._probe_height(ripped_mkv, report)
         weight = encode_weight(height)
         deinterlace = self._should_deinterlace(height)
@@ -1127,8 +1161,46 @@ class Pipeline:
                 )
         finally:
             await scheduler.release(acquired)
+        # Never move an empty file into the library. HandBrake (unlike the ffmpeg
+        # wrappers) can exit 0 having written nothing — ENOSPC on the staging
+        # disk is the usual way — and placing that file then checkpoints
+        # cp["placed"] on a 0-byte video: the end-of-job check fails on it while
+        # every Retry skips the encode that would replace it, so the job re-fails
+        # identically forever and only deleting the file by hand escapes.
+        if not encoded.exists() or encoded.stat().st_size == 0:
+            raise RuntimeError(
+                f"The encoder exited successfully but produced an empty file for "
+                f"title {title_id} ({encoded.name}). Nothing was put in the "
+                f"library. The usual cause is the staging disk filling up "
+                f"({encode_dir}) — free some space and Retry; the rip is kept, "
+                f"so only the encode re-runs.")
+        # Record the finished encode BEFORE placing it, so a failure at the move
+        # (full/read-only/dropped output share) doesn't cost the encode as well.
+        cp["encoded_path"] = _rel_path(self.settings.storage.staging_dir, encoded)
+        cp["encoded_grain"] = bool(tune_grain)
+        _checkpoint(report)
+        return await self._place_encoded(
+            job, cp, encoded, video_dest, assignment, result, report)
+
+    async def _place_encoded(
+        self, job: Job, cp: dict, encoded: Path, video_dest: Path,
+        assignment: EpisodeAssignment, result: TitleResult, report,
+    ) -> TitleResult:
+        """Move a finished encode into the library and checkpoint it as placed.
+
+        PLACING is set BEFORE the move, not after it: this is where a full,
+        read-only or dropped output share fails, and reporting that as "FAILED
+        during encoding" sends you after the encoder — tools, CPU, staging disk —
+        when the encode succeeded and the share is the problem. Opposite fixes.
+        """
+        job.state = JobState.PLACING
         result.video_path = library.place(encoded, video_dest)
         cp["placed"] = True
+        # The staging file was MOVED into the library, so the reuse record above
+        # now points at nothing; leaving it would make a later re-encode (the
+        # library file deleted, say) "reuse" a file that isn't there.
+        cp.pop("encoded_path", None)
+        cp.pop("encoded_grain", None)
         if self.settings.write_nfo:
             try:
                 nfo.write_nfo(result.video_path, assignment)
@@ -1136,7 +1208,6 @@ class Pipeline:
                 report.on_event(f"NFO sidecar skipped ({type(exc).__name__}: {exc}).")
         _checkpoint(report)
         report.on_event(f"Placed video: {result.video_path}")
-        job.state = JobState.PLACING
         return result
 
     async def _resolve_grain(
@@ -1223,6 +1294,69 @@ class Pipeline:
                 f"Could not probe resolution ({type(exc).__name__}: {exc}); assuming non-UHD weight.")
             return None
 
+    def _placed_video(self, cp: dict, assignment: EpisodeAssignment) -> Path | None:
+        """The library file this title's ``placed`` checkpoint claims — but only
+        when it is really there and not empty. None means "encode it again".
+
+        A 0-byte file exists(), so honouring the flag on one was a permanent dead
+        end: the end-of-job check fails on "video is 0 bytes" while every Retry
+        takes the resume shortcut past the encode that would replace it, so the
+        job re-fails identically forever and the only escape is deleting the file
+        by hand. An unreadable path (share down) is treated the same way — as not
+        placed — which is what already happened when the file was missing."""
+        if not cp.get("placed"):
+            return None
+        dest = self._video_path_for(assignment)
+        try:
+            return dest if dest.stat().st_size > 0 else None
+        except OSError:
+            return None
+
+    def _title_done(self, cp: dict, assignment: EpisodeAssignment) -> Path | None:
+        """The placed video of a title that is REALLY finished — video AND
+        subtitles — or None, meaning redo whichever half is unfinished.
+
+        The video half alone used to decide this, and "placed" then skipped the
+        subtitle work too, which is how a job went green with nothing for Plex to
+        read: the sidecars were deleted (or never written, because OCR failed) and
+        the resume reported "already done — skipping" every time."""
+        dest = self._placed_video(cp, assignment)
+        if dest is None or self._subs_unfinished(cp):
+            return None
+        return dest
+
+    def _subs_unfinished(self, cp: dict) -> bool:
+        """Whether a placed title still owes subtitle work. Two shapes:
+
+        - sidecars were recorded and are no longer on disk (deleted, or a box
+          that cannot see them) — redo them, they were part of this title;
+        - images were extracted but no sidecars were ever recorded, i.e. OCR
+          failed and _record_if_complete deliberately refused to record it.
+
+        A title with NEITHER record predates subtitle checkpoints entirely. The
+        run that placed it verified it, so it is left alone — inventing work for
+        it would re-rip every old title a resume touches."""
+        if "subs_done" in cp:
+            return self._subs_already_done(cp) is None
+        return bool(cp.get("subs"))
+
+    def _finished_encode(self, cp: dict, tune_grain: bool) -> Path | None:
+        """A previous run's completed encode still sitting in staging, if it is
+        usable for this run — else None (encode it).
+
+        Only recorded between the encode finishing and the file being placed, so
+        finding one means placing is what failed. The grain setting is part of
+        the record because Retry can be preceded by changing it in the UI, and
+        silently shipping the old encode would ignore that choice."""
+        rel = cp.get("encoded_path")
+        if not rel or cp.get("encoded_grain") != bool(tune_grain):
+            return None
+        path = _resolve_path(self.settings.storage.staging_dir, rel)
+        try:
+            return path if path.stat().st_size > 0 else None
+        except OSError:
+            return None
+
     def _record_subs_done(self, cp: dict, paths: list[Path]) -> None:
         """Record that a title's sidecars are placed, so a resume skips OCR.
 
@@ -1291,7 +1425,7 @@ class Pipeline:
 
     async def _extract_subs(
         self, ripped_mkv: Path, sub_dir: Path, report
-    ) -> list[tuple[Path, SubtitleTrack]]:
+    ) -> list[tuple[Path, SubtitleTrack]] | None:
         """Extract kept-language PGS tracks to .sup files. Returns (sup, track).
 
         The .sup filename includes the track id so multiple same-language tracks
@@ -1303,7 +1437,7 @@ class Pipeline:
 
     async def _extract_subs_inner(
         self, ripped_mkv: Path, sub_dir: Path, report
-    ) -> list[tuple[Path, SubtitleTrack]]:
+    ) -> list[tuple[Path, SubtitleTrack]] | None:
         try:
             tracks = await self.mkvtools.identify_subtitles(ripped_mkv)
         except Exception as exc:
@@ -1533,6 +1667,22 @@ class Pipeline:
 
 def _slug(text: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in text)[:40] or "job"
+
+
+def _path_key(path: Path) -> str:
+    """One bounded, filesystem-safe directory name PER destination file.
+
+    _slug keeps the first 40 characters, and every library path starts with the
+    same long root, so '/mnt/TrueNas/media/Plex/Media/Library/Movies/...'
+    slugged identically for every film on the NAS. The per-item subtitle cache
+    keyed on that handed one film's .sup tracks to another while announcing
+    "Reusing N cached subtitle track(s)" — wrong subtitles, reported as success.
+    The tail is the part that differs (title, year, episode), and the digest of
+    the whole path is what makes it collision-proof."""
+    text = str(path)
+    digest = hashlib.sha1(text.encode("utf-8", "surrogatepass")).hexdigest()[:10]
+    tail = "".join(c if c.isalnum() else "_" for c in text)[-29:]
+    return f"{tail}_{digest}"
 
 
 def _failure_hint(exc: Exception) -> str | None:

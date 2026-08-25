@@ -356,7 +356,10 @@ def test_queue_skips_a_disc_that_fails_setup_and_runs_the_rest(
     assert "Skipping disc:9" in out
     assert "no disc in drive" in out
     assert "Movie.mkv" in out            # the good disc still ran
-    assert rc == 0                       # see notes: a skipped disc is not counted
+    # The skip is a failure of the run, not a smaller run: exiting 0 here let a
+    # batch report success having ripped one disc of two.
+    assert rc == 1
+    assert "1/2 succeeded" in out
 
 
 def test_queue_exits_nonzero_when_no_disc_could_be_set_up(

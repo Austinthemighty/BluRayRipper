@@ -695,9 +695,16 @@ def test_a_corrupt_preset_file_is_reported_instead_of_crashing_the_job(tmp_path)
 # HandBrake.encode
 # --------------------------------------------------------------------------
 
-def _fake_run(monkeypatch, *, stdout_lines: tuple[str, ...] = (), writes: bytes | None = None):
+def _fake_run(monkeypatch, *, stdout_lines: tuple[str, ...] = (),
+              writes: bytes | None = b"encoded video"):
     """Stub process.run as HandBrake sees it. Records the call and replays
-    ``stdout_lines`` through the on_line handler."""
+    ``stdout_lines`` through the on_line handler.
+
+    ``writes`` defaults to a non-empty file because that is what a HandBrake
+    that really encoded leaves behind, and ``encode`` now refuses to return a
+    destination it cannot see. Pass ``writes=None`` for the run that exits 0
+    having written nothing.
+    """
     calls: list[dict] = []
 
     async def fake(cmd, *, on_line=None, low_priority=False, **kwargs):
@@ -709,6 +716,7 @@ def _fake_run(monkeypatch, *, stdout_lines: tuple[str, ...] = (), writes: bytes 
                     await res
         if writes is not None:
             out = Path(cmd[cmd.index("-o") + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(writes)
         return process.ProcessResult(0, list(stdout_lines), "")
 
@@ -739,6 +747,7 @@ async def test_encode_creates_the_output_directory_before_running(monkeypatch, t
 
     async def fake(cmd, **kwargs):
         existed_at_spawn.append(dst.parent.is_dir())
+        dst.write_bytes(b"encoded video")
         return process.ProcessResult(0, [], "")
 
     monkeypatch.setattr(handbrake_mod.process, "run", fake)

@@ -206,19 +206,19 @@ def test_with_no_ffprobe_anywhere_the_expected_path_is_still_named(
         tmp_path / "ffprobe")
 
 
-def test_a_binary_not_called_ffmpeg_resolves_ffprobe_to_itself(tmp_path, monkeypatch):
-    """Documenting a sharp edge, not endorsing it: the sibling is derived by
-    replacing 'ffmpeg' in the FILENAME, so a binary named anything else (a
-    wrapper script, avconv, ffmpeg7 renamed) yields the ffmpeg path unchanged —
-    which exists — and that binary is then run with ffprobe's arguments. The
-    PATH fallback never gets a chance. probe_video does at least fail loudly
-    (ffmpeg rejects -print_format, stdout is not JSON) rather than reporting the
-    file as SDR; see this file's notes."""
+def test_a_binary_not_called_ffmpeg_falls_back_to_the_ffprobe_on_path(
+        tmp_path, monkeypatch):
+    """The sibling is derived by replacing 'ffmpeg' in the FILENAME, so for a
+    binary named anything else (a wrapper script, avconv, a renamed static
+    build) the rewrite is a no-op and the "sibling" is the ffmpeg binary
+    itself — which exists. Returning it ran ffmpeg with ffprobe's arguments and
+    blamed ffprobe for the failure, while the working ffprobe on PATH was never
+    tried."""
     wrapper = tmp_path / "encode-tool"
     wrapper.write_text("#!/bin/sh\n")
     monkeypatch.setattr(ffmpeg_mod.shutil, "which", lambda p: "/usr/bin/ffprobe")
 
-    assert _ff(tmp_path, str(wrapper))._ffprobe_bin() == str(wrapper)
+    assert _ff(tmp_path, str(wrapper))._ffprobe_bin() == "/usr/bin/ffprobe"
 
 
 def test_probing_without_a_configured_ffmpeg_names_the_missing_tool(tmp_path):
@@ -593,6 +593,7 @@ async def test_extracting_the_source_video_stream_never_re_encodes_it(
 
     def respond(cmd):
         seen["parent_existed"] = out.parent.is_dir()
+        out.write_bytes(b"\x00\x00\x01\x40")   # a real copy leaves a stream
         return []
 
     fake = _install(monkeypatch, FakeProcess(respond))
@@ -619,6 +620,7 @@ async def test_a_poster_frame_is_seek_first_single_frame_and_overwritable(
 
     def respond(cmd):
         seen["parent_existed"] = png.parent.is_dir()
+        png.write_bytes(b"\x89PNG\r\n\x1a\n")   # a real extract leaves a frame
         return []
 
     fake = _install(monkeypatch, FakeProcess(respond))
@@ -640,7 +642,8 @@ async def test_every_ffmpeg_argument_is_a_string(tmp_path, monkeypatch):
     value makes create_subprocess_exec raise before ffmpeg ever starts, which
     reads as a mysterious tooling failure rather than a bug."""
     png = tmp_path / "preview" / "grain_off.png"
-    fake = _install(monkeypatch, FakeProcess())
+    fake = _install(monkeypatch, FakeProcess(
+        lambda cmd: png.write_bytes(b"\x89PNG\r\n\x1a\n") and []))
 
     await _ff(tmp_path).extract_frame(Path("/stage/off.mp4"), png, at_seconds=61.5)
 

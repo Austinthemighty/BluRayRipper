@@ -110,8 +110,13 @@ class WorkerReporter:
             stage=self.stage, progress=round(self.progress, 4), log=self.log[-30:],
             worker=self._worker,
         )
+        # Owner-scoped, like heartbeat() and release(): a box that lost the
+        # database for longer than stale_after_seconds has its job legitimately
+        # reclaimed while its own encode keeps running, and its next write would
+        # stamp DONE/FAILED (and its own stage/progress) over the row the NEW box
+        # is working — which serve then mirrors to the UI.
         with contextlib.suppress(Exception):
-            self._store.save(rec)
+            self._store.save_if_owner(rec, self._worker)
 
 
 class WorkerRunner:
@@ -243,10 +248,35 @@ class WorkerRunner:
                   flush=True)
             self.request_update()
 
+    async def _init_store(self) -> None:
+        """Create the schema, WAITING for the database instead of giving up.
+
+        A worker that boots while the database is down (both come back after the
+        same power cut, and Postgres is on another host) used to raise straight
+        out of run() and exit — so the box was up, idle, and encoding nothing
+        until someone noticed and started it by hand. Once running it already
+        rides out an outage, and serve boots without a database on purpose; this
+        is the same promise at startup. A drain signal still ends the wait."""
+        last = None
+        while not self._stop:
+            try:
+                self.store.init()
+                if last is not None:
+                    print("Database is back — starting.", flush=True)
+                return
+            except Exception as exc:
+                msg = f"{type(exc).__name__}: {exc}"
+                if msg != last:
+                    print(f"Database unavailable, waiting for it: {msg}", flush=True)
+                    last = msg
+                await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
+
     async def run(self) -> None:
         if not self.settings.database_url:
             raise RuntimeError("A worker needs a shared database. Set BLURAYRIPPER_DATABASE_URL.")
-        self.store.init()
+        await self._init_store()
+        if self._stop:
+            return
         from .tools.winjob import enable_kill_on_close
         enable_kill_on_close()  # kill our HandBrake/OCR children if the worker dies
         # Reap THIS worker's orphaned tools from a prior crash (HandBrake / OCR),
@@ -432,6 +462,17 @@ class WorkerRunner:
         try:
             results = await self.pipeline.encode_phase(
                 job, staging_root, self.scheduler, reporter)
+            # Look at the disk before saying Done. Pipeline.execute (the
+            # single-box path) verifies its outputs; this path did not, so a
+            # HandBrake that exited 0 having written nothing placed a 0-byte file
+            # in the Plex library, checkpointed it as placed, and finished green.
+            problems = self._output_problems(job, results)
+            if problems:
+                raise RuntimeError(
+                    "The encode finished but its output is not usable:\n  - "
+                    + "\n  - ".join(problems)
+                    + "\nThe rip is kept, so Retry re-encodes rather than "
+                      "starting over.")
             from .services import library
             library.cleanup(staging_root)
             outputs = [str(r.video_path) for r in results if r.video_path]
@@ -451,6 +492,42 @@ class WorkerRunner:
             # is safe; it only matters once the manager flips a retry back to READY.
             with contextlib.suppress(Exception):
                 self.store.release(rec.id, self.worker_id)
+
+    def _output_problems(self, job: Job, results: list) -> list[str]:
+        """Everything a finished encode promised but didn't deliver.
+
+        Only the video is checked here (subtitles and NFO sidecars may have been
+        placed by the rip box before this job was queued, so demanding them on
+        the worker would fail perfectly good jobs). A title with no naming
+        assignment is counted too: encode_phase logs "Skipping title N" and
+        returns, which used to leave the job DONE with zero outputs AND swept the
+        staging tree — destroying the rip for a disc nobody ever named.
+
+        Any bad video also loses its "placed" checkpoint, because otherwise the
+        next Retry sees placed=True, skips the title, and fails on the same empty
+        file forever.
+        """
+        problems: list[str] = []
+        by_title = {r.title_id: r for r in results}
+        for title_id in job.selected_title_ids:
+            result = by_title.get(title_id)
+            if result is None:
+                problems.append(
+                    f"title {title_id} has no naming assignment, so nothing was "
+                    "encoded for it — name the disc on the rip box, then Retry")
+                continue
+            video = result.video_path
+            if video is None:
+                why = f"title {title_id}: no video was placed"
+            elif not video.exists():
+                why = f"missing video: {video}"
+            elif video.stat().st_size == 0:
+                why = f"video is 0 bytes: {video}"
+            else:
+                continue
+            problems.append(why)
+            job.checkpoints.get(title_id, {}).pop("placed", None)
+        return problems
 
     async def _heartbeat(self, reporter: WorkerReporter) -> None:
         while True:

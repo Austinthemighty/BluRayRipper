@@ -56,7 +56,11 @@ async def test_worker_processes_claimed_job(tmp_path, monkeypatch):
 
     async def fake_process(job, staging_root, scheduler, report):
         report.on_progress("encoding", 1.0)
-        return [TitleResult(0, video_path=tmp_path / "WarGames (1983).mkv")]
+        # The file has to exist: the worker checks its outputs on disk before
+        # reporting DONE, so a promised-but-absent path now fails the job.
+        placed = tmp_path / "WarGames (1983).mkv"
+        placed.write_text("h265 bytes")
+        return [TitleResult(0, video_path=placed)]
 
     monkeypatch.setattr(runner.pipeline, "encode_phase", fake_process)
 

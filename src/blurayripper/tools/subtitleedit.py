@@ -74,8 +74,14 @@ class SubtitleEdit:
             try:
                 out = await process.run(self._launcher() + ["--help"], check=False,
                                         timeout=60)
+                # ProcessResult carries stderr as ONE string, not a line list.
+                # The old code asked for a "stderr_lines" attribute that has
+                # never existed, so help printed on stderr — which is where
+                # plenty of CLIs print usage — always read as "no help", and the
+                # dialect fell back to the name-based guess that sent one seconv
+                # flavour the other's arguments mid-job.
                 self._help_cache = "\n".join(
-                    out.stdout_lines + getattr(out, "stderr_lines", [])).lower()
+                    out.stdout_lines + (out.stderr or "").splitlines()).lower()
             except Exception:
                 self._help_cache = ""   # unknown: fall back to the name-based guess
         return self._help_cache

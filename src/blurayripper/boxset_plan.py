@@ -87,16 +87,27 @@ def _norm(label: str) -> str:
     return re.sub(r"\s{2,}", " ", folded).strip()
 
 
-def _int(value: str | None, field_name: str, line: int, errors: list[str]) -> int | None:
-    """Parse an optional integer cell, reporting rather than raising on junk."""
+def _int(value: str | None, field_name: str, line: int, errors: list[str],
+         minimum: int | None = None) -> int | None:
+    """Parse an optional integer cell, reporting rather than raising on junk.
+
+    ``minimum`` is only set where an out-of-range number would be ACTED ON: most
+    cells are safer carried through as written (a bad ``episodes`` count parks
+    the disc precisely because it doesn't match), but first_episode has no such
+    backstop — it is used directly to number the files."""
     text = (value or "").strip()
     if not text:
         return None
     try:
-        return int(text)
+        number = int(text)
     except ValueError:
         errors.append(f"line {line}: {field_name} must be a whole number, got “{text}”.")
         return None
+    if minimum is not None and number < minimum:
+        errors.append(
+            f"line {line}: {field_name} must be {minimum} or more, got “{text}”.")
+        return None
+    return number
 
 
 def parse_csv(text: str) -> tuple[list[PlanRow], list[str]]:
@@ -107,12 +118,20 @@ def parse_csv(text: str) -> tuple[list[PlanRow], list[str]]:
     """
     rows: list[PlanRow] = []
     errors: list[str] = []
-    if not (text or "").strip():
+    # Excel's "CSV UTF-8" export writes a byte-order mark, which is part of the
+    # first header name — so disc_label read as "﻿disc_label" and the user
+    # was told the column was missing while looking straight at it.
+    text = (text or "").lstrip("﻿")
+    if not text.strip():
         return rows, errors
     reader = csv.DictReader(io.StringIO(text))
-    if not reader.fieldnames:
+    try:
+        fieldnames = reader.fieldnames
+    except csv.Error as exc:
+        return rows, [f"The CSV could not be read: {exc}."]
+    if not fieldnames:
         return rows, ["The CSV needs a header row: " + ",".join(COLUMNS)]
-    header = {(h or "").strip().lower() for h in reader.fieldnames}
+    header = {(h or "").strip().lower() for h in fieldnames}
     for required in ("disc_label", "show"):
         if required not in header:
             errors.append(f"Missing required column “{required}”.")
@@ -123,7 +142,23 @@ def parse_csv(text: str) -> tuple[list[PlanRow], list[str]]:
         errors.append("Ignoring unknown column(s): " + ", ".join(sorted(unknown)))
 
     seen: set[str] = set()
-    for line, raw in enumerate(reader, start=2):  # line 1 is the header
+    rest = iter(reader)
+    line = 1                                       # line 1 is the header
+    while True:
+        line += 1
+        try:
+            raw = next(rest)
+        except StopIteration:
+            break
+        except csv.Error as exc:
+            # ONE unbalanced quote makes csv swallow every following line into a
+            # single field, which trips its 128 KB field limit and raised out of
+            # a function documented never to raise — 500ing the box-set editor
+            # and, worse, the disc-scan path that reads the plan on every insert.
+            # The reader can't resynchronise after this, so say where it stopped.
+            errors.append(f"line {line}: unreadable ({exc}); check for an unclosed "
+                          'quote (") above this line. Nothing after it was read.')
+            break
         cell = {(k or "").strip().lower(): (v or "") for k, v in raw.items() if k}
         label = cell.get("disc_label", "").strip()
         show = cell.get("show", "").strip()
@@ -145,7 +180,11 @@ def parse_csv(text: str) -> tuple[list[PlanRow], list[str]]:
             show=show,
             year=_int(cell.get("year"), "year", line, errors),
             season=_int(cell.get("season"), "season", line, errors),
-            first_episode=_int(cell.get("first_episode"), "first_episode", line, errors),
+            # Episodes are numbered from 1 — Plex has no E00. Anything below it
+            # is a typo, and unlike a wrong `episodes` count nothing downstream
+            # catches it: the number goes straight into the filename.
+            first_episode=_int(cell.get("first_episode"), "first_episode", line,
+                               errors, minimum=1),
             episodes=_int(cell.get("episodes"), "episodes", line, errors),
             line=line,
         ))
@@ -203,6 +242,13 @@ def assignments_for(row: PlanRow, disc: DiscInfo) -> PlanMatch:
     if first is None:
         return PlanMatch(
             reason="no first episode in the plan row and no disc number in the label")
+    # Checked here as well as at parse time because this is the point of consent:
+    # a matching row means "rip this disc with NO naming gate", and a first
+    # episode below 1 numbers the files S01E00 / S01E-5, which Plex will not
+    # match. Parking costs one mapping form; a bad auto-rip costs the disc.
+    if first < 1:
+        return PlanMatch(
+            reason=f"plan row starts at episode {first}; episode numbers start at 1")
 
     assignments = [
         EpisodeAssignment(
@@ -226,11 +272,23 @@ def plan_path(settings) -> Path:
 
 
 def load_plan(settings) -> str:
-    """The saved CSV text, or "" when no plan has been written yet."""
+    """The saved CSV text, or "" when no plan has been written yet.
+
+    Decoded leniently: a plan saved from Excel or Notepad on Windows is
+    Windows-1252, not UTF-8, the moment a show title has an accent in it — and
+    the resulting UnicodeDecodeError is not an OSError, so it came out of here
+    and out of every caller, including the disc-scan path that consults the plan
+    on every insert. A mangled accent in one show name is a far smaller problem
+    than no plan at all.
+    """
     try:
-        return plan_path(settings).read_text(encoding="utf-8")
+        raw = plan_path(settings).read_bytes()
     except OSError:
         return ""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", errors="replace")
 
 
 SHARED_KEY = "boxset.plan"

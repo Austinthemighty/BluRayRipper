@@ -515,7 +515,12 @@ async def test_a_finished_job_is_released_so_an_immediate_retry_is_claimable(
 
     async def fake_encode(job, staging_root, scheduler, report):
         report.on_progress("encoding", 1.0)
-        return [TitleResult(0, video_path=tmp_path / "WarGames (1983).mkv")]
+        # A real encode leaves a real file behind: the worker now looks at the
+        # disk before reporting DONE, so a stub that promises a path it never
+        # wrote is a failed job, not a finished one.
+        placed = tmp_path / "WarGames (1983).mkv"
+        placed.write_text("h265 bytes")
+        return [TitleResult(0, video_path=placed)]
 
     monkeypatch.setattr(first.pipeline, "encode_phase", fake_encode)
     rec = store.claim_next("encoder-A", CLAIMABLE_STATES, 180)

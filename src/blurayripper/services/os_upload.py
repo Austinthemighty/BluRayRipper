@@ -47,6 +47,12 @@ def _yn(value: bool) -> str:
 def _safe(name: str) -> str:
     keep = " ._-()"
     cleaned = "".join(c if (c.isalnum() or c in keep) else "_" for c in name).strip()
+    # '.' is a kept character, so a title of ".." survived intact and
+    # export_dir/".." is the export folder's PARENT — mkdir(exist_ok=True) then
+    # succeeds and the .srt plus its sheet are written OUTSIDE the export dir.
+    # Trailing dots/spaces are also illegal on Windows, so strip both (this is
+    # what naming.sanitize already does, and why it answers "Untitled" for "..").
+    cleaned = cleaned.rstrip(". ")
     return cleaned or "subtitle"
 
 

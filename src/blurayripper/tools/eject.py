@@ -140,10 +140,15 @@ def _close_mci(drive: str) -> None:
 
 
 def _win_paths(device: str | None) -> tuple[str | None, str | None]:
-    r"""(device_path, drive_letter) from a "F:" or "\\.\CdRom0" hint."""
+    r"""(device_path, drive_letter) from a "F", "F:" or "\\.\CdRom0" hint."""
     raw = (device or "").strip().rstrip("\\/")
     if raw.startswith("\\\\"):
         return raw, None
+    if len(raw) == 1 and raw.isalpha():
+        # A letter typed without its colon. Without this it matched neither
+        # branch, so ioctl, shell and scsi were all skipped and the command that
+        # exists to try four back-ends reported one MCI failure.
+        raw = f"{raw}:"
     if ":" in raw:
         return rf"\\.\{raw}", raw
     return None, None
@@ -157,29 +162,28 @@ def _eject_windows(device: str | None, method: str = "auto") -> None:
     STOP UNIT and MCI as last resorts (SCSI needs admin). Forcing a single method
     is for diagnosing a stubborn drive.
     """
-    raw = (device or "").strip().rstrip("\\/")  # "F:", "F:\", or "\\.\CdRom0"
     # MakeMKV may report a drive letter ("F:") or a device path ("\\.\CdRom0").
-    # SCSI/IOCTL take a device path; Shell/MCI need a drive letter.
-    if raw.startswith("\\\\"):
-        dev_path: str | None = raw
-        letter: str | None = None
-    elif ":" in raw:
-        dev_path = rf"\\.\{raw}"
-        letter = raw
-    else:
-        dev_path = letter = None
+    # SCSI/IOCTL take a device path; Shell/MCI need a drive letter. Shared with
+    # _close_windows so a fix to the normalisation reaches both.
+    dev_path, letter = _win_paths(device)
 
     methods: dict[str, tuple[str | None, object]] = {
         "scsi": (dev_path, _eject_scsi),
         "ioctl": (dev_path, _eject_ioctl),
         "shell": (letter, _eject_shell),
-        "mci": (letter or raw, _eject_mci),
+        # "" is a real argument to MCI, not a missing one: it addresses MCI's
+        # built-in default CDAudio device. Passing the device path instead (what
+        # this used to do) cannot work — MCI does not accept \\.\CdRom0 — and
+        # skipping MCI entirely meant `blurayripper eject` with no drive
+        # argument, and any rip whose drive device is unknown, could never
+        # succeed on Windows even though this back-end needs no drive name.
+        "mci": (letter or "", _eject_mci),
     }
     if method != "auto":
         arg, fn = methods.get(method, (None, None))
         if fn is None:
             raise OSError(f"unknown eject method '{method}'")
-        if not arg:
+        if arg is None:
             raise OSError(f"method '{method}' needs a "
                           f"{'drive letter (e.g. F:)' if method in ('shell', 'mci') else 'device'}")
         fn(arg)  # type: ignore[operator]
@@ -189,7 +193,7 @@ def _eject_windows(device: str | None, method: str = "auto") -> None:
     # ioctl (read-only) and shell work without admin; scsi/mci are last resorts.
     for name in ("ioctl", "shell", "scsi", "mci"):
         arg, fn = methods[name]
-        if not arg:
+        if arg is None:
             continue
         try:
             fn(arg)  # type: ignore[operator]

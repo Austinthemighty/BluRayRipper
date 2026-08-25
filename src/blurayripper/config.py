@@ -441,7 +441,14 @@ def load_settings(config_dir: Path | None = None, extra_overlay: dict | None = N
             data = tomllib.load(fh)
 
     def _merge(overlay: dict | None) -> None:
-        for section, values in (overlay or {}).items():
+        # A corrupt overlay must not stop the box booting, and "corrupt" includes
+        # valid JSON that isn't an object: '"text"', '123' and '[{...}]' all have
+        # no .items(), so the guard around the READ below was defeated by an
+        # AttributeError from right here. The settings page survived it, so the
+        # symptom was serve refusing to start while the UI looked fine.
+        if not isinstance(overlay, dict):
+            return
+        for section, values in overlay.items():
             if isinstance(values, dict):
                 data.setdefault(section, {}).update(values)
 
@@ -455,7 +462,9 @@ def load_settings(config_dir: Path | None = None, extra_overlay: dict | None = N
 
         try:
             _merge(json.loads(overlay_file.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, OSError):
+        # UnicodeDecodeError is neither of the other two, and it is what a
+        # half-written overlay (power cut mid-save) actually raises.
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             pass
     _merge(extra_overlay)
 

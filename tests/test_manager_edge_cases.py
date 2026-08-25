@@ -420,7 +420,12 @@ def test_display_name_falls_back_to_the_label_when_the_mapping_has_no_title(mana
 
 def test_display_name_spans_seasons_for_a_mixed_disc(manager):
     """The last disc of a box set often carries the end of one season and the start
-    of the next. One season number would name it wrong on the shelf."""
+    of the next. One season number would name it wrong on the shelf.
+
+    The two spans must be read TOGETHER: this disc holds S01E22 + S02E01 + S02E02,
+    and the old independent spans rendered that as "S01–S02E01–E22" — which reads
+    as episodes 1 to 22 of both seasons, i.e. the whole box set rather than the one
+    disc you are trying to find."""
     wj = _job(manager, 10, disc=_tv_disc())
 
     def ep(tid, season, episode):
@@ -428,7 +433,7 @@ def test_display_name_spans_seasons_for_a_mixed_disc(manager):
                                  show_or_movie_title="House", season=season, episode=episode)
 
     wj.assignments = {a.title_id: a for a in (ep(0, 1, 22), ep(1, 2, 1), ep(2, 2, 2))}
-    assert manager._display_name(wj) == "House S01–S02E01–E22"
+    assert manager._display_name(wj) == "House S01E22–S02E02"
 
 
 def test_display_name_omits_the_season_when_the_mapping_has_none(manager):

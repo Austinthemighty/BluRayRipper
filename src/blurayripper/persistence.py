@@ -20,7 +20,7 @@ import json
 import re
 import time
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 
 from .models import DiscInfo, EpisodeAssignment, MediaKind, Stream, StreamType, Title
@@ -101,7 +101,14 @@ class JobRecord:
 
     @classmethod
     def from_json(cls, data: dict) -> "JobRecord":
-        return cls(**data)
+        # Ignore fields this build doesn't know about. Every box in the cluster
+        # reads the same jobs table, and they are updated one at a time — so
+        # during a rolling update an OLD worker reads rows a NEW serve wrote. With
+        # cls(**data) a single added field made claim_next/load_all raise
+        # TypeError on every job, i.e. the whole queue, until the last box was
+        # pulled. Unknown keys are dropped; missing ones keep their defaults.
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
 
 
 # --- disc / assignment (de)serialization (shared) -----------------------
@@ -122,9 +129,15 @@ def disc_to_dict(disc: DiscInfo | None) -> dict | None:
                 "size_bytes": t.size_bytes,
                 "source_filename": t.source_filename,
                 "output_filename": t.output_filename,
+                # MakeMKV's own names for the title and each track ("Main
+                # Feature", "Director's Commentary"). Dropping them made the
+                # round-trip lossy: a job showed them until the next restart and
+                # then silently lost them, which is the worst way for a field to
+                # be unavailable.
+                "name": t.name,
                 "streams": [
                     {"stream_id": s.stream_id, "type": s.stream_type.value,
-                     "codec": s.codec, "language": s.language}
+                     "codec": s.codec, "language": s.language, "name": s.name}
                     for s in t.streams
                 ],
             }
@@ -140,13 +153,15 @@ def disc_from_dict(data: dict | None) -> DiscInfo | None:
     for t in data.get("titles", []):
         streams = [
             Stream(stream_id=s["stream_id"], stream_type=StreamType(s["type"]),
-                   codec=s.get("codec"), language=s.get("language"))
+                   codec=s.get("codec"), language=s.get("language"),
+                   name=s.get("name"))
             for s in t.get("streams", [])
         ]
         titles.append(Title(
             title_id=t["title_id"], duration_seconds=t["duration_seconds"],
             chapter_count=t["chapter_count"], size_bytes=t["size_bytes"],
             source_filename=t.get("source_filename"), output_filename=t.get("output_filename"),
+            name=t.get("name"),
             streams=streams,
         ))
     return DiscInfo(
@@ -184,6 +199,17 @@ class Store(ABC):
     @abstractmethod
     def save(self, record: JobRecord) -> None:
         """Insert or update a job record (keyed by id)."""
+
+    def save_if_owner(self, record: JobRecord, owner: str) -> None:
+        """Save a record only while ``owner`` still holds its claim.
+
+        A worker that lost the database for longer than stale_after_seconds has
+        its job legitimately reclaimed by another box, but its own encode keeps
+        running — and its next write would stamp DONE/FAILED (and its own
+        progress) over the row the NEW box is working. Same reasoning as the
+        owner-scoped release() and heartbeat(). Stores that don't track claims
+        fall back to a plain save."""
+        self.save(record)
 
     @abstractmethod
     def load_all(self) -> list[JobRecord]:
@@ -322,6 +348,11 @@ class MemoryStore(Store):
     def save(self, record: JobRecord) -> None:
         self._rows[record.id] = record.to_json()
 
+    def save_if_owner(self, record: JobRecord, owner: str) -> None:
+        if self._claim_owner.get(record.id, owner) != owner:
+            return                      # the claim moved on; this write is stale
+        self.save(record)
+
     def load_all(self) -> list[JobRecord]:
         return [JobRecord.from_json(d) for _, d in sorted(self._rows.items())]
 
@@ -446,6 +477,18 @@ class PostgresStore(Store):
                 "ON CONFLICT (id) DO UPDATE SET "
                 "data = EXCLUDED.data, state = EXCLUDED.state, updated_at = now()",
                 (record.id, Jsonb(record.to_json()), record.state),
+            )
+
+    def save_if_owner(self, record: JobRecord, owner: str) -> None:
+        from psycopg.types.json import Jsonb
+
+        # UPDATE, not upsert: a job the operator deleted must stay deleted rather
+        # than being resurrected by a worker's next progress write.
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE jobs SET data = %s, state = %s, updated_at = now() "
+                "WHERE id = %s AND claimed_by = %s",
+                (Jsonb(record.to_json()), record.state, record.id, owner),
             )
 
     def load_all(self) -> list[JobRecord]:
