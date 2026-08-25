@@ -131,6 +131,11 @@ class WorkerRunner:
         self.pipeline = Pipeline(settings)
         self.scheduler = EncodeScheduler(settings.queue.encode_capacity)
         self._stop = False
+        # CONSECUTIVE refusals, not distinct job ids: the queue always re-offers
+        # the lowest claimable id, so a box that cannot see any ripped file turns
+        # down the same job over and over. Counting ids would have stuck at one
+        # and never reported the loop it is actually in.
+        self._refused = 0
         # Set when a drain should be followed by a git-pull + restart (from the
         # 'u' key OR a cluster-wide "update all workers" signal from the server).
         self.update_requested = False   # pull before restarting
@@ -319,6 +324,7 @@ class WorkerRunner:
                 continue
             if rec is None:
                 self._apply_worker_settings()  # pick up a central config change while idle
+                # Genuinely nothing to claim -- distinct from refusing everything.
                 self._register(None, "idle")   # heartbeat presence while idle
                 self._check_serve_presence()   # is the rip box still alive?
                 await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
@@ -330,11 +336,18 @@ class WorkerRunner:
                 # "no ripped file to encode" (and stealing it from the rip box).
                 with contextlib.suppress(Exception):
                     self.store.release(rec.id, self.worker_id)
-                self._register(None, "idle")
-                print(f"Job {rec.id} claimed but not fully ripped yet — "
-                      "released for the rip box.", flush=True)
+                # Say WHY, in the panel, not just on this box's console. Refusing
+                # every job looked exactly like having nothing to do: both showed
+                # "idle", so a queue of hundreds could churn here every few
+                # seconds and the UI reported a healthy, idle worker.
+                self._refused += 1
+                missing = self._first_missing_file(rec)
+                self._register(None, self._refusing_stage(missing))
+                print(f"Job {rec.id} claimed but not fully ripped yet — released "
+                      f"for the rip box. Missing: {missing}", flush=True)
                 await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
                 continue
+            self._refused = 0       # something was workable; stop reporting refusals
             self._apply_worker_settings()       # apply latest override before this job
             await self._process(rec)
 
@@ -344,6 +357,35 @@ class WorkerRunner:
         if self.settings.cluster.worker_does_subs:
             return CLAIMABLE_STATES + _SUBS_STATES
         return CLAIMABLE_STATES
+
+    def _refusing_stage(self, missing: str) -> str:
+        """What the panel shows while this box is turning jobs down.
+
+        "idle" is the truth for a worker with nothing to do and a lie for one
+        rejecting a queue of hundreds, and the two were indistinguishable."""
+        # One refusal is ordinary: the rip box briefly shows a claimable job
+        # before its checkpoint exists. A run of them is a stuck box.
+        if self._refused < 3:
+            return f"idle — waiting on a rip ({missing})"
+        return (f"NOT ENCODING: turned down {self._refused} jobs in a row — their "
+                f"ripped files are not reachable from this box. Missing: {missing}")
+
+    def _first_missing_file(self, rec: JobRecord) -> str:
+        """The first ripped file this box cannot see, for the message above."""
+        from .pipeline import _resolve_path
+
+        staging = self.settings.storage.staging_dir
+        for tid in rec.selected_title_ids:
+            cp = rec.checkpoints.get(str(tid)) or rec.checkpoints.get(tid) or {}
+            if cp.get("placed"):
+                continue
+            prior = cp.get("ripped_path")
+            if not prior:
+                return f"job {rec.id} title {tid} has no ripped file recorded"
+            resolved = _resolve_path(staging, prior)
+            if not resolved.exists():
+                return str(resolved)
+        return f"job {rec.id}"
 
     def _fully_ripped(self, rec: JobRecord) -> bool:
         """True once every selected title has a ripped file (or is already placed).

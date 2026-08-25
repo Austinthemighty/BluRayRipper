@@ -434,3 +434,85 @@ async def test_a_worker_booted_while_the_database_is_down_waits_for_it(
 
     assert store.init_calls == 3        # it waited out the outage rather than exiting
     assert processed == [1]             # and then did the work that was waiting
+
+
+# --- a worker refusing everything must not look like a healthy idle one ------
+
+async def test_a_worker_that_cannot_see_the_ripped_files_says_so_in_the_panel(
+        tmp_path, monkeypatch):
+    """Reported: "the workers are just sitting idle" with 187 jobs queued. Both
+    "nothing to claim" and "claimed every job and refused it" reported the same
+    "idle", so a queue churning every few seconds read as a healthy worker and
+    the only evidence was on that box's console."""
+    from blurayripper.persistence import JobRecord
+    from blurayripper.worker import WorkerRunner
+
+    s = load_settings()
+    monkeypatch.setattr(s.storage, "staging_dir", tmp_path / "stage")
+    monkeypatch.setattr(s.storage, "output_dir", tmp_path / "out")
+    s.cluster.worker_poll_seconds = 0
+    s.database_url = "memory://test"      # run() refuses to start without one
+    monkeypatch.setattr("blurayripper.worker.load_settings", lambda *a, **k: s)
+
+    stages = []
+
+    class Store(MemoryStore):
+        @property
+        def durable(self): return True
+        def record_worker(self, worker_id, version, job_id, stage, run_token):
+            stages.append(stage)
+
+    runner = WorkerRunner(s, worker_id="encoder-A")
+    runner.store = Store()
+    for jid in (1, 2, 3):
+        runner.store.save(JobRecord(
+            id=jid, source="disc:0", state="ready", selected_title_ids=[0],
+            checkpoints={"0": {"ripped_path": f"job_{jid}/rip/t000/x.mkv"}}))
+
+    def stop_after_a_few(*a, **k):      # called synchronously by run()
+        if len(stages) >= 5:
+            runner.request_stop()
+
+    monkeypatch.setattr(runner, "_check_serve_presence", lambda: None)
+    monkeypatch.setattr(runner, "_maybe_periodic_restart", stop_after_a_few)
+    await runner.run()
+
+    refusing = [st for st in stages if "NOT ENCODING" in st]
+    assert refusing, stages
+    assert "not reachable from this box" in refusing[-1]
+    assert "in a row" in refusing[-1]      # a run, not a single ordinary refusal
+    # ...and it names a file, so the operator can check that exact path
+    assert "x.mkv" in refusing[-1] or "no ripped file" in refusing[-1]
+
+
+async def test_a_worker_with_genuinely_nothing_to_do_still_reads_as_idle(
+        tmp_path, monkeypatch):
+    """The distinction has to survive: an empty queue is not a fault."""
+    from blurayripper.worker import WorkerRunner
+
+    s = load_settings()
+    monkeypatch.setattr(s.storage, "staging_dir", tmp_path / "stage")
+    s.cluster.worker_poll_seconds = 0
+    s.database_url = "memory://test"      # run() refuses to start without one
+    monkeypatch.setattr("blurayripper.worker.load_settings", lambda *a, **k: s)
+
+    stages = []
+
+    class Store(MemoryStore):
+        @property
+        def durable(self): return True
+        def record_worker(self, worker_id, version, job_id, stage, run_token):
+            stages.append(stage)
+
+    runner = WorkerRunner(s, worker_id="encoder-A")
+    runner.store = Store()          # no jobs at all
+
+    def stop_soon(*a, **k):             # called synchronously by run()
+        if stages:
+            runner.request_stop()
+
+    monkeypatch.setattr(runner, "_check_serve_presence", lambda: None)
+    monkeypatch.setattr(runner, "_maybe_periodic_restart", stop_soon)
+    await runner.run()
+
+    assert stages and all(st == "idle" for st in stages), stages
