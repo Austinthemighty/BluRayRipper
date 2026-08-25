@@ -463,17 +463,20 @@ const AWAITING = ['awaiting_titles','awaiting_mapping','awaiting_grain','awaitin
 // knows whether a READY job is pre-rip (queued to rip) or ripped (queued to encode).
 const RIP_ACTIVE = ['scanning','selecting','ripping','confirming','identifying','extracting_subs','ocr_subs'];
 const ENC_ACTIVE = ['encoding','placing','extracting_subs','ocr_subs'];
-const GROUP_LABELS = ['Failed','Needs your input','Ripping','Rip queue','Encoding','Encode queue','Completed'];
+const GROUP_LABELS = ['Needs review','Failed','Needs your input','Ripping','Rip queue','Encoding','Encode queue','Completed'];
 function jobRank(j){
   const s = j.state;
-  if (s==='failed') return 0;                // failures at the very top
-  if (s==='done') return 6;                  // completed at the very bottom
-  if (AWAITING.includes(s)) return 1;        // rip-side: needs you to confirm
+  // Split out of Failed so the heading matches the chip that filters it: these
+  // need the disc put back, which is a different action from a retry.
+  if (j.needs_review) return 0;
+  if (s==='failed') return 1;                // other failures, still at the top
+  if (s==='done') return 7;                  // completed at the very bottom
+  if (AWAITING.includes(s)) return 2;        // rip-side: needs you to confirm
   if (j.lane === 'encode')                   // ── encode queue (below the rip queue) ──
-    return ENC_ACTIVE.includes(s) ? 4 : 5;   // encoding now vs waiting for a worker
+    return ENC_ACTIVE.includes(s) ? 5 : 6;   // encoding now vs waiting for a worker
   // ── rip queue ──
-  if (RIP_ACTIVE.includes(s)) return 2;      // actively scanning/ripping a disc
-  return 3;                                  // queued / ready-to-rip
+  if (RIP_ACTIVE.includes(s)) return 3;      // actively scanning/ripping a disc
+  return 4;                                  // queued / ready-to-rip
 }
 
 const SUB_STATES = ['extracting_subs','ocr_subs','identifying'];
@@ -620,8 +623,25 @@ function renderPager(total, per, totalPages){
   el.querySelector('[data-size]').onchange = (e) => {
     pageSize = e.target.value; localStorage.setItem('brr_pagesize', pageSize); curPage = 0; go();
   };
-  const prev = el.querySelector('[data-prev]'); if (prev) prev.onclick = () => { curPage = Math.max(0, curPage - 1); go(); };
-  const next = el.querySelector('[data-next]'); if (next) next.onclick = () => { curPage = curPage + 1; go(); window.scrollTo({top:0, behavior:'smooth'}); };
+  // Turning a page should put you at the top of the LIST, not the top of the
+  // document — jumping the window scrolls the queue header and the pager itself
+  // off screen, so the control you just used disappears. Prev did not scroll at
+  // all, which left you mid-list on a different page. Both behave the same now.
+  const toPageTop = () => {
+    const list = document.getElementById('jobs');
+    if (!list) return;
+    // INSTANT, not smooth. The queue re-renders on every server tick and each
+    // re-render cancels an in-flight smooth scroll, so the animation never
+    // arrived — you were left wherever the now-shorter page clamped you (a
+    // 50-card page becomes a 9-card page, and the browser clamps to the new
+    // maximum). Landing directly is also what a page turn should feel like.
+    const top = Math.max(0, list.getBoundingClientRect().top + window.scrollY - 8);
+    window.scrollTo({top, behavior: 'auto'});
+  };
+  const prev = el.querySelector('[data-prev]');
+  if (prev) prev.onclick = () => { curPage = Math.max(0, curPage - 1); go(); toPageTop(); };
+  const next = el.querySelector('[data-next]');
+  if (next) next.onclick = () => { curPage = curPage + 1; go(); toPageTop(); };
 }
 
 function renderJobs(snap) {
@@ -708,7 +728,12 @@ function renderJobs(snap) {
   // Flash + scroll to any newly-appeared job so an added/auto-opened disc is
   // obvious — they land in the Queued group and are otherwise easy to miss.
   // (Skipped on the first render so a page load doesn't flash everything.)
+  // Compare against every job in the SNAPSHOT, not just the ones on this page.
+  // Against the visible page, anything that merely moved onto it counted as new:
+  // deleting a job pulls the next one up from page 2, so removing a job scrolled
+  // you to the bottom of the list, and paging flashed and scrolled every card.
   const nowIds = jobs.map(j => j.id);
+  const allIds = new Set(snap.jobs.map(j => j.id));
   if (renderJobs._known) {
     const fresh = nowIds.filter(id => !renderJobs._known.has(id));
     if (fresh.length) {
@@ -720,7 +745,7 @@ function renderJobs(snap) {
       }
     }
   }
-  renderJobs._known = new Set(nowIds);
+  renderJobs._known = allIds;
 }
 function renderedStateClear(){ for(const k of Object.keys(renderedState)) delete renderedState[k]; }
 
@@ -782,8 +807,14 @@ function liveUpdate(card, j){
   const nm = j.display_name || j.disc_name || j.source;
   if (nameEl && nameEl.textContent !== nm) nameEl.textContent = nm;
   const badge = card.querySelector('[data-badge]');
-  badge.textContent = j.stalled ? 'stalled' : j.state.replace(/_/g,' ');
-  badge.className = 'badge ' + (j.stalled ? 'failed' : badgeClass(j.state));
+  // needs_review is a slice of failed with its own chip, so the badge has to say
+  // so too — otherwise the card reads FAILED, the Failed chip reads 0, and
+  // clicking it shows nothing while the card is right there.
+  badge.textContent = j.stalled ? 'stalled'
+    : j.needs_review ? 'needs review'
+    : j.state.replace(/_/g,' ');
+  badge.className = 'badge ' + (j.stalled || j.needs_review ? 'failed'
+                                : badgeClass(j.state));
   card.querySelector('[data-bar]').style.width = Math.round(j.progress*100)+'%';
   card.querySelector('[data-stage]').textContent =
     j.error ? ('⚠ '+j.error)
