@@ -125,3 +125,40 @@ def test_a_stalled_job_still_reads_as_stalled_whatever_its_state():
 def test_a_ready_job_is_queued_on_whichever_side_it_is_waiting():
     assert js(f"catOf({_job(state='ready', lane='encode')})") == "queued"
     assert js(f"catOf({_job(state='ready', lane='rip')})") == "queued"
+
+
+# --- confirming must acknowledge the click -----------------------------------
+
+def test_every_confirm_button_is_disabled_while_its_request_is_in_flight():
+    """The reported bug: Confirm naming gave no feedback, the form stayed on
+    screen, so it looked like nothing happened and people clicked again — and
+    the second click landed on a job that had already left the naming gate.
+
+    "Confirm titles" always did this correctly; the other two did not."""
+    src = INDEX.read_text()
+    for handler, guard in (
+            ("doConfirm", "cbtn.disabled = true"),
+            ("data-confirmmatch", "mbtn.disabled = true"),
+            ("goBtn.onclick", "goBtn.disabled = true"),
+    ):
+        assert guard in src, f"{handler} does not disable while in flight"
+    # ...and a re-entrant click is refused even before the disable takes effect
+    assert "if (cbtn.disabled) return;" in src
+    assert "if (mbtn.disabled) return;" in src
+
+
+def test_a_failed_confirm_re_enables_its_button_so_it_can_be_retried():
+    """Disabling forever would turn a transient failure into a dead form."""
+    src = INDEX.read_text()
+    assert "cbtn.disabled = false; cbtn.textContent = 'Confirm naming';" in src
+    assert "mbtn.disabled = false;" in src
+
+
+def test_confirming_removes_the_form_without_waiting_for_the_next_tick():
+    """The form staying put is what invited the second click. The SSE frame can
+    lag when the queue is large or the box is busy, so the committed transition
+    is reflected immediately."""
+    src = INDEX.read_text()
+    confirm = src.split("async function doConfirm")[1].split("body.querySelector('[data-confirm]').onclick")[0]
+    assert "renderedState[j.id] = null" in confirm
+    assert "renderJobs(renderJobs._lastSnap)" in confirm

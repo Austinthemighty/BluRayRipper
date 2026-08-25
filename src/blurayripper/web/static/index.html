@@ -1043,6 +1043,8 @@ function buildMapping(card, j){
     }
   }
   async function doConfirm(){
+    const cbtn = body.querySelector('[data-confirm]');
+    if (cbtn.disabled) return;          // a click is already in flight
     if(!state.chosen){ alert('Pick a title first'); return; }
     let assignments=[];
     if (state.kind==='movie') {
@@ -1059,7 +1061,23 @@ function buildMapping(card, j){
     }
     const gmode = body.querySelector(`input[name=g${j.id}]:checked`).value;
     const tune_grain = gmode==='on' ? true : (gmode==='off' ? false : null);
-    try { await api('POST',`/api/jobs/${j.id}/mapping`,{assignments, grain_mode:gmode, tune_grain}); } catch(e){ alert(e.message); }
+    // Say something IMMEDIATELY. With no feedback and the form still on screen,
+    // a confirm that had already succeeded looked like nothing had happened, so
+    // people clicked again — and the second click landed on a job that had left
+    // the naming gate, producing "not awaiting a naming mapping".
+    cbtn.disabled = true; cbtn.textContent = 'Confirming…';
+    try {
+      await api('POST',`/api/jobs/${j.id}/mapping`,{assignments, grain_mode:gmode, tune_grain});
+      // Reflect the committed transition now rather than waiting for the next
+      // SSE frame, which lags when the queue is large or the box is busy — the
+      // form remaining is what invited the second click.
+      j.state = (gmode === 'preview') ? 'awaiting_grain' : 'ready';
+      renderedState[j.id] = null;                  // rebuild without the form
+      if (renderJobs._lastSnap) renderJobs(renderJobs._lastSnap);
+    } catch(e){
+      cbtn.disabled = false; cbtn.textContent = 'Confirm naming';
+      alert(e.message);
+    }
   }
   body.querySelector('[data-confirm]').onclick = doConfirm;
   doSearch();  // auto-search on the pre-filled disc name (one match auto-confirms)
@@ -1241,14 +1259,20 @@ function buildMatch(card, j){
         <span class="muted">score ${c.score}${c.runner_up!=null?` · next E${pad(c.runner_up)} ${c.runner_up_score}`:''}</span>
         ${c.confident?'<span style="color:#3fb950;">✓</span>':'<span style="color:#d29922;">⚠</span>'}</div>`).join('')
     + `<div class="row"><button data-confirmmatch>Confirm episodes</button><span data-msg class="muted"></span></div>`;
-  body.querySelector('[data-confirmmatch]').onclick = async () => {
+  body.querySelector('[data-confirmmatch]').onclick = async (ev) => {
+    const mbtn = ev.currentTarget;
+    if (mbtn.disabled) return;          // a click is already in flight
     const mapping={};
     body.querySelectorAll('select[data-mep]').forEach(s=>mapping[+s.dataset.mep]=+s.value);
     const eps=Object.values(mapping);
     if(new Set(eps).size!==eps.length && !confirm('Two titles map to the same episode — continue anyway?')) return;
     body.querySelector('[data-msg]').textContent='Saving…';
+    mbtn.disabled = true;
     try { await api('POST',`/api/jobs/${j.id}/confirm-match`,{mapping}); }
-    catch(e){ body.querySelector('[data-msg]').textContent='⚠ '+e.message; }
+    catch(e){
+      mbtn.disabled = false;            // a real failure must stay retryable
+      body.querySelector('[data-msg]').textContent='⚠ '+e.message;
+    }
   };
 }
 

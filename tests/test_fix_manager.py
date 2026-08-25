@@ -426,3 +426,43 @@ def test_the_mapping_form_prefills_from_the_iso_volume_label(tmp_path):
     assert card["label_disc"] == 4
     # The friendly name is still what identifies the disc on the card.
     assert card["disc_name"] == "Hawaii Five-O"
+
+
+async def test_a_second_confirm_explains_itself_instead_of_reading_as_a_fault(
+        tmp_path, monkeypatch):
+    """The reported bug's tail end. The UI now blocks the double click, but a
+    slow tick or a second tab can still get there, and "Job 5 is not awaiting a
+    naming mapping" reads like something broke — when in fact the first click
+    worked and nothing was lost."""
+    from blurayripper.models import EpisodeAssignment, MediaKind
+
+    m = _mgr(tmp_path)
+    wj = WebJob(id=5, source="disc:0", state=JobState.READY)
+    wj.assignments = {0: EpisodeAssignment(
+        title_id=0, kind=MediaKind.MOVIE, show_or_movie_title="Heat", year=1995)}
+    job = Job(source="disc:0"); job.state = JobState.READY
+    wj._pipeline_job = job
+    m.jobs[5] = wj
+
+    with pytest.raises(ValueError) as exc:
+        m.set_mapping(5, list(wj.assignments.values()))
+
+    msg = str(exc.value)
+    assert "already confirmed" in msg
+    assert "Nothing was lost" in msg
+    assert "not awaiting a naming mapping" not in msg
+
+
+async def test_a_job_that_never_had_a_naming_still_says_so_plainly(tmp_path):
+    """The other side: a job with no assignments genuinely is not at that gate,
+    and must not be told it was 'already confirmed'."""
+    from blurayripper.pipeline import Job as _Job
+
+    m = _mgr(tmp_path)
+    wj = WebJob(id=6, source="disc:0", state=JobState.RIPPING)
+    wj._pipeline_job = _Job(source="disc:0")
+    wj._pipeline_job.state = JobState.RIPPING
+    m.jobs[6] = wj
+
+    with pytest.raises(ValueError, match="not awaiting a naming mapping"):
+        m.set_mapping(6, [])

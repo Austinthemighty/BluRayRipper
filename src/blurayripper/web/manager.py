@@ -1427,6 +1427,16 @@ class JobManager:
     ) -> None:
         wj = self.jobs[job_id]
         if wj.state not in (JobState.AWAITING_MAPPING, JobState.AWAITING_TITLES):
+            # Almost always a second click on a confirm that already worked, so
+            # say that rather than something that reads like a fault. The UI
+            # disables the button now, but a slow tick or two tabs can still
+            # produce it, and "is not awaiting a naming mapping" sends people
+            # looking for a problem that does not exist.
+            if wj.assignments:
+                raise ValueError(
+                    f"Job {job_id} was already confirmed — it is "
+                    f"{self._live_state(wj).value.replace('_', ' ')} now. Nothing "
+                    "was lost; use Rename if you need to change the naming.")
             raise ValueError(f"Job {job_id} is not awaiting a naming mapping.")
         wj.assignments = {a.title_id: a for a in assignments}
         wj.selected_title_ids = [a.title_id for a in assignments]
