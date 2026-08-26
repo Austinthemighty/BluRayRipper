@@ -389,6 +389,14 @@ class JobManager:
             prep_states += [JobState.EXTRACTING_SUBS, JobState.OCR_SUBS]
         prep_states = tuple(prep_states)
         clustered = self.settings.cluster.use_workers
+        # Never park jobs for a missing rip when the staging root itself is not
+        # readable. A share that has not mounted yet makes EVERY file look gone,
+        # and parking the whole queue over a mount that appears a second later
+        # would be far worse than the problem being solved.
+        staging_readable = self._staging_readable()
+        if not staging_readable:
+            print(f"[recover] staging is not readable ({self.settings.storage.staging_dir})"
+                  " — not checking ripped files this pass.")
         for rec in records:
             wj = self._from_record(rec)
             self.jobs[wj.id] = wj
@@ -417,6 +425,16 @@ class JobManager:
             needs_rip = ((wj.state is JobState.READY or interrupted_fail)
                          and (wj.source or "").startswith(("disc:", "dev:"))
                          and self._rip_pending(wj))
+            # A checkpoint can also NAME a ripped file that is no longer there.
+            # Only the worker used to notice, one job at a time and only when
+            # that job happened to be the next claimable one -- so a queue of
+            # them drained at a job per grace period, which is hours. Serve can
+            # stat the lot in one pass, and it is the only place that sees the
+            # whole queue at once.
+            if (not needs_rip and staging_readable and wj.state is JobState.READY
+                    and self._rip_file_missing(wj)):
+                needs_rip = True
+                self._drop_stale_rip_checkpoints(wj)
             if clustered and needs_rip:
                 # Park for review rather than re-ripping unasked. These are discs
                 # whose rip never completed, so resuming means spinning up the
@@ -2137,6 +2155,66 @@ class JobManager:
                 "eject the disc that is in the OLD drive now.)"))
         self._persist(wj)
         self.bus.publish()
+
+    def _staging_readable(self) -> bool:
+        """Is the staging root actually there? See the caller for why it matters."""
+        try:
+            root = self.settings.storage.staging_dir
+            return root.is_dir() and any(True for _ in root.iterdir())
+        except OSError:
+            return False
+
+    def _rip_file_missing(self, wj: WebJob) -> str | None:
+        """The first ripped file this job records that is not on disk, or None.
+
+        Serve trusts the checkpoint everywhere else, which is exactly how 187
+        jobs sat in the encode lane that no worker would ever take: the
+        checkpoint said ripped, the disk disagreed, and nothing reconciled them.
+        """
+        from ..pipeline import _resolve_path
+
+        job = wj._pipeline_job
+        if job is None:
+            return None
+        staging = self.settings.storage.staging_dir
+        for tid in (wj.selected_title_ids or []):
+            cp = (job.checkpoints or {}).get(tid) or {}
+            if cp.get("placed"):
+                continue
+            prior = cp.get("ripped_path")
+            if not prior:
+                continue                 # no claim of a rip; _rip_pending covers it
+            try:
+                if not _resolve_path(staging, prior).exists():
+                    return str(_resolve_path(staging, prior))
+            except OSError:
+                return str(prior)        # unreadable is as good as absent here
+        return None
+
+    def _drop_stale_rip_checkpoints(self, wj: WebJob) -> None:
+        """Forget rip checkpoints whose files are gone.
+
+        The checkpoint is what makes the job look encode-ready, so clearing it
+        is what puts a disc job back in front of the operator with its rip
+        button instead of leaving it queued for an encode that cannot happen."""
+        from ..pipeline import _resolve_path
+
+        job = wj._pipeline_job
+        if job is None:
+            return
+        staging = self.settings.storage.staging_dir
+        for tid, cp in list((job.checkpoints or {}).items()):
+            if not isinstance(cp, dict) or cp.get("placed"):
+                continue
+            prior = cp.get("ripped_path")
+            if not prior:
+                continue
+            try:
+                gone = not _resolve_path(staging, prior).exists()
+            except OSError:
+                gone = True
+            if gone:
+                cp.pop("ripped_path", None)
 
     def _rip_pending(self, wj: WebJob) -> bool:
         """True if this disc job still has a selected title left to rip — i.e. the
