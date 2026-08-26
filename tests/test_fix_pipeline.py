@@ -616,3 +616,89 @@ async def test_a_file_job_whose_source_really_is_gone_still_says_so(tmp_path):
 
     with _pytest.raises(RuntimeError, match="source file is gone"):
         await pipe._ensure_ripped(job, 0, tmp_path / "stage", Report())
+
+
+async def test_a_requeued_truncated_rip_is_caught_before_it_is_encoded(tmp_path):
+    """Requeuing a job that failed on a bad disc read reuses whatever MakeMKV
+    managed to write. Only the RIP path checked the length, so a resumed
+    half-title went straight to the encoder and into the library — full size on
+    disk, missing its last half hour. One probe beats a multi-hour encode."""
+    import pytest as _pytest
+
+    from blurayripper.config import load_settings
+    from blurayripper.models import DiscInfo, Title
+    from blurayripper.pipeline import Job, JobState, Pipeline, configure_path_map
+
+    rip = tmp_path / "stage" / "rip" / "t000" / "x.mkv"
+    rip.parent.mkdir(parents=True)
+    rip.write_bytes(b"half a movie")
+
+    s = load_settings()
+    s.storage.staging_dir = tmp_path / "stage"
+    s.storage.output_dir = tmp_path / "out"
+    s.rip_duration_tolerance_pct = 3
+    configure_path_map([])
+    pipe = Pipeline(s)
+
+    class Probe:
+        duration_seconds = 1800          # 30 min of a 2-hour title
+    async def probe(_p): return Probe()
+    pipe.mkvtools.probe = probe
+
+    job = Job(source="disc:0")
+    job.state = JobState.READY
+    job.selected_title_ids = [0]
+    job.checkpoints = {0: {"ripped_path": "rip/t000/x.mkv"}}
+    job.disc = DiscInfo(source="disc:0", disc_name="X", titles=[
+        Title(title_id=0, duration_seconds=7200, size_bytes=1,
+              source_filename="t00.mkv", streams=[])])
+
+    class Report:
+        def on_event(self, *a, **k): pass
+        def on_progress(self, *a, **k): pass
+        def checkpoint(self): pass
+
+    with _pytest.raises(RuntimeError, match="looks truncated"):
+        await pipe._ensure_ripped(job, 0, tmp_path / "stage", Report())
+
+
+async def test_a_missing_prober_is_not_reported_as_a_corrupt_rip(tmp_path):
+    """No mkvmerge installed is a configuration problem, not a verdict on the
+    file. Failing every rip on a box that simply lacks the tool would report
+    data corruption for a missing package."""
+    from blurayripper.config import ToolNotFoundError, load_settings
+    from blurayripper.models import DiscInfo, Title
+    from blurayripper.pipeline import Job, JobState, Pipeline, configure_path_map
+
+    rip = tmp_path / "stage" / "rip" / "t000" / "x.mkv"
+    rip.parent.mkdir(parents=True)
+    rip.write_bytes(b"a movie")
+
+    s = load_settings()
+    s.storage.staging_dir = tmp_path / "stage"
+    s.storage.output_dir = tmp_path / "out"
+    s.rip_duration_tolerance_pct = 3
+    configure_path_map([])
+    pipe = Pipeline(s)
+
+    async def no_tool(_p): raise ToolNotFoundError("mkvmerge")
+    pipe.mkvtools.probe = no_tool
+
+    job = Job(source="disc:0")
+    job.state = JobState.READY
+    job.selected_title_ids = [0]
+    job.checkpoints = {0: {"ripped_path": "rip/t000/x.mkv"}}
+    job.disc = DiscInfo(source="disc:0", disc_name="X", titles=[
+        Title(title_id=0, duration_seconds=7200, size_bytes=1,
+              source_filename="t00.mkv", streams=[])])
+
+    said: list[str] = []
+
+    class Report:
+        def on_event(self, msg): said.append(msg)
+        def on_progress(self, *a, **k): pass
+        def checkpoint(self): pass
+
+    got = await pipe._ensure_ripped(job, 0, tmp_path / "stage", Report())
+    assert got == rip                                   # not failed
+    assert any("NOT verified" in m for m in said), said  # but not silent either

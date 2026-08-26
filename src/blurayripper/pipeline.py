@@ -21,7 +21,7 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Iterator, Protocol
 
-from .config import Settings
+from .config import Settings, ToolNotFoundError
 from .models import (
     SOURCE_SELECTORS, DiscInfo, EpisodeAssignment, MediaKind, StreamType,
 )
@@ -744,7 +744,8 @@ class Pipeline:
         return await self._process_after_rip(
             job, title_id, assignment, staging_root, ripped_mkv, scheduler, report)
 
-    async def _verify_rip_duration(self, job: Job, title_id: int, ripped_mkv: Path, report) -> None:
+    async def _verify_rip_duration(self, job: Job, title_id: int, ripped_mkv: Path,
+                                   report, fresh: bool = True) -> None:
         """Reject a rip whose runtime is much shorter than the disc title — the
         signature of a truncated rip (bad sectors) that MakeMKV still exited 0 on.
         Skips only when it genuinely cannot compare: the tolerance is off, or the
@@ -761,11 +762,25 @@ class Pipeline:
             return  # scan didn't report a duration — nothing to compare against
         try:
             actual = (await self.mkvtools.probe(ripped_mkv)).duration_seconds
+        except ToolNotFoundError as exc:
+            # No prober installed is not a verdict on the file. Failing every rip
+            # on a box that simply lacks mkvmerge would be a configuration
+            # problem reported as data corruption.
+            report.on_event(
+                f"Rip length NOT verified for title {title_id}: {exc} "
+                f"A truncated rip cannot be detected until this is installed.")
+            return
         except Exception as exc:
+            # A file just written that cannot be parsed is a broken rip. One
+            # RESUMED from a previous run may instead be a storage blip, so say
+            # which case this is rather than asserting the rip failed.
+            why = ("so the rip did not complete. Not keeping it; a Retry re-rips"
+                   if fresh else
+                   "so it is not safe to encode. This file was ripped earlier, "
+                   "so a storage hiccup is as likely as a bad rip — Retry is safe")
             raise RuntimeError(
                 f"The ripped file for title {title_id} can't be read back "
-                f"({type(exc).__name__}) — so the rip did not complete. Not "
-                f"keeping it; a Retry re-rips. Underlying error: {exc}"
+                f"({type(exc).__name__}) — {why}. Underlying error: {exc}"
             ) from exc
         if actual <= 0:
             return
@@ -787,6 +802,14 @@ class Pipeline:
         prior_path = _resolve_path(staging_dir, prior_rip) if prior_rip else None
         if prior_path and prior_path.exists():
             report.on_event(f"Resuming title {title_id}: reusing ripped file.")
+            # Verify it, exactly as a fresh rip is verified. Requeuing a job that
+            # failed on a bad disc read reuses whatever MakeMKV managed to write,
+            # and only the rip path checked the length — so a truncated title
+            # went straight to the encoder and into the library, at full length
+            # on disk and missing its last half hour. One probe beats a
+            # multi-hour encode of a broken file.
+            await self._verify_rip_duration(job, title_id, prior_path, report,
+                                            fresh=False)
             ripped_mkv = prior_path
         elif not job.source.startswith(SOURCE_SELECTORS):
             # A job built from an existing .mkv: its source is that file, not a
