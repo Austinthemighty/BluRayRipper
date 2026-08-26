@@ -525,3 +525,37 @@ def test_a_tmdb_outage_between_show_and_season_still_names_the_episodes(
         ("Hawaii Five-O", 2, 5)
     assert got.episode_title is None       # the only thing the outage cost
     assert "TMDB" in out and "by hand" in out, out
+
+
+# --- an encode-only worker is not a broken rip box ---------------------------
+
+def test_check_does_not_fail_a_worker_for_having_no_makemkv(tmp_path, monkeypatch, capsys):
+    """setup-linux.sh --no-makemkv builds an encode-only worker on purpose, then
+    `check` ended with "Some checks failed" because the ripper it was told not to
+    install was not installed. That reads as broken and sends the operator
+    looking for a problem they deliberately chose."""
+    import asyncio
+    from argparse import Namespace
+
+    from blurayripper.cli import _cmd_check
+    from blurayripper.config import load_settings
+
+    # Rich elides table cells at the terminal width, so a narrow console turns
+    # the status into "…" and the assertion below would be testing formatting.
+    monkeypatch.setenv("COLUMNS", "220")
+    s_ = load_settings()
+    s_.storage.staging_dir = tmp_path / "stage"
+    s_.storage.output_dir = tmp_path / "out"
+    s_.tools.makemkvcon = ""            # the only tool a worker does not need
+    monkeypatch.setattr("blurayripper.cli.load_settings", lambda *a, **k: s_)
+
+    asyncio.run(_cmd_check(Namespace(encode_only=True, config=None)))
+    worker_out = capsys.readouterr().out
+    assert "encode-only worker" in worker_out
+
+    # ...and the SAME box checked as a rip box still reports the ripper missing,
+    # which is the whole point of not just deleting the check.
+    asyncio.run(_cmd_check(Namespace(encode_only=False, config=None)))
+    rip_out = capsys.readouterr().out
+    assert "MISSING" in rip_out
+    assert "encode-only worker" not in rip_out

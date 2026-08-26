@@ -305,9 +305,20 @@ async def _cmd_check(args: argparse.Namespace) -> int:
     else:
         uses_cli_ocr = bool(_se_tool) and _se_tool._is_cli_tool()
 
+    # An encode-only worker never rips, so MakeMKV missing is the CORRECT state
+    # for it, not a fault. Without this the setup script finished a perfectly
+    # good worker install with "Some checks failed", which reads as broken and
+    # sends you looking for a problem you deliberately chose.
+    encode_only = bool(getattr(args, "encode_only", False))
+
     tool_table = Table("Tool", "Status", title="External tools")
     for key in ("makemkvcon", "handbrakecli", "mkvmerge", "mkvextract", "subtitleedit"):
         path = getattr(settings.tools, key)
+        if key == "makemkvcon" and encode_only and not _on_disk(path):
+            tool_table.add_row(
+                key, "[dim]not installed — fine, this box is an encode-only "
+                     "worker (--encode-only)[/dim]")
+            continue
         if _on_disk(path):
             note = ""
             if key == "subtitleedit":
@@ -1572,6 +1583,9 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     check = sub.add_parser("check", help="Pre-flight: verify tools, folders, and preset config")
+    check.add_argument(
+        "--encode-only", action="store_true",
+        help="This box only encodes (a cluster worker), so do not require MakeMKV.")
     check.set_defaults(func=_cmd_check)
 
     vsub = sub.add_parser(

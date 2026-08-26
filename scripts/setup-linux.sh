@@ -224,7 +224,12 @@ BRR=""
 command -v blurayripper >/dev/null 2>&1 && BRR="blurayripper"
 [ -n "$VENV" ] && [ -x "$VENV/bin/blurayripper" ] && BRR="$VENV/bin/blurayripper"
 if [ -n "$BRR" ]; then
-  ( cd "$REPO_ROOT" && "$BRR" check ) || true
+  # --encode-only when we skipped MakeMKV: the box is a worker by construction,
+  # so a missing ripper is the intended state and must not read as a failure.
+  CHECK_ARGS=""
+  [ "$WITH_MAKEMKV" -eq 0 ] && CHECK_ARGS="--encode-only"
+  # shellcheck disable=SC2086
+  ( cd "$REPO_ROOT" && "$BRR" check $CHECK_ARGS ) || true
 else
   warn "blurayripper is still not installed — see the errors above."
 fi
