@@ -516,3 +516,95 @@ async def test_a_worker_with_genuinely_nothing_to_do_still_reads_as_idle(
     await runner.run()
 
     assert stages and all(st == "idle" for st in stages), stages
+
+
+async def test_a_job_whose_ripped_file_is_gone_is_parked_instead_of_declined_forever(
+        tmp_path, monkeypatch):
+    """187 jobs sat in the encode lane while the only worker declined every one.
+    Serve decides "ripped" from the checkpoint; the worker is the only thing
+    that looks at the disk, and it had no way to say so. A checkpoint naming a
+    file that no longer exists never becomes true, so waiting is not a strategy."""
+    from blurayripper.persistence import JobRecord
+    from blurayripper.worker import WorkerRunner
+
+    s = load_settings()
+    monkeypatch.setattr(s.storage, "staging_dir", tmp_path / "stage")
+    s.cluster.worker_poll_seconds = 0
+    s.cluster.stale_after_seconds = 30          # grace = max(60, 60)
+    s.database_url = "memory://test"
+    monkeypatch.setattr("blurayripper.worker.load_settings", lambda *a, **k: s)
+
+    class Store(MemoryStore):
+        @property
+        def durable(self): return True
+        def record_worker(self, *a, **k): pass
+
+    runner = WorkerRunner(s, worker_id="encoder-A")
+    runner.store = Store()
+    runner.store.save(JobRecord(
+        id=311, source="disc:1", state="ready", selected_title_ids=[0],
+        checkpoints={"0": {"ripped_path": "job_311/rip/t000/gone.mkv"}}))
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr("blurayripper.worker.time.monotonic", lambda: clock["t"])
+
+    def advance(*a, **k):
+        clock["t"] += 40                        # two polls: 0s, then 40s, then 80s
+        if clock["t"] > 200:
+            runner.request_stop()
+
+    monkeypatch.setattr(runner, "_check_serve_presence", lambda: None)
+    monkeypatch.setattr(runner, "_maybe_periodic_restart", advance)
+    await runner.run()
+
+    row = {r.id: r for r in runner.store.load_all()}[311]
+    assert row.state == "failed"
+    assert "ripped file for this job is gone" in row.error
+    assert "gone.mkv" in row.error
+    # The lying checkpoint is cleared, so the job reads as needing a rip again
+    # rather than as encode-ready.
+    assert "ripped_path" not in (row.checkpoints.get("0") or {})
+
+
+async def test_a_rip_still_in_progress_is_given_time_rather_than_parked(
+        tmp_path, monkeypatch):
+    """The rip box legitimately shows a claimable job before its checkpoint
+    lands. Parking that would fail a job that was about to work."""
+    from blurayripper.persistence import JobRecord
+    from blurayripper.worker import WorkerRunner
+
+    s = load_settings()
+    monkeypatch.setattr(s.storage, "staging_dir", tmp_path / "stage")
+    s.cluster.worker_poll_seconds = 0
+    s.cluster.stale_after_seconds = 180
+    s.database_url = "memory://test"
+    monkeypatch.setattr("blurayripper.worker.load_settings", lambda *a, **k: s)
+
+    class Store(MemoryStore):
+        @property
+        def durable(self): return True
+        def record_worker(self, *a, **k): pass
+
+    runner = WorkerRunner(s, worker_id="encoder-A")
+    runner.store = Store()
+    runner.store.save(JobRecord(
+        id=9, source="disc:0", state="ready", selected_title_ids=[0],
+        checkpoints={"0": {"ripped_path": "job_9/rip/t000/x.mkv"}}))
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr("blurayripper.worker.time.monotonic", lambda: clock["t"])
+    polls = {"n": 0}
+
+    def advance(*a, **k):
+        polls["n"] += 1
+        clock["t"] += 5                          # well inside the 360s grace
+        if polls["n"] >= 4:
+            runner.request_stop()
+
+    monkeypatch.setattr(runner, "_check_serve_presence", lambda: None)
+    monkeypatch.setattr(runner, "_maybe_periodic_restart", advance)
+    await runner.run()
+
+    row = {r.id: r for r in runner.store.load_all()}[9]
+    assert row.state == "ready"                  # still waiting, not failed
+    assert (row.checkpoints.get("0") or {}).get("ripped_path")

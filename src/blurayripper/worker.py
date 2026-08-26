@@ -136,6 +136,10 @@ class WorkerRunner:
         # down the same job over and over. Counting ids would have stuck at one
         # and never reported the loop it is actually in.
         self._refused = 0
+        # When each job was FIRST seen unworkable, so a checkpoint pointing at a
+        # file that no longer exists eventually gets parked instead of declined
+        # for ever.
+        self._refused_since: dict[int, float] = {}
         # Set when a drain should be followed by a git-pull + restart (from the
         # 'u' key OR a cluster-wide "update all workers" signal from the server).
         self.update_requested = False   # pull before restarting
@@ -334,6 +338,14 @@ class WorkerRunner:
                 # claimable READY state before its rip checkpoints exist. Put the
                 # claim back and keep polling, rather than failing it with
                 # "no ripped file to encode" (and stealing it from the rip box).
+                #
+                # But only for a while. A checkpoint that names a file which no
+                # longer exists never becomes true, and this box is the ONLY one
+                # that looks at the disk -- serve decides "ripped" from the
+                # checkpoint alone. Left alone, such a job sits in the encode
+                # lane for ever while every worker quietly declines it.
+                if self._refused_too_long(rec):
+                    self._park_for_review(rec)
                 with contextlib.suppress(Exception):
                     self.store.release(rec.id, self.worker_id)
                 # Say WHY, in the panel, not just on this box's console. Refusing
@@ -357,6 +369,46 @@ class WorkerRunner:
         if self.settings.cluster.worker_does_subs:
             return CLAIMABLE_STATES + _SUBS_STATES
         return CLAIMABLE_STATES
+
+    def _refused_too_long(self, rec: JobRecord) -> bool:
+        """Has this job been unworkable long enough to stop hoping?
+
+        Timed, not counted: a rip legitimately takes a while, and how many times
+        we happen to poll in that window says nothing about it. The clock starts
+        the first time we see the job unworkable."""
+        grace = max(60, self.settings.cluster.stale_after_seconds * 2)
+        first = self._refused_since.setdefault(rec.id, time.monotonic())
+        return (time.monotonic() - first) >= grace
+
+    def _park_for_review(self, rec: JobRecord) -> None:
+        """Tell the QUEUE the ripped file is gone, instead of only this console.
+
+        Also drops the checkpoint that names the missing file. That checkpoint is
+        what makes serve believe the job is ripped, so clearing it puts a disc
+        job back in front of the operator with its "rip this disc" button rather
+        than leaving it looking encode-ready for ever.
+        """
+        missing = self._first_missing_file(rec)
+        for tid in list(rec.selected_title_ids):
+            cp = rec.checkpoints.get(str(tid)) or rec.checkpoints.get(tid)
+            if isinstance(cp, dict) and not cp.get("placed"):
+                cp.pop("ripped_path", None)
+        rec.state = JobState.FAILED.value
+        rec.error = (
+            f"The ripped file for this job is gone: {missing}. Nothing on this "
+            "box can encode it, so it was waiting in the encode queue with no "
+            "worker able to take it. Put the disc back in and Retry to rip it "
+            "again, or Remove it. Nothing has been deleted by this."
+        )
+        rec.log = list(rec.log or []) + [
+            f"[{self.worker_id}] Ripped file missing ({missing}) — parked for "
+            "review rather than left queued for an encode that cannot happen."
+        ]
+        with contextlib.suppress(Exception):
+            self.store.save_if_owner(rec, self.worker_id)
+        self._refused_since.pop(rec.id, None)
+        print(f"Job {rec.id} parked for review: ripped file missing ({missing}).",
+              flush=True)
 
     def _refusing_stage(self, missing: str) -> str:
         """What the panel shows while this box is turning jobs down.
