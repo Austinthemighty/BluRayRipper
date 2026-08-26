@@ -279,6 +279,35 @@ async def _cmd_check(args: argparse.Namespace) -> int:
     from pathlib import Path
 
     settings = load_settings(args.config)
+
+    # Report what this box will ACTUALLY run with. serve and worker pull the
+    # shared overlay from Postgres at startup; check did not, so on a box whose
+    # settings live in the cluster it reported the settings.toml defaults --
+    # "staging ./staging" on a machine that in fact stages to the NAS. That is
+    # backwards for the one command whose job is to tell you the box is right.
+    #
+    # Read-only: pulled and merged for this report, never written back and never
+    # seeded, so running a diagnostic cannot push a half-configured box's
+    # defaults over everyone else's settings.
+    cluster_note = ""
+    if settings.database_url:
+        try:
+            from .persistence import make_store
+            from .settings_store import SHARED_KEY as _SETTINGS_KEY
+            _store = make_store(settings.database_url)
+            if getattr(_store, "durable", False):
+                remote = _store.get_shared_config(_SETTINGS_KEY)
+                if remote:
+                    settings = load_settings(args.config, extra_overlay=remote)
+                    cluster_note = (f"Shared settings pulled from the cluster "
+                                    f"({len(remote)} section(s)) — shown below.")
+                else:
+                    cluster_note = "Nothing stored in the cluster yet — these are this box's own settings."
+        except Exception as exc:
+            cluster_note = (f"[yellow]Could not read cluster settings "
+                            f"({type(exc).__name__}) — showing this box's local "
+                            f"settings, which is NOT what serve/worker will use "
+                            f"once the database is reachable.[/yellow]")
     ok = True
 
     # External tools. Verify each configured path actually exists on THIS machine
@@ -654,6 +683,9 @@ async def _cmd_check(args: argparse.Namespace) -> int:
     else:
         console.print("[yellow]No TMDB key — naming will be fully manual.[/yellow]")
 
+    if cluster_note:
+        console.print(f"[dim]{cluster_note}[/dim]" if "yellow" not in cluster_note
+                      else cluster_note)
     console.print(
         "\n[bold green]All checks passed.[/bold green]" if ok
         else "\n[bold red]Some checks failed — fix the items above before ripping.[/bold red]"

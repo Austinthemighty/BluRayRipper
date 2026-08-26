@@ -559,3 +559,71 @@ def test_check_does_not_fail_a_worker_for_having_no_makemkv(tmp_path, monkeypatc
     rip_out = capsys.readouterr().out
     assert "MISSING" in rip_out
     assert "encode-only worker" not in rip_out
+
+
+def test_check_reports_the_settings_the_box_will_actually_run_with(tmp_path, monkeypatch, capsys):
+    """serve and worker pull the shared overlay from Postgres at startup; check
+    did not. So on a box whose settings live in the cluster, check reported the
+    settings.toml defaults — "staging ./staging" on a machine that in fact
+    stages to the NAS. Backwards, for the one command whose job is to tell you
+    the box is configured correctly."""
+    import asyncio
+    from argparse import Namespace
+
+    from blurayripper.cli import _cmd_check
+    from blurayripper.config import load_settings
+    from blurayripper.persistence import MemoryStore
+    from blurayripper.settings_store import SHARED_KEY
+
+    monkeypatch.setenv("COLUMNS", "220")
+    nas = tmp_path / "nas" / "staging"
+    nas.mkdir(parents=True)
+
+    class Store(MemoryStore):
+        @property
+        def durable(self): return True
+
+    store = Store()
+    store.set_shared_config(SHARED_KEY, {"storage": {"staging_dir": str(nas)}})
+
+    s_ = load_settings()
+    s_.database_url = "memory://test"
+    s_.storage.output_dir = tmp_path / "out"
+    monkeypatch.setattr("blurayripper.cli.load_settings", lambda *a, **k: s_)
+    monkeypatch.setattr("blurayripper.persistence.make_store", lambda *a, **k: store)
+
+    asyncio.run(_cmd_check(Namespace(encode_only=True, config=None)))
+    out = capsys.readouterr().out
+    assert "pulled from the cluster" in out
+
+
+def test_check_never_seeds_the_cluster_from_a_box_being_diagnosed(tmp_path, monkeypatch, capsys):
+    """Reading is safe; writing is not. A half-configured box running `check`
+    must not push its defaults over everyone else's settings."""
+    import asyncio
+    from argparse import Namespace
+
+    from blurayripper.cli import _cmd_check
+    from blurayripper.config import load_settings
+    from blurayripper.persistence import MemoryStore
+    from blurayripper.settings_store import SHARED_KEY
+
+    monkeypatch.setenv("COLUMNS", "220")
+
+    class Store(MemoryStore):
+        @property
+        def durable(self): return True
+        def set_shared_config(self, *a, **k):
+            raise AssertionError("check must never write to the cluster")
+
+    store = Store()
+    s_ = load_settings()
+    s_.database_url = "memory://test"
+    s_.storage.staging_dir = tmp_path / "stage"
+    s_.storage.output_dir = tmp_path / "out"
+    monkeypatch.setattr("blurayripper.cli.load_settings", lambda *a, **k: s_)
+    monkeypatch.setattr("blurayripper.persistence.make_store", lambda *a, **k: store)
+
+    asyncio.run(_cmd_check(Namespace(encode_only=True, config=None)))
+    assert "Nothing stored in the cluster yet" in capsys.readouterr().out
+    assert store.get_shared_config(SHARED_KEY) is None
