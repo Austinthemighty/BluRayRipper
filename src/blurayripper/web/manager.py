@@ -2171,7 +2171,7 @@ class JobManager:
         jobs sat in the encode lane that no worker would ever take: the
         checkpoint said ripped, the disk disagreed, and nothing reconciled them.
         """
-        from ..pipeline import _resolve_path
+        from ..pipeline import _is_abs_stored, _resolve_path
 
         job = wj._pipeline_job
         if job is None:
@@ -2184,11 +2184,22 @@ class JobManager:
             prior = cp.get("ripped_path")
             if not prior:
                 continue                 # no claim of a rip; _rip_pending covers it
+            # ONLY rips this box made, i.e. paths stored relative to staging.
+            # A job added from a file stores the SOURCE .mkv here, as an absolute
+            # path from whichever machine added it. Parking one of those clears a
+            # checkpoint that cannot be rebuilt -- there is no disc to re-rip --
+            # so a path this box merely cannot resolve turned 121 healthy jobs
+            # into permanently failed ones. The pipeline already reports a
+            # genuinely missing source when the job runs, with the real reason.
+            if _is_abs_stored(prior):
+                continue
             try:
                 if not _resolve_path(staging, prior).exists():
                     return str(_resolve_path(staging, prior))
             except OSError:
-                return str(prior)        # unreadable is as good as absent here
+                # "I could not tell" is not "it is gone". A CIFS blip must not
+                # park a job whose file is sitting there.
+                continue
         return None
 
     def _drop_stale_rip_checkpoints(self, wj: WebJob) -> None:
@@ -2197,7 +2208,7 @@ class JobManager:
         The checkpoint is what makes the job look encode-ready, so clearing it
         is what puts a disc job back in front of the operator with its rip
         button instead of leaving it queued for an encode that cannot happen."""
-        from ..pipeline import _resolve_path
+        from ..pipeline import _is_abs_stored, _resolve_path
 
         job = wj._pipeline_job
         if job is None:
@@ -2207,12 +2218,12 @@ class JobManager:
             if not isinstance(cp, dict) or cp.get("placed"):
                 continue
             prior = cp.get("ripped_path")
-            if not prior:
-                continue
+            if not prior or _is_abs_stored(prior):
+                continue                 # see _rip_file_missing: never a source file
             try:
                 gone = not _resolve_path(staging, prior).exists()
             except OSError:
-                gone = True
+                gone = False             # unknown is not gone
             if gone:
                 cp.pop("ripped_path", None)
 

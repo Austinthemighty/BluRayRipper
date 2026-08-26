@@ -790,13 +790,29 @@ class Pipeline:
             ripped_mkv = prior_path
         elif not job.source.startswith(SOURCE_SELECTORS):
             # A job built from an existing .mkv: its source is that file, not a
-            # disc. There is nothing to re-rip — makemkvcon can't even parse a
-            # bare path — so say the file went missing instead of failing with a
-            # MakeMKV error on a job that never involved a disc.
-            raise RuntimeError(
-                f"The source file is gone: {prior_path or job.source}. This job was "
-                f"added from a file, so there's no disc to re-rip it from. Put the "
-                f"file back (or check the server can still reach that path) and Retry.")
+            # disc. Before declaring it lost, REBUILD the checkpoint from the
+            # source, because for this kind of job the two are the same file.
+            #
+            # Without this, anything that dropped the checkpoint killed the job
+            # for good: there is no disc to re-rip, so the raise below is
+            # terminal and Retry cannot help. A cluster sweep did exactly that
+            # to 121 jobs whose sources were sitting on the NAS the whole time.
+            from_source = _resolve_path(staging_dir, job.source)
+            if from_source.exists():
+                report.on_event(
+                    f"Title {title_id}: rip checkpoint was missing; recovered it "
+                    f"from the job's own source file.")
+                cp["ripped_path"] = _rel_path(staging_dir, from_source)
+                report.checkpoint()
+                # Fall through exactly like the resume branch above, rather than
+                # returning early: the tail of this function is shared.
+                ripped_mkv = from_source
+            else:
+                raise RuntimeError(
+                    f"The source file is gone: {prior_path or job.source}. This job "
+                    f"was added from a file, so there's no disc to re-rip it from. "
+                    f"Put the file back (or check the server can still reach that "
+                    f"path) and Retry.")
         else:
             job.state = JobState.RIPPING
             report.on_event(f"Ripping title {title_id} ...")

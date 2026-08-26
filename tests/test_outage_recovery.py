@@ -284,3 +284,61 @@ def test_an_unmounted_share_parks_nothing_at_all(tmp_path, monkeypatch, capsys):
 
     assert m.jobs[313].state is JobState.READY       # untouched
     assert "not readable" in capsys.readouterr().out
+
+
+# --- the sweep must not touch a job added from a file ------------------------
+
+def _file_job(m, job_id, source):
+    """A job added from an existing .mkv: its 'rip' IS that source file, stored
+    as an absolute path from whichever machine added it."""
+    from blurayripper.models import DiscInfo, Title
+    wj = WebJob(id=job_id, source=source, state=JobState.READY)
+    job = Job(source=source)
+    job.state = JobState.READY
+    job.disc = DiscInfo(source=source, disc_name="X", titles=[
+        Title(title_id=0, duration_seconds=100, size_bytes=1,
+              source_filename="t00.mkv", streams=[])])
+    job.selected_title_ids = [0]
+    job.checkpoints = {0: {"ripped_path": source}}
+    wj._pipeline_job = job
+    wj.selected_title_ids = [0]
+    wj.disc = job.disc
+    m.jobs[job_id] = wj
+    m.store.save(m._to_record(wj))
+    return wj
+
+
+def test_a_file_sourced_job_is_never_parked_by_the_sweep(tmp_path, monkeypatch):
+    """The sweep parks disc rips this box made. A job added from a file stores
+    the SOURCE .mkv as its ripped_path, as a foreign absolute path — and parking
+    one clears a checkpoint that cannot be rebuilt, because there is no disc to
+    re-rip. That turned 121 jobs whose sources were sitting on the NAS into
+    permanently failed ones."""
+    store = Flaky()
+    m = _clustered(tmp_path, monkeypatch, store)
+    wj = _file_job(m, 46, r"Z:\media\MakeMKV\To Process\MKV's\Elemental (2023).mkv")
+
+    m.jobs.clear()
+    m.recover()
+
+    wj = m.jobs[46]
+    assert wj.state is JobState.READY, "a file-sourced job must not be parked"
+    assert (wj._pipeline_job.checkpoints.get(0) or {}).get("ripped_path"), \
+        "its checkpoint must survive — nothing can rebuild it"
+
+
+def test_an_unreadable_share_does_not_count_as_a_missing_rip(tmp_path, monkeypatch):
+    """"I could not tell" is not "it is gone". This NAS has already thrown
+    'Resource temporarily unavailable' once; a blip must not park a job whose
+    file is sitting right there."""
+    store = Flaky()
+    m = _clustered(tmp_path, monkeypatch, store)
+    _ripped_job(m, tmp_path, 314, "job_314/rip/t000/x.mkv", make_file=True)
+
+    def boom(self):
+        raise OSError("Resource temporarily unavailable")
+    monkeypatch.setattr("pathlib.Path.exists", boom)
+
+    m.jobs.clear()
+    m.recover()
+    assert m.jobs[314].state is JobState.READY

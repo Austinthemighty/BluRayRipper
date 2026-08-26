@@ -549,3 +549,70 @@ async def test_the_grain_preview_gate_opens_once_per_disc_not_once_per_episode(
     # ...and the one answer was applied to both episodes, not defaulted for one.
     assert [job.checkpoints[t]["tune_grain"] for t in (0, 1)] == [True, True]
     assert len(rig.encodes) == 2
+
+
+async def test_a_file_job_rebuilds_its_lost_checkpoint_from_its_own_source(tmp_path):
+    """The repair path for the 121 jobs already damaged. For a job added from a
+    file, the 'ripped file' and the source ARE the same file — so a missing
+    checkpoint can be rebuilt rather than being terminal. Without this, anything
+    that dropped the checkpoint killed the job for good: there is no disc, so
+    the raise is final and Retry cannot help."""
+    from blurayripper.config import load_settings
+    from blurayripper.pipeline import Job, JobState, Pipeline, configure_path_map
+
+    src = tmp_path / "To Process" / "Elemental (2023).mkv"
+    src.parent.mkdir(parents=True)
+    src.write_bytes(b"a real movie")
+
+    s = load_settings()
+    s.storage.staging_dir = tmp_path / "stage"
+    s.storage.output_dir = tmp_path / "out"
+    configure_path_map([])
+    pipe = Pipeline(s)
+
+    job = Job(source=str(src))
+    job.state = JobState.READY
+    job.selected_title_ids = [0]
+    job.checkpoints = {0: {}}          # the checkpoint the sweep wrongly cleared
+
+    events: list[str] = []
+
+    class Report:
+        def on_event(self, msg): events.append(msg)
+        def on_progress(self, *a, **k): pass
+        def checkpoint(self): pass
+
+    ripped = await pipe._ensure_ripped(job, 0, tmp_path / "stage", Report())
+
+    assert ripped == src
+    assert any("recovered it from the job's own source" in e for e in events), events
+    # and it is written back, so the repair is not re-done on every run
+    assert job.checkpoints[0].get("ripped_path")
+
+
+async def test_a_file_job_whose_source_really_is_gone_still_says_so(tmp_path):
+    """The rebuild must not paper over real loss — the message has to stay
+    truthful for a file that genuinely is not there."""
+    import pytest as _pytest
+
+    from blurayripper.config import load_settings
+    from blurayripper.pipeline import Job, JobState, Pipeline, configure_path_map
+
+    s = load_settings()
+    s.storage.staging_dir = tmp_path / "stage"
+    s.storage.output_dir = tmp_path / "out"
+    configure_path_map([])
+    pipe = Pipeline(s)
+
+    job = Job(source=str(tmp_path / "vanished.mkv"))
+    job.state = JobState.READY
+    job.selected_title_ids = [0]
+    job.checkpoints = {0: {}}
+
+    class Report:
+        def on_event(self, *a, **k): pass
+        def on_progress(self, *a, **k): pass
+        def checkpoint(self): pass
+
+    with _pytest.raises(RuntimeError, match="source file is gone"):
+        await pipe._ensure_ripped(job, 0, tmp_path / "stage", Report())
