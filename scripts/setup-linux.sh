@@ -62,7 +62,10 @@ $SUDO apt-get update -qq
 # discs (menu-driven Blu-rays and most BD+ titles). Without one it does not fail
 # outright — it rips a subset of the titles and logs "This disc requires Java
 # runtime (JRE)" partway down, so the disc looks done and is quietly incomplete.
-$SUDO apt-get install -y handbrake-cli mkvtoolnix ffmpeg tesseract-ocr $TESS_LANGS curl tar git default-jre
+# python3-venv is for BluRayRipper itself: Ubuntu 24.04 and other PEP 668
+# distros mark the system Python "externally managed", so `pip install -e .`
+# refuses outright and the app cannot be installed without a venv.
+$SUDO apt-get install -y handbrake-cli mkvtoolnix ffmpeg tesseract-ocr $TESS_LANGS curl tar git default-jre python3-venv
 ok "HandBrakeCLI, mkvmerge/mkvextract, ffmpeg, tesseract, JRE installed (on PATH)."
 
 # Default TOOLS_DIR is /opt/brr-tools, which needs root to create — but the
@@ -179,12 +182,51 @@ else
   info "Skipping MakeMKV (--no-makemkv) — encode-only worker."
 fi
 
+# --- install BluRayRipper itself ----------------------------------------------
+# This used to just say "run pip install -e ." and stop. On Ubuntu 24.04 that
+# command CANNOT succeed: PEP 668 marks the system Python externally managed and
+# pip refuses, even under sudo. So the setup ended one unrunnable instruction
+# short of a working box. Install into a venv here instead, which is the
+# supported route on those distros and harmless on older ones.
+VENV="$REPO_ROOT/.venv"
+if [ ! -x "$VENV/bin/python" ]; then
+  info "Creating a virtualenv for BluRayRipper ($VENV)"
+  if ! python3 -m venv "$VENV"; then
+    warn "Could not create the virtualenv. Install the venv module for your"
+    warn "Python (Debian/Ubuntu: apt install python3-venv) and re-run this script."
+    VENV=""
+  fi
+fi
+if [ -n "$VENV" ] && [ -x "$VENV/bin/python" ]; then
+  info "Installing BluRayRipper into the virtualenv"
+  "$VENV/bin/python" -m pip install -q --upgrade pip >/dev/null 2>&1 || true
+  # WITH the extras, not a bare `pip install -e .`: the base package has no
+  # fastapi/uvicorn (so `serve` won't start) and no psycopg (so a clustered box
+  # can't reach the shared Postgres). Installing bare would leave a box that
+  # looks set up and cannot do either job.
+  if ( cd "$REPO_ROOT" && "$VENV/bin/python" -m pip install -q -e ".[web,postgres,secrets]" ); then
+    ok "blurayripper -> $VENV/bin/blurayripper"
+    # Put it on PATH for everyone, so systemd units and a plain shell agree on
+    # which one they get. A symlink into the venv keeps its interpreter.
+    if [ -w /usr/local/bin ] || [ -n "$SUDO" ]; then
+      $SUDO ln -sf "$VENV/bin/blurayripper" /usr/local/bin/blurayripper \
+        && ok "blurayripper on PATH (/usr/local/bin/blurayripper)"
+    fi
+  else
+    warn "Installing BluRayRipper failed. Run it by hand to see why:"
+    warn "  cd $REPO_ROOT && $VENV/bin/python -m pip install -e '.[web,postgres,secrets]'"
+  fi
+fi
+
 # --- verify -------------------------------------------------------------------
 info "Verifying with 'blurayripper check'"
-if command -v blurayripper >/dev/null 2>&1; then
-  ( cd "$REPO_ROOT" && blurayripper check ) || true
+BRR=""
+command -v blurayripper >/dev/null 2>&1 && BRR="blurayripper"
+[ -n "$VENV" ] && [ -x "$VENV/bin/blurayripper" ] && BRR="$VENV/bin/blurayripper"
+if [ -n "$BRR" ]; then
+  ( cd "$REPO_ROOT" && "$BRR" check ) || true
 else
-  warn "'blurayripper' not on PATH — run 'pip install -e .' in $REPO_ROOT, then 'blurayripper check'."
+  warn "blurayripper is still not installed — see the errors above."
 fi
 info "For a clustered setup, set BLURAYRIPPER_DATABASE_URL (same Postgres) in"
 info "$REPO_ROOT/config/secrets.env on every box. A single all-in-one box can skip it."

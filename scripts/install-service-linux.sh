@@ -89,7 +89,10 @@ if [ -z "$BRR" ]; then
   if [ "$ACTION" = "print" ]; then
     BRR="/path/to/blurayripper"   # placeholder so --print still shows the shape
   else
-    echo "Can't find 'blurayripper' on PATH. Install it first (pip install -e .)," >&2
+    echo "Can't find 'blurayripper' on PATH. Run ./scripts/setup-linux.sh, which" >&2
+    echo "installs it into a virtualenv and links it onto PATH (a plain" >&2
+    echo "'pip install -e .' is refused outright on Ubuntu 24.04 and other" >&2
+    echo "PEP 668 distros, so it is not a workaround)," >&2
     echo "then re-run this from the same environment." >&2
     exit 2
   fi

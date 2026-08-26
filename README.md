@@ -41,15 +41,24 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1 -Langs pol
 ./scripts/setup-linux.sh --langs pol --no-makemkv   # encode-only worker
 ```
 
-Then install the app itself and verify:
+On Linux `setup-linux.sh` also installs the app itself (into `.venv/`, linked
+onto PATH as `blurayripper`) and runs `check`, so all that is left is:
 
 ```bash
-python3.11 -m venv .venv && . .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -e ".[web]"        # add ",postgres" for clustering, ",iso" for ISO cover art
-
 cp config/secrets.env.example config/secrets.env   # then add your TMDB key (+ DB URL if clustering)
 blurayripper check             # confirms tools, folders, preset, languages, TMDB key
 ```
+
+Installing by hand instead (Windows, macOS, or a distro without apt):
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -e ".[web,postgres,secrets]"           # add ",iso" for cover art inside .iso files
+```
+
+Use a virtualenv even for a one-box install. Ubuntu 24.04 and other PEP 668
+distros mark the system Python "externally managed", so a plain
+`pip install -e .` is refused outright — with or without `sudo`.
 
 ## External tools
 
