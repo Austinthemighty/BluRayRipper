@@ -24,13 +24,30 @@ CREATE TABLE IF NOT EXISTS disc_mapping (
 
 
 class MappingStore:
+    """The database lives under output_dir, which is usually a NAS share.
+
+    Opened LAZILY, on first use. Creating it in the constructor meant a worker
+    could not even start while the share was away: Pipeline builds one, so the
+    process died with PermissionError before any of its own diagnostics ran, and
+    systemd restarted it into the same crash every few seconds. A worker that
+    starts and reports "the ripped files are not reachable" is far more use than
+    one that will not boot -- and the share coming back then needs no restart.
+    """
+
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
+        self._ready = False
+
+    def _ensure(self) -> None:
+        if self._ready:
+            return
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self._db_path) as conn:
             conn.executescript(_SCHEMA)
+        self._ready = True
 
     def _connect(self) -> sqlite3.Connection:
+        self._ensure()
         return sqlite3.connect(self._db_path)
 
     def get(self, fingerprint: str) -> list[EpisodeAssignment] | None:

@@ -369,3 +369,39 @@ def test_art_pulled_out_of_an_iso_replaces_a_read_only_file_too(tmp_path, monkey
 
     assert art.fanart == stale
     assert stale.read_bytes() == fresh
+
+
+def test_a_worker_starts_even_when_the_nas_is_away(tmp_path):
+    """Live failure on handbreak01: the CIFS share dropped, Pipeline built a
+    MappingStore whose constructor mkdir'd under output_dir, and the worker died
+    with PermissionError before any of its own diagnostics ran — restarting into
+    the same crash every few seconds.
+
+    A worker that starts and reports "the ripped files are not reachable" is far
+    more use than one that will not boot, and the share coming back then needs
+    no restart."""
+    from blurayripper.services.mapping_store import MappingStore
+
+    unreachable = tmp_path / "not-mounted" / "media" / ".blurayripper" / "m.db"
+    # Simulate a directory that cannot be created, as an absent mount point is.
+    (tmp_path / "not-mounted").mkdir()
+    (tmp_path / "not-mounted").chmod(0o500)
+    try:
+        store = MappingStore(unreachable)      # must NOT raise
+        with pytest.raises(OSError):
+            store.get("some-fingerprint")      # ...but using it still reports
+    finally:
+        (tmp_path / "not-mounted").chmod(0o700)
+
+
+def test_the_mapping_store_still_works_once_storage_is_there(tmp_path):
+    """Deferring must not mean never: the schema is created on first use."""
+    from blurayripper.models import EpisodeAssignment, MediaKind
+    from blurayripper.services.mapping_store import MappingStore
+
+    store = MappingStore(tmp_path / "out" / ".blurayripper" / "m.db")
+    assert store.get("nope") is None           # creates the db on first touch
+    store.save("fp1", "HOUSE_S1_D1",
+               [EpisodeAssignment(0, MediaKind.TV, "House", 2004, season=1, episode=1)])
+    got = store.get("fp1")
+    assert got and got[0].show_or_movie_title == "House"
