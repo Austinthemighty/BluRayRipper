@@ -49,10 +49,13 @@ ffmpeg_uhd = false
 uhd_min_height = 2160
 ffmpeg_crf = 18
 # Matches the HandBrake preset's "slower" so UHD isn't encoded FASTER (i.e.
-# worse) than 1080p. Tracked here rather than left to a web-UI edit, because
-# that writes gitignored settings.local.json — which no other box gets and a
-# machine move loses. Drop to "slow"/"medium" if UHD wall-clock hurts; at 2160p
-# each step is roughly 1.4x the one before.
+# worse) than 1080p. Drop to "slow"/"medium" if UHD wall-clock hurts; at 2160p
+# each step is roughly 1.4x the one before, and 4K HDR runs about 1 fps here at
+# "slower" against 3 fps for 1080p — so this one setting dominates how long the
+# queue takes.
+# Change it on the Settings page in GLOBAL scope: that stores it in Postgres and
+# every box picks it up. (Editing it here only helps a standalone box with no
+# database — a cluster's live value comes from the shared config, which wins.)
 ffmpeg_preset = "slower"
 ffmpeg_audio = "copy"
 # Preserve Dolby Vision on UHD (needs dovitool + mkvmerge + temp space; falls
