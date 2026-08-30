@@ -466,3 +466,79 @@ async def test_a_job_that_never_had_a_naming_still_says_so_plainly(tmp_path):
 
     with pytest.raises(ValueError, match="not awaiting a naming mapping"):
         m.set_mapping(6, [])
+
+
+async def test_two_jobs_on_one_drive_never_rip_at_the_same_time(tmp_path):
+    """Live fault: jobs 311 and 350 were the same disc in the same reader and
+    BOTH ripped it at once. prep_concurrency=2 let each take a slot and nothing
+    keyed the gate to the drive, so two makemkvcon processes fought over one
+    optical head — 1.6 MB/s (0.4x) instead of a normal rip."""
+    import asyncio
+
+    mgr = _mgr(tmp_path)
+    a = WebJob(id=311, source="disc:1")
+    b = WebJob(id=350, source="disc:1")
+
+    overlap, live = [], 0
+
+    async def rip(wj):
+        nonlocal live
+        async with mgr._prep_slot(wj):
+            live += 1
+            overlap.append(live)
+            await asyncio.sleep(0.02)      # long enough for the other to barge in
+            live -= 1
+
+    await asyncio.gather(rip(a), rip(b))
+    assert max(overlap) == 1, f"two rips ran on one drive: {overlap}"
+
+
+async def test_separate_drives_still_rip_in_parallel(tmp_path):
+    """The fix must not serialise the whole rip box: two drives are two rips.
+    A lock on 'the drive' that actually behaved like a global lock would halve
+    throughput on a two-reader box and look like a fix."""
+    import asyncio
+
+    mgr = _mgr(tmp_path)
+    mgr._prep_sem = asyncio.Semaphore(2)
+    a = WebJob(id=1, source="disc:0")
+    b = WebJob(id=2, source="disc:1")
+
+    live, peak = 0, 0
+
+    async def rip(wj):
+        nonlocal live, peak
+        async with mgr._prep_slot(wj):
+            live += 1
+            peak = max(peak, live)
+            await asyncio.sleep(0.02)
+            live -= 1
+
+    await asyncio.gather(rip(a), rip(b))
+    assert peak == 2, "different drives were serialised against each other"
+
+
+async def test_file_sourced_jobs_are_not_gated_by_a_drive(tmp_path):
+    """A file has no drive to contend for. Keying the lock on the source string
+    without checking it names a drive would serialise every file job behind one
+    lock — and most of this queue is file-sourced."""
+    import asyncio
+
+    mgr = _mgr(tmp_path)
+    mgr._prep_sem = asyncio.Semaphore(2)
+    a = WebJob(id=1, source=r"Z:\media\a.mkv")
+    b = WebJob(id=2, source=r"Z:\media\b.mkv")
+    assert mgr._drive_key(a) is None
+
+    live, peak = 0, 0
+
+    async def go(wj):
+        nonlocal live, peak
+        async with mgr._prep_slot(wj):
+            live += 1
+            peak = max(peak, live)
+            await asyncio.sleep(0.02)
+            live -= 1
+
+    await asyncio.gather(go(a), go(b))
+    assert peak == 2, "file-sourced jobs were serialised behind a drive lock"

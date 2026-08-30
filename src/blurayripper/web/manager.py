@@ -227,6 +227,10 @@ class JobManager:
         # Bounds how many jobs prep (rip+subs+grain) at once — so a restart that
         # recovers dozens of in-flight jobs doesn't stampede the box all at once.
         self._prep_sem = asyncio.Semaphore(max(1, settings.prep_concurrency))
+        # One lock per physical drive. prep_concurrency alone bounds only the
+        # NUMBER of concurrent preps, so with two disc jobs on one drive both
+        # took a slot and drove makemkvcon at the same optical head.
+        self._drive_locks: dict[str, asyncio.Lock] = {}
         self._auto_retries: dict[int, int] = {}  # job id -> auto-retry count so far
         self._drives_cache_file = (
             settings.storage.output_dir / ".blurayripper" / "drives_cache.json")
@@ -2028,7 +2032,7 @@ class JobManager:
             if wj.auto_identify and not wj.assignments:
                 # Rip + OCR + subtitle-match against the disc's candidate episodes.
                 # Parks at AWAITING_MATCH if any title is uncertain.
-                async with self._prep_sem:
+                async with self._prep_slot(wj):
                     ok = await self._auto_identify(wj, reporter)
                 if not ok:
                     self._persist(wj)
@@ -2044,7 +2048,7 @@ class JobManager:
                 include_subs = not self.settings.cluster.worker_does_subs
                 # Throttle the prep phase (not the encode) so a recovery stampede
                 # doesn't run dozens of rips/OCRs at once.
-                async with self._prep_sem:
+                async with self._prep_slot(wj):
                     await self.pipeline.prep_phase(
                         job, staging_root, reporter, include_subs=include_subs)
                     self.pipeline._persist_mapping(job, reporter)
@@ -2082,7 +2086,7 @@ class JobManager:
                 self._maybe_notify_done(wj)
                 self.bus.publish()
                 return
-            async with self._prep_sem:  # single-box: bound concurrent jobs
+            async with self._prep_slot(wj):  # single-box: bound concurrent jobs
                 await self.pipeline.execute(job, self.scheduler, reporter, job_name=f"job_{wj.id}")
             wj.state = JobState.DONE
             wj.progress = 1.0
@@ -2382,6 +2386,41 @@ class JobManager:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
+
+    def _drive_key(self, wj: WebJob) -> str | None:
+        """The physical drive a job needs, or None if it reads a file.
+
+        'disc:1' and 'dev:/dev/sr0' name a drive; 'file:' and 'iso:' do not, and
+        those must not be serialised against each other."""
+        src = (wj.source or "").strip().lower()
+        return src if src.startswith(("disc:", "dev:")) else None
+
+    @contextlib.asynccontextmanager
+    async def _prep_slot(self, wj: WebJob):
+        """Hold this job's drive (if it needs one) and a prep slot.
+
+        Jobs 311 and 350 were the same disc in the same reader, and BOTH ripped
+        it at once: prep_concurrency=2 let each take a slot, and nothing keyed
+        the gate to the drive. Two makemkvcon processes then fought over one
+        optical head — 1.6 MB/s (0.4x) instead of a normal rip, with two
+        half-speed reads of the same disc landing in two staging dirs.
+
+        The drive lock is taken OUTSIDE the semaphore on purpose. Waiting on a
+        drive while holding a slot would let every slot fill with jobs queued
+        behind a drive whose owner can no longer get a slot to finish."""
+        key = self._drive_key(wj)
+        if key is None:
+            async with self._prep_sem:              # file/ISO: no drive to contend for
+                yield
+            return
+        lock = self._drive_locks.setdefault(key, asyncio.Lock())
+        if lock.locked():
+            wj.log.append(stamp_log(
+                f"Waiting for {key} — another job is using that drive."))
+            self.bus.publish()
+        async with lock:
+            async with self._prep_sem:
+                yield
 
     def _start_job(self, wj: WebJob) -> None:
         """Checkpoint the job's new state, push it to the UI, and run it.
