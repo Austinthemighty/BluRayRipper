@@ -542,3 +542,61 @@ async def test_file_sourced_jobs_are_not_gated_by_a_drive(tmp_path):
 
     await asyncio.gather(go(a), go(b))
     assert peak == 2, "file-sourced jobs were serialised behind a drive lock"
+
+
+# --- the same disc must not be queued twice ---------------------------------
+
+def _scanned(mgr, job_id, fp, state=JobState.RIPPING, name="Happy Feet 2"):
+    wj = WebJob(id=job_id, source="disc:1", state=state)
+    wj.fingerprint = fp
+    wj.disc = DiscInfo(source="disc:1", disc_name=name, titles=[])
+    mgr.jobs[wj.id] = wj
+    return wj
+
+
+def test_a_second_job_for_a_disc_still_being_ripped_is_caught(tmp_path):
+    """Jobs 311 and 350 were the same disc in the same reader, both in flight.
+    Serialising the drive stops them overlapping but still rips the disc twice
+    and places the film twice — the second job should never start."""
+    mgr = _mgr(tmp_path)
+    first = _scanned(mgr, 311, "fp-happy-feet")
+    second = _scanned(mgr, 350, "fp-happy-feet", state=JobState.SCANNING)
+
+    dupe = mgr._active_duplicate(second)
+    assert dupe is not None and dupe.id == 311
+
+
+def test_re_ripping_a_disc_you_already_finished_is_allowed(tmp_path):
+    """DONE is not a duplicate. Re-ripping a disc whose encode you were unhappy
+    with is a legitimate request, and blocking it would make the guard worse
+    than the bug."""
+    mgr = _mgr(tmp_path)
+    _scanned(mgr, 311, "fp-happy-feet", state=JobState.DONE)
+    again = _scanned(mgr, 400, "fp-happy-feet", state=JobState.SCANNING)
+    assert mgr._active_duplicate(again) is None
+
+
+def test_a_failed_job_does_not_block_its_own_replacement(tmp_path):
+    """The natural fix for a failed disc is to add it again. If FAILED counted
+    as a duplicate, that retry would be refused by the wreck it is replacing."""
+    mgr = _mgr(tmp_path)
+    _scanned(mgr, 311, "fp-happy-feet", state=JobState.FAILED)
+    replacement = _scanned(mgr, 400, "fp-happy-feet", state=JobState.SCANNING)
+    assert mgr._active_duplicate(replacement) is None
+
+
+def test_different_discs_are_not_confused(tmp_path):
+    """Two discs in flight at once is normal on a two-drive box."""
+    mgr = _mgr(tmp_path)
+    _scanned(mgr, 311, "fp-happy-feet")
+    other = _scanned(mgr, 312, "fp-elemental", state=JobState.SCANNING)
+    assert mgr._active_duplicate(other) is None
+
+
+def test_an_unscanned_job_matches_nothing(tmp_path):
+    """No fingerprint yet means no identity. Treating empty-as-equal would make
+    every freshly added disc a duplicate of every other."""
+    mgr = _mgr(tmp_path)
+    a = _scanned(mgr, 1, None, state=JobState.SCANNING)
+    _scanned(mgr, 2, None, state=JobState.SCANNING)
+    assert mgr._active_duplicate(a) is None

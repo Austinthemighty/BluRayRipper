@@ -1829,6 +1829,25 @@ class JobManager:
 
     # --- internals ------------------------------------------------------
 
+    def _active_duplicate(self, wj: WebJob) -> WebJob | None:
+        """Another job, still in flight, that is this exact physical disc.
+
+        Jobs 311 and 350 were both "Happy Feet 2" in disc:1 and both ripped it at
+        once. A per-drive lock stops them overlapping, but two jobs for one disc
+        still means ripping it twice and placing the film twice. The fingerprint
+        is the disc's own identity, so it catches the duplicate even when the two
+        were added from different drives.
+
+        DONE and FAILED are deliberately not duplicates: re-ripping a disc you
+        already finished is a legitimate thing to ask for."""
+        fp = wj.fingerprint
+        if not fp:
+            return None                     # unscanned: nothing to compare yet
+        others = [o for o in self.jobs.values()
+                  if o.id != wj.id and o.fingerprint == fp
+                  and o.state not in (JobState.DONE, JobState.FAILED)]
+        return min(others, key=lambda o: o.id) if others else None
+
     async def _scan_job(self, wj: WebJob) -> None:
         reporter = _Reporter(self, wj)
         started = time.time()   # bounds the AACS dump search on failure (see below)
@@ -1837,6 +1856,21 @@ class JobManager:
             wj._pipeline_job = job
             wj.disc = job.disc
             wj.fingerprint = job.fingerprint
+            dupe = self._active_duplicate(wj)
+            if dupe is not None:
+                # Park instead of ripping. FAILED + a pending rip is what puts a
+                # job in "Needs review", which is exactly the decision here: keep
+                # one, drop the other. Retry works once the other job finishes.
+                wj.state = JobState.FAILED
+                wj.error = (
+                    f"Job {dupe.id} ({self._display_name(dupe)}) is already queued "
+                    f"for this same disc and has not finished, so this job would "
+                    f"rip it a second time and place the film twice. Delete "
+                    f"whichever you don't want; Retry here once job {dupe.id} is done.")
+                reporter.on_event(wj.error)
+                self._persist(wj)
+                self.bus.publish()
+                return
             if job.auto_mapped:
                 wj.assignments = job.assignments
                 wj.selected_title_ids = job.selected_title_ids
