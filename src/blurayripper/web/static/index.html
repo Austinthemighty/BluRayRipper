@@ -152,7 +152,10 @@
   <span class="cap" id="ver" title="Running version (git commit count + hash). Compare across machines to spot stale code."></span>
   <span class="cap" id="uptime" title="How long this server process has been running. Restart from ⚙ Settings to pick up pulled code."></span>
   <span class="cap" id="cap"></span>
-  <button class="sec" id="redoall" style="margin-left:auto;" title="Re-OCR subtitles for every job that has names assigned (uses staged/cached subs; no re-encode).">Re-OCR all subtitles</button>
+  <input id="jobsearch" type="search" placeholder="Search jobs — title, disc, path, #id"
+         title="Filter the queue. Matches the name, disc label, source path and job id; several words must all match."
+         style="margin-left:auto;min-width:220px;">
+  <button class="sec" id="redoall" title="Re-OCR subtitles for every job that has names assigned (uses staged/cached subs; no re-encode).">Re-OCR all subtitles</button>
   <button class="sec" id="refreshart" title="Re-fetch the real poster + backdrop from TMDB for every named job, overwriting wrong/generic art in each folder.">Refresh artwork</button>
   <label class="cap"><input type="checkbox" id="autoconfirm"> Auto-confirm single matches</label>
   <button class="sec" id="opensettings" title="Edit server settings (saved to config/settings.local.json; applied on next restart).">⚙ Settings</button>
@@ -496,6 +499,23 @@ function catOf(j){
   return null;
 }
 let jobFilter = null;  // active stat-chip filter (category key) or null = all
+let jobQuery = '';     // free-text search, ANDed with the chip filter
+
+// Match a job against the search box. Searches the name you'd recognise it by,
+// the disc label, the source path, and the id — a queue of 190 is impossible to
+// scan by eye, and duplicates like "Happy Feet 2" only become obvious when you
+// can pull every copy of a title up together.
+// Several words must ALL match, so "happy 2011" narrows instead of widening.
+function matchesQuery(j, q){
+  if (!q) return true;
+  const hay = [j.display_name, j.disc_name, j.source, 'job ' + j.id, '#' + j.id]
+    .filter(Boolean).join(' ').toLowerCase();
+  // Lowercase HERE rather than trusting the caller to have done it: the matcher
+  // is the thing that defines what "matches" means, and a second call site that
+  // forgot would silently only find lowercase titles.
+  return String(q).toLowerCase().split(/\s+/).filter(Boolean)
+    .every(t => hay.includes(t));
+}
 const STAT_DEFS = [['rip','Ripping'],['subs','Subtitles'],['enc','Encoding'],
   ['input','Needs you'],['queued','Queued'],['done','Done'],
   ['review','Needs review'],['fail','Failed']];
@@ -654,8 +674,22 @@ function renderJobs(snap) {
   renderWorkers(snap.workers || []);
   if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the Drives panel.</span>'; renderedStateClear(); renderJobs._sig = ''; renderJobs._known = new Set(); renderBulkBar(0); const pg = document.getElementById('pager'); if (pg){ pg.innerHTML=''; pg._sig=''; } return; }
   const ph = document.getElementById('placeholder'); if (ph) ph.remove();
-  const allJobs = [...snap.jobs].filter(j => !jobFilter || catOf(j)===jobFilter)
+  const allJobs = [...snap.jobs].filter(j => (!jobFilter || catOf(j)===jobFilter) && matchesQuery(j, jobQuery))
                                 .sort((a,b) => jobRank(a)-jobRank(b) || (b.priority||0)-(a.priority||0) || a.id-b.id);
+  if (!allJobs.length) {
+    // Say so. A search that silently empties the queue reads as a broken page,
+    // and with the chip filter also on it's not obvious which one hid everything.
+    const what = jobQuery ? `match \u201c${esc(jobQuery)}\u201d` : 'are in this filter';
+    host.innerHTML = `<span id="placeholder" class="muted">No jobs ${what}. `
+      + `<button class="sec" onclick="clearJobSearch()">Show all</button></span>`;
+    renderedStateClear(); renderJobs._sig = '';
+    // Keep the FULL id set: _known drives the new-job flash, and rebuilding it
+    // from a filtered list would make every job look new when you clear the box.
+    renderJobs._known = new Set(snap.jobs.map(j => j.id));
+    renderBulkBar(0);
+    const pg = document.getElementById('pager'); if (pg){ pg.innerHTML=''; pg._sig=''; }
+    return;
+  }
   renderBulkBar(allJobs.length);
   // Paginate — rendering 150+ heavy cards (logs, live SSE, thumbnails) at once
   // crashes phones. The sort puts active/needs-you jobs first, so page 1 is the
@@ -1821,6 +1855,23 @@ async function saveSettings(){
     if (settingsScope !== 'global') openSettings(settingsScope);  // refresh override highlights
   } catch(e){ msg.style.color = '#f85149'; msg.textContent = 'Error: ' + e.message; }
 }
+function clearJobSearch(){
+  jobQuery = ''; jobFilter = null;
+  const box = document.getElementById('jobsearch'); if (box) box.value = '';
+  curPage = 0; renderJobs._sig = '';
+  if (renderJobs._lastSnap) renderJobs(renderJobs._lastSnap);
+}
+// The box lives in <header>, which renderJobs never rewrites — so it keeps focus
+// and your caret position through the SSE re-render that lands while you type.
+document.getElementById('jobsearch').oninput = (e) => {
+  jobQuery = e.target.value.trim().toLowerCase();
+  curPage = 0;              // result set changed — back to page 1
+  renderJobs._sig = '';     // force a re-layout of the list
+  if (renderJobs._lastSnap) renderJobs(renderJobs._lastSnap);
+};
+document.getElementById('jobsearch').onkeydown = (e) => {
+  if (e.key === 'Escape') clearJobSearch();
+};
 document.getElementById('opensettings').onclick = () => openSettings('global');
 document.getElementById('settings-modal').addEventListener('click', (e) => {
   if(e.target.id === 'settings-modal') closeSettings();   // click backdrop to close

@@ -162,3 +162,65 @@ def test_confirming_removes_the_form_without_waiting_for_the_next_tick():
     confirm = src.split("async function doConfirm")[1].split("body.querySelector('[data-confirm]').onclick")[0]
     assert "renderedState[j.id] = null" in confirm
     assert "renderJobs(renderJobs._lastSnap)" in confirm
+
+
+# --- the queue search box ----------------------------------------------------
+
+def _named(**kw):
+    base = {"id": 311, "state": "ripping", "display_name": "Happy Feet Two (2011)",
+            "disc_name": "Happy Feet 2", "source": "disc:1"}
+    base.update(kw)
+    return json.dumps(base)
+
+
+def test_search_finds_a_job_by_the_name_you_would_recognise():
+    assert js(f"matchesQuery({_named()}, 'happy feet')") is True
+    assert js(f"matchesQuery({_named()}, 'elemental')") is False
+
+
+def test_search_matches_the_disc_label_not_just_the_tidy_name():
+    """The label is what's printed on the disc in your hand ("Happy Feet 2"),
+    which is rarely the library name ("Happy Feet Two (2011)"). Searching only
+    display_name would miss the disc you are actually holding."""
+    assert js(f"matchesQuery({_named()}, 'happy feet 2')") is True
+
+
+def test_search_matches_the_source_path_for_file_jobs():
+    """Most of this queue is file-sourced; the path is often the only thing that
+    distinguishes two jobs."""
+    j = _named(display_name=None, disc_name=None, source=r"Z:\\media\\Elemental (2023).mkv")
+    assert js(f"matchesQuery({j}, 'elemental')") is True
+
+
+def test_search_finds_a_job_by_its_id():
+    """You read '311' off a card or a log line and want that job."""
+    assert js(f"matchesQuery({_named()}, '311')") is True
+    assert js(f"matchesQuery({_named()}, '#311')") is True
+    assert js(f"matchesQuery({_named()}, '350')") is False
+
+
+def test_every_word_must_match_so_extra_words_narrow():
+    """ORing the terms would make each extra word return MORE jobs — the
+    opposite of what typing more means."""
+    assert js(f"matchesQuery({_named()}, 'happy 2011')") is True
+    assert js(f"matchesQuery({_named()}, 'happy 1999')") is False
+
+
+def test_an_empty_search_hides_nothing():
+    """The box starts empty and must not filter the queue to nothing on load."""
+    assert js(f"matchesQuery({_named()}, '')") is True
+    assert js(f"matchesQuery({_named()}, '   ')") is True
+
+
+def test_search_is_case_insensitive():
+    assert js(f"matchesQuery({_named()}, 'HAPPY FEET')") is True
+
+
+def test_a_job_with_no_name_or_disc_does_not_crash_the_search():
+    """A job that failed before it was ever scanned has null display_name AND
+    null disc_name. Joining nulls would throw and take the whole list render
+    down with it."""
+    j = json.dumps({"id": 7, "state": "failed", "display_name": None,
+                    "disc_name": None, "source": None})
+    assert js(f"matchesQuery({j}, 'anything')") is False
+    assert js(f"matchesQuery({j}, '7')") is True
