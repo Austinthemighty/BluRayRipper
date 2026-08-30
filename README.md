@@ -41,6 +41,10 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1 -Langs pol
 ./scripts/setup-linux.sh --langs pol --no-makemkv   # encode-only worker
 ```
 
+Setting up a multi-box cluster (rip box + encode workers, shared Postgres and
+NAS)? Follow **[docs/SETUP.md](docs/SETUP.md)** instead — it covers the mount
+options, shared config, and the failure modes that are easy to hit.
+
 On Linux `setup-linux.sh` also installs the app itself (into `.venv/`, linked
 onto PATH as `blurayripper`) and runs `check`, so all that is left is:
 
