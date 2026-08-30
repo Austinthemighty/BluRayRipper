@@ -600,3 +600,72 @@ def test_an_unscanned_job_matches_nothing(tmp_path):
     a = _scanned(mgr, 1, None, state=JobState.SCANNING)
     _scanned(mgr, 2, None, state=JobState.SCANNING)
     assert mgr._active_duplicate(a) is None
+
+
+# --- merging duplicate jobs for one disc -------------------------------------
+
+def test_three_failed_attempts_at_one_disc_merge_into_one(tmp_path):
+    """Jumanji sat in the queue as 345, 348 and 349: a failed rip gets re-added
+    rather than retried, and each re-add is a fresh job. They are one piece of
+    work."""
+    mgr = _mgr(tmp_path)
+    keep = _scanned(mgr, 345, "fp-jumanji", state=JobState.FAILED, name="Jumanji (1995)")
+    _scanned(mgr, 348, "fp-jumanji", state=JobState.FAILED, name="Jumanji (1995)")
+    _scanned(mgr, 349, "fp-jumanji", state=JobState.FAILED, name="Jumanji (1995)")
+    assert [o.id for o in mgr._merge_candidates(keep)] == [348, 349]
+
+
+async def test_merging_keeps_the_job_you_asked_for_and_drops_the_rest(tmp_path):
+    mgr = _mgr(tmp_path)
+    _scanned(mgr, 345, "fp-jumanji", state=JobState.FAILED)
+    keep = _scanned(mgr, 348, "fp-jumanji", state=JobState.FAILED)
+    _scanned(mgr, 349, "fp-jumanji", state=JobState.FAILED)
+
+    out = await mgr.merge_duplicates(348)
+    assert out == {"kept": 348, "merged": [345, 349]}
+    assert sorted(mgr.jobs) == [348]
+
+
+async def test_merging_carries_over_naming_the_kept_job_never_got(tmp_path):
+    """The mapping you typed is the one thing a failed attempt may actually have
+    achieved. Merging must not be the way it gets thrown away."""
+    mgr = _mgr(tmp_path)
+    keep = _scanned(mgr, 348, "fp-jumanji", state=JobState.FAILED)
+    named = _scanned(mgr, 345, "fp-jumanji", state=JobState.FAILED)
+    named.assignments = {0: _movie_assignment()}
+    named.selected_title_ids = [0]
+
+    await mgr.merge_duplicates(348)
+    assert keep.assignments and keep.selected_title_ids == [0]
+
+
+async def test_a_job_that_already_placed_a_file_is_never_merged_away(tmp_path):
+    """Merging deletes jobs. A job holding placed output is finished work, and
+    losing it to a tidy-up would be the worst possible outcome of a cleanup."""
+    mgr = _mgr(tmp_path)
+    keep = _scanned(mgr, 348, "fp-jumanji", state=JobState.FAILED)
+    done = _scanned(mgr, 345, "fp-jumanji", state=JobState.DONE)
+    done.outputs = ["/mnt/TrueNas/.../Jumanji (1995)/Jumanji (1995).mkv"]
+
+    assert [o.id for o in mgr._merge_candidates(keep)] == []
+    await mgr.merge_duplicates(348)
+    assert 345 in mgr.jobs
+
+
+def test_a_different_resolution_of_one_film_is_not_a_duplicate(tmp_path):
+    """The 1080p Blu-ray and the 4K UHD of one film are different discs and
+    fingerprint differently, so they are two VERSIONS, not duplicates — merging
+    them would delete one of the two files you deliberately ripped."""
+    mgr = _mgr(tmp_path)
+    bluray = _scanned(mgr, 400, "fp-jumanji-bd", state=JobState.FAILED)
+    _scanned(mgr, 401, "fp-jumanji-uhd", state=JobState.FAILED)
+    assert mgr._merge_candidates(bluray) == []
+
+
+def test_an_unscanned_job_offers_no_merge(tmp_path):
+    """No fingerprint means no identity; treating that as a match would offer to
+    merge every freshly added disc into every other."""
+    mgr = _mgr(tmp_path)
+    a = _scanned(mgr, 1, None, state=JobState.SCANNING)
+    _scanned(mgr, 2, None, state=JobState.SCANNING)
+    assert mgr._merge_candidates(a) == []

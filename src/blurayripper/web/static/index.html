@@ -906,6 +906,25 @@ function liveUpdate(card, j){
     b.onclick=()=>api('POST','/api/jobs/'+j.id+'/group-season').catch(e=>alert(e.message));
     card.querySelector('[data-body]').appendChild(b);
   } else if (grp && !(j.group_with > 1)) { grp.remove(); }
+  // The same disc queued more than once — a failed rip re-added instead of
+  // retried, which is how Jumanji ended up in the queue three times. Fold them
+  // into this one. Only ever offered for jobs with no placed output.
+  const mrg = card.querySelector('[data-merge]');
+  if (j.merge_with > 0 && !mrg) {
+    const b=document.createElement('button'); b.dataset.merge='1'; b.className='sec';
+    const n = j.merge_with;
+    b.textContent = `⇄ Merge ${n} duplicate job${n===1?'':'s'} of this disc`;
+    b.title = 'Other jobs in the queue are this same disc. Keeps this one, takes '
+      + 'its naming if this copy has none, and removes the rest. Jobs that have '
+      + 'already placed a file are never touched, and a different resolution of '
+      + 'the same film is a different disc — it is kept as its own version.';
+    b.style.marginTop='8px';
+    b.onclick=()=>{
+      if (!confirm(`Merge ${n} other job${n===1?'':'s'} for this disc into #${j.id}?`)) return;
+      api('POST','/api/jobs/'+j.id+'/merge').catch(e=>alert(e.message));
+    };
+    card.querySelector('[data-body]').appendChild(b);
+  } else if (mrg && !(j.merge_with > 0)) { mrg.remove(); }
   // Stalled jobs have no normal controls — give them a Requeue so they can be
   // recovered. Remove it again once the job is no longer stalled.
   const rq = card.querySelector('[data-requeue]');

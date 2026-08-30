@@ -458,6 +458,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             lambda wj: manager._live_state(wj).value in wanted)
         return {"removed": n}
 
+    @app.post("/api/jobs/{job_id}/merge")
+    async def merge_duplicates(job_id: int):
+        try:
+            return await manager.merge_duplicates(job_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"No job {job_id}.")
+
     @app.post("/api/jobs/refresh-artwork")
     async def refresh_artwork_all():
         return {"jobs": await manager.refresh_all_artwork()}

@@ -2456,6 +2456,58 @@ class JobManager:
             async with self._prep_sem:
                 yield
 
+    def _merge_candidates(self, wj: WebJob) -> list[WebJob]:
+        """Other jobs for the SAME disc that hold no finished work.
+
+        Jumanji sat in the queue three times — 345, 348 and 349 — because a
+        failed rip gets re-added rather than retried, and each re-add is a fresh
+        job. They are one piece of work and should be one job.
+
+        Identity is the disc fingerprint, which keeps the resolution rule honest
+        for free: a 1080p Blu-ray and a 4K UHD of one film are different discs
+        and fingerprint differently, so they are never merge candidates. They are
+        two VERSIONS, and _apply_version_suffix files them under Plex's
+        multi-version names instead of one overwriting the other.
+
+        Jobs holding placed output are excluded: merging must never be a way to
+        delete finished files."""
+        fp = wj.fingerprint
+        if not fp:
+            return []
+        return sorted((o for o in self.jobs.values()
+                       if o.id != wj.id and o.fingerprint == fp and not o.outputs),
+                      key=lambda o: o.id)
+
+    async def merge_duplicates(self, job_id: int) -> dict:
+        """Fold this job's duplicates into it and drop them."""
+        wj = self.jobs.get(job_id)
+        if wj is None:
+            raise KeyError(job_id)
+        dupes = self._merge_candidates(wj)
+        if not dupes:
+            return {"kept": job_id, "merged": []}
+        # Carry naming over if this copy never got it. Without this, merging can
+        # throw away the one thing that was actually done — the mapping you typed
+        # on whichever attempt got that far.
+        if not wj.assignments:
+            for o in dupes:
+                if o.assignments:
+                    wj.assignments = dict(o.assignments)
+                    wj.selected_title_ids = list(
+                        o.selected_title_ids or wj.selected_title_ids)
+                    wj.log.append(stamp_log(
+                        f"Took the naming from job #{o.id}."))
+                    break
+        merged = [o.id for o in dupes]
+        for o in dupes:
+            await self.remove(o.id)
+        wj.log.append(stamp_log(
+            "Merged " + ", ".join(f"#{i}" for i in merged) +
+            " into this job — same disc, so they were all one piece of work."))
+        self._persist(wj)
+        self.bus.publish()
+        return {"kept": job_id, "merged": merged}
+
     def _start_job(self, wj: WebJob) -> None:
         """Checkpoint the job's new state, push it to the UI, and run it.
 
@@ -2655,6 +2707,8 @@ class JobManager:
             # >1 when this job's folder holds sibling episode files that could be
             # folded into one job and named once instead of N times.
             "group_with": len(self._group_candidates(wj)[0]),
+            # >0 when other jobs are the same disc and can be folded into this one.
+            "merge_with": len(self._merge_candidates(wj)),
             "preview": (
                 {
                     # Poster URLs only when ffmpeg produced the stills.
