@@ -702,3 +702,161 @@ async def test_a_missing_prober_is_not_reported_as_a_corrupt_rip(tmp_path):
     got = await pipe._ensure_ripped(job, 0, tmp_path / "stage", Report())
     assert got == rip                                   # not failed
     assert any("NOT verified" in m for m in said), said  # but not silent either
+
+
+# --- Plex multi-version naming ----------------------------------------------
+
+def test_resolution_labels_use_plexs_own_vocabulary():
+    from blurayripper.services import naming
+    assert naming.resolution_label(2160) == "4K"      # Plex says 4K, not 2160p
+    assert naming.resolution_label(1080) == "1080p"
+    assert naming.resolution_label(720) == "720p"
+    assert naming.resolution_label(480) == "480p"
+    assert naming.resolution_label(240) == "SD"
+
+
+def test_an_unknown_height_gets_no_label_at_all():
+    """None must not collapse to "SD": labelling a Blu-ray as a lesser version of
+    itself is worse than leaving the plain name alone."""
+    from blurayripper.services import naming
+    assert naming.resolution_label(None) is None
+    assert naming.resolution_label(0) is None
+
+
+def test_the_first_copy_of_a_film_keeps_the_plain_name(tmp_path):
+    """A version suffix on a film you only own once is noise."""
+    from blurayripper.services import naming
+    p = naming.movie_video_path(tmp_path, "Jumanji", 1995, "mkv")
+    assert p == tmp_path / "Jumanji (1995)" / "Jumanji (1995).mkv"
+
+
+def test_two_resolutions_of_one_film_land_side_by_side(tmp_path):
+    """Plex's multi-version layout: one movie folder, a " - <version>" suffix.
+    Without it the 4K rip lands on the 1080p rip's name and one is lost."""
+    from blurayripper.services import naming
+    hd = naming.movie_video_path(tmp_path, "Jumanji", 1995, "mkv", version="1080p")
+    uhd = naming.movie_video_path(tmp_path, "Jumanji", 1995, "mkv", version="4K")
+    assert hd.parent == uhd.parent, "versions must share one movie folder"
+    assert hd.name == "Jumanji (1995) - 1080p.mkv"
+    assert uhd.name == "Jumanji (1995) - 4K.mkv"
+
+
+def test_a_version_and_an_edition_can_coexist(tmp_path):
+    """They are different Plex concepts — a 4K copy of an extended cut is both."""
+    from blurayripper.services import naming
+    p = naming.movie_video_path(tmp_path, "Aliens", 1986, "mkv",
+                                edition="Special Edition", version="4K")
+    assert p.name == "Aliens (1986) - 4K {edition-Special Edition}.mkv"
+
+
+def test_the_version_rides_on_the_assignment_so_it_survives_a_restart():
+    """_video_path_for feeds the resume check and the subtitle sidecars. If the
+    version were recomputed from the folder each call, a placed job would look
+    unplaced and its sidecars would sit beside a name that no longer exists."""
+    from blurayripper.models import EpisodeAssignment, MediaKind
+    from blurayripper.persistence import assignment_from_dict, assignment_to_dict
+
+    a = EpisodeAssignment(0, MediaKind.MOVIE, "Jumanji", 1995, version="4K")
+    assert assignment_from_dict(assignment_to_dict(a)).version == "4K"
+
+
+def test_an_assignment_saved_before_versions_existed_still_loads():
+    """Rows written by the old code have no 'version' key at all."""
+    from blurayripper.persistence import assignment_from_dict
+    old = {"title_id": 0, "kind": "movie", "show_or_movie_title": "Jumanji",
+           "year": 1995, "season": None, "episode": None,
+           "episode_title": None, "edition": None}
+    assert assignment_from_dict(old).version is None
+
+
+async def _pipe_with_library(tmp_path, heights):
+    """A pipeline whose height probe is table-driven by filename."""
+    from blurayripper.config import load_settings
+    from blurayripper.pipeline import Pipeline, configure_path_map
+
+    s = load_settings()
+    s.storage.output_dir = tmp_path / "out"
+    s.storage.staging_dir = tmp_path / "stage"
+    configure_path_map([])
+    pipe = Pipeline(s)
+
+    async def probe(path, report=None):
+        return heights.get(Path(path).name, 0)
+    pipe._probe_height = probe
+    return pipe, s
+
+
+class _Rep:
+    def __init__(self): self.said = []
+    def on_event(self, msg): self.said.append(msg)
+    def on_progress(self, *a, **k): pass
+    def checkpoint(self): pass
+
+
+async def test_a_4k_rip_is_versioned_when_the_library_holds_the_1080p(tmp_path):
+    """The case that loses a file today: the 4K rip computes the same path as the
+    1080p copy already on disk and overwrites it."""
+    from blurayripper.models import EpisodeAssignment, MediaKind
+
+    pipe, s = await _pipe_with_library(
+        tmp_path, {"Jumanji (1995).mkv": 1080, "rip.mkv": 2160})
+    folder = s.storage.movies_root / "Jumanji (1995)"
+    folder.mkdir(parents=True)
+    (folder / "Jumanji (1995).mkv").write_bytes(b"the 1080p copy")
+    ripped = tmp_path / "rip.mkv"; ripped.write_bytes(b"the 4k rip")
+
+    a = EpisodeAssignment(0, MediaKind.MOVIE, "Jumanji", 1995)
+    rep = _Rep()
+    await pipe._apply_version_suffix(a, {}, ripped, rep)
+
+    assert a.version == "4K"
+    assert pipe._video_path_for(a).name == "Jumanji (1995) - 4K.mkv"
+    assert any("two versions" in m for m in rep.said), rep.said
+
+
+async def test_a_re_rip_at_the_same_resolution_still_replaces_the_file(tmp_path):
+    """Same resolution is not a version, it is the same file again. Suffixing it
+    would leave two identical copies and make Plex show a phantom second
+    version."""
+    from blurayripper.models import EpisodeAssignment, MediaKind
+
+    pipe, s = await _pipe_with_library(
+        tmp_path, {"Jumanji (1995).mkv": 1080, "rip.mkv": 1080})
+    folder = s.storage.movies_root / "Jumanji (1995)"
+    folder.mkdir(parents=True)
+    (folder / "Jumanji (1995).mkv").write_bytes(b"the 1080p copy")
+    ripped = tmp_path / "rip.mkv"; ripped.write_bytes(b"another 1080p rip")
+
+    a = EpisodeAssignment(0, MediaKind.MOVIE, "Jumanji", 1995)
+    await pipe._apply_version_suffix(a, {}, ripped, _Rep())
+    assert a.version is None
+
+
+async def test_our_own_placed_file_does_not_make_us_a_second_version(tmp_path):
+    """On a resume the film is already in the folder — placed by THIS job. Taking
+    that as "another version exists" would rename the output mid-job and leave
+    the sidecars beside a name that no longer exists."""
+    from blurayripper.models import EpisodeAssignment, MediaKind
+
+    pipe, s = await _pipe_with_library(
+        tmp_path, {"Jumanji (1995).mkv": 1080, "rip.mkv": 2160})
+    folder = s.storage.movies_root / "Jumanji (1995)"
+    folder.mkdir(parents=True)
+    (folder / "Jumanji (1995).mkv").write_bytes(b"placed by this job")
+    ripped = tmp_path / "rip.mkv"; ripped.write_bytes(b"rip")
+
+    a = EpisodeAssignment(0, MediaKind.MOVIE, "Jumanji", 1995)
+    await pipe._apply_version_suffix(a, {"placed": True}, ripped, _Rep())
+    assert a.version is None
+
+
+async def test_tv_is_never_given_a_version_suffix(tmp_path):
+    """Plex's multi-version naming is a movie convention; an episode carries its
+    season/episode numbers instead."""
+    from blurayripper.models import EpisodeAssignment, MediaKind
+
+    pipe, _ = await _pipe_with_library(tmp_path, {"rip.mkv": 2160})
+    ripped = tmp_path / "rip.mkv"; ripped.write_bytes(b"rip")
+    a = EpisodeAssignment(0, MediaKind.TV, "House", 2004, season=1, episode=1)
+    await pipe._apply_version_suffix(a, {}, ripped, _Rep())
+    assert a.version is None

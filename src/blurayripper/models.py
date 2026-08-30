@@ -97,6 +97,13 @@ class EpisodeAssignment:
     episode: int | None = None
     episode_title: str | None = None
     edition: str | None = None  # movies: Plex {edition-...} tag, e.g. "Extended Cut"
+    # movies: Plex multi-version suffix, e.g. "4K" -> "Jumanji (1995) - 4K.mkv".
+    # Stored on the assignment rather than derived at placement time because
+    # _video_path_for feeds the resume check, the subtitle sidecars and the
+    # poster folder — a path that changed with the folder's contents would make
+    # a placed job look unplaced and strand its sidecars beside a name that no
+    # longer exists.
+    version: str | None = None
 
 
 @dataclass

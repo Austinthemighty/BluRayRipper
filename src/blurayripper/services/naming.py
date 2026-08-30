@@ -192,14 +192,41 @@ def _title_with_year(title: str, year: int | None) -> str:
     return f"{base} ({year})" if year else base
 
 
+# Plex's own vocabulary for versions ("4K", not "2160p"). Ordered high to low.
+_RESOLUTION_LABELS = ((2160, "4K"), (1440, "1440p"), (1080, "1080p"),
+                      (720, "720p"), (576, "576p"), (480, "480p"))
+
+
+def resolution_label(height: int | None) -> str | None:
+    """A version label for a title's height, or None when it isn't known.
+
+    None matters: an unknown height must not become "SD" and file a Blu-ray as
+    a lesser version of itself."""
+    if not height or height <= 0:
+        return None
+    for cutoff, label in _RESOLUTION_LABELS:
+        if height >= cutoff:
+            return label
+    return "SD"
+
+
 def movie_video_path(
-    movies_root: Path, title: str, year: int | None, container: str, edition: str | None = None
+    movies_root: Path, title: str, year: int | None, container: str,
+    edition: str | None = None, version: str | None = None,
 ) -> Path:
+    """Where a movie is filed.
+
+    ``version`` is Plex's multi-version convention: the same movie folder holds
+    every copy, and a " - <version>" suffix tells them apart, so a 1080p and a
+    4K rip of one film show up as two versions of one movie rather than two
+    movies or one silently overwriting the other."""
     folder = _title_with_year(title, year)
     name = folder
+    if version and version.strip():
+        name = f"{name} - {sanitize(version)}"
     if edition and edition.strip():
         # Plex edition tag: "Title (Year) {edition-Extended Cut}.ext"
-        name = f"{folder} {{edition-{sanitize(edition)}}}"
+        name = f"{name} {{edition-{sanitize(edition)}}}"
     return movies_root / folder / f"{name}.{container}"
 
 

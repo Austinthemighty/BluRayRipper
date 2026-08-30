@@ -970,6 +970,7 @@ class Pipeline:
         result = TitleResult(title_id=title_id)
         sub_dir = staging_root / "sub" / f"t{title_id:03d}"
         cp = job.checkpoints.setdefault(title_id, {})
+        await self._apply_version_suffix(assignment, cp, ripped_mkv, report)
         video_dest = self._video_path_for(assignment)
         done = self._title_done(cp, assignment)
         if done is not None:
@@ -1691,12 +1692,55 @@ class Pipeline:
                 except OSError:
                     pass
 
+    async def _apply_version_suffix(self, a: EpisodeAssignment, cp: dict,
+                                    ripped_mkv: Path, report) -> None:
+        """Label this movie with its resolution when the library already holds a
+        copy at a DIFFERENT one.
+
+        Two rips of one film are not duplicates when they are 1080p and 4K —
+        they are the two versions Plex expects to find in a single movie folder,
+        told apart by a " - <version>" suffix. Without it the second rip lands on
+        the first one's name and one of them is simply lost.
+
+        Decided once and stored on the assignment: _video_path_for feeds the
+        resume check and the subtitle sidecars, so a name that moved later would
+        strand the sidecars and re-place a file that was already placed."""
+        if a.kind is not MediaKind.MOVIE or a.version:
+            return                       # TV, or already decided on an earlier run
+        if cp.get("placed"):
+            return                       # our own earlier output — don't rename it
+        container = self.settings.encode.container
+        plain = naming.movie_video_path(
+            self.settings.storage.movies_root, a.show_or_movie_title, a.year,
+            container, a.edition)
+        try:
+            existing = [p for p in plain.parent.glob(f"*.{container}") if p != plain]
+            if plain.exists():
+                existing.append(plain)
+        except OSError:
+            return                       # share down: "can't look" is not "no versions"
+        if not existing:
+            return                       # first copy of this film keeps the plain name
+        mine = naming.resolution_label(await self._probe_height(ripped_mkv, report) or 0)
+        if not mine:
+            return                       # unknown height: no label beats a wrong one
+        for other in existing:
+            theirs = naming.resolution_label(await self._probe_height(other, report) or 0)
+            if theirs and theirs != mine:
+                a.version = mine
+                report.on_event(
+                    f"The library already has a {theirs} copy of this film, so this "
+                    f"one is filed as \"{plain.stem} - {mine}\" — Plex shows them as "
+                    f"two versions of one movie instead of one overwriting the other.")
+                return
+
     def _video_path_for(self, a: EpisodeAssignment) -> Path:
         container = self.settings.encode.container
         storage = self.settings.storage
         if a.kind is MediaKind.MOVIE:
             return naming.movie_video_path(
-                storage.movies_root, a.show_or_movie_title, a.year, container, a.edition)
+                storage.movies_root, a.show_or_movie_title, a.year, container,
+                a.edition, a.version)
         if a.season is None or a.episode is None:
             raise ValueError(f"TV assignment for title {a.title_id} missing season/episode.")
         return naming.episode_video_path(
