@@ -570,10 +570,10 @@ def test_record_worker_sends_the_run_token_so_uptime_tracks_the_process(monkeypa
     reach the query — otherwise every heartbeat either zeroes the uptime or it
     counts from the first time that box was ever seen."""
     store, conn = _pg(monkeypatch)
-    store.record_worker("ripbox-2", "1.4.0", 8, "encoding", "run-abc")
+    store.record_worker("ripbox-2", "1.4.0", 8, "encoding", "run-abc", "192.0.2.9")
 
     (sql, params), = conn.executed
-    assert params == ("ripbox-2", "1.4.0", 8, "encoding", "run-abc")
+    assert params == ("ripbox-2", "1.4.0", 8, "encoding", "run-abc", "192.0.2.9")
     assert "started_at = CASE WHEN workers.run_token IS DISTINCT FROM EXCLUDED.run_token" in sql
     assert "last_seen = now()" in sql
     assert conn.closed
@@ -709,8 +709,8 @@ def test_list_workers_prunes_long_gone_boxes_then_reports_the_recent_ones(monkey
     timestamps (written before the started_at migration) must report 0, not crash
     the panel on float(None)."""
     store, conn = _pg(monkeypatch, [], [
-        ("ripbox-1", "1.4.0", 8, "encoding", 3.5, 7200.0),
-        ("ripbox-2", None, None, None, None, None),
+        ("ripbox-1", "1.4.0", 8, "encoding", 3.5, 7200.0, "192.0.2.9"),
+        ("ripbox-2", None, None, None, None, None, None),
     ])
     got = store.list_workers()
 
@@ -718,7 +718,10 @@ def test_list_workers_prunes_long_gone_boxes_then_reports_the_recent_ones(monkey
     first = got[0]
     assert (first.version, first.job_id, first.stage) == ("1.4.0", 8, "encoding")
     assert first.seconds_since_seen == 3.5 and first.uptime_seconds == 7200.0
+    assert first.address == "192.0.2.9"
     assert got[1].seconds_since_seen == 0.0 and got[1].uptime_seconds == 0.0
+    # A box that predates the address column reports None, not a crash.
+    assert got[1].address is None
 
     prune_sql, select_sql = conn.executed[0][0], conn.executed[1][0]
     assert prune_sql.startswith("DELETE FROM workers") and "interval '1 hour'" in prune_sql
@@ -753,3 +756,13 @@ def test_every_postgres_call_closes_its_connection(monkeypatch):
         store, conn = _pg(monkeypatch)
         call(store)
         assert conn.closed, f"{name} left its connection open"
+
+
+def test_a_heartbeat_with_no_address_keeps_the_one_already_known(monkeypatch):
+    """Working out the local address can fail for a beat (a routing hiccup, a
+    link bouncing). Writing that NULL straight through would blank the IP in the
+    panel every time it happened, which is exactly when you want to see it."""
+    store, conn = _pg(monkeypatch)
+    store.record_worker("ripbox-2", "1.4.0", None, "idle", "run-abc", None)
+    (sql, _), = conn.executed
+    assert "address = COALESCE(EXCLUDED.address, workers.address)" in sql

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import json
 import socket
 import time
+import urllib.parse
 import uuid
 
 from . import handbrake_store, presence
@@ -119,6 +121,41 @@ class WorkerReporter:
             self._store.save_if_owner(rec, self._worker)
 
 
+def local_address(database_url: str | None) -> str | None:
+    """The IP this box reaches the cluster on, or None if it can't be worked out.
+
+    Asks the ROUTING TABLE, not the hostname. A worker typically has several
+    addresses — a ZeroTier link, a LAN NIC, a Docker bridge or two, loopback —
+    and the only one worth showing in the panel is the one the cluster actually
+    sees. Resolving the local hostname picks whichever the resolver likes, which
+    on these boxes is as often 127.0.1.1 as anything useful.
+
+    Connecting a UDP socket sends no packets; it only makes the kernel choose a
+    route, so this costs nothing and never touches the database.
+    """
+    host = None
+    if database_url:
+        with contextlib.suppress(Exception):
+            candidate = urllib.parse.urlsplit(database_url).hostname
+            # ONLY an IP literal. connect() on a name performs a DNS lookup, and
+            # settimeout does not cover getaddrinfo — so a database URL with a
+            # hostname would block the heartbeat on the resolver, for as long as
+            # the resolver felt like taking. Costing a worker its heartbeat to
+            # decorate a panel is not a trade worth making; the default route is
+            # a good enough answer when we can't have the exact one.
+            if candidate:
+                ipaddress.ip_address(candidate)   # raises unless it's literal
+                host = candidate
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(0.5)
+            # Port 9 is discard, and nothing is sent to it either way.
+            sock.connect((host or "8.8.8.8", 9))
+            return sock.getsockname()[0]
+    except OSError:
+        return None
+
+
 class WorkerRunner:
     def __init__(self, settings: Settings, worker_id: str | None = None) -> None:
         self.settings = settings
@@ -150,6 +187,8 @@ class WorkerRunner:
         # A per-process id so the store can tell a restart of THIS worker apart
         # from an ordinary heartbeat and reset its uptime clock accordingly.
         self._run_token = uuid.uuid4().hex
+        self._address: str | None = None
+        self._address_tried = float('-inf')  # monotonic of the last probe
         # Watch the rip box: an offline server can't tell you it's offline, so the
         # workers do it. Every online worker alerts, which is deliberate — one of
         # them may be offline too, and the whole point is that you find out.
@@ -534,10 +573,20 @@ class WorkerRunner:
 
     def _register(self, job_id, stage: str) -> None:
         """Report this worker's presence to the store (for the UI's panel)."""
+        # Retried until it succeeds rather than resolved once at startup: a
+        # worker launched by systemd at boot can beat its own network up, and one
+        # that answered "unknown" forever would be exactly the box you need to
+        # reach. Rate-limited, though — this runs on every heartbeat, and a box
+        # that can never work its address out must not pay for a socket each
+        # time to keep failing.
+        now = time.monotonic()
+        if self._address is None and now - self._address_tried >= 60:
+            self._address_tried = now
+            self._address = local_address(self.settings.database_url)
         with contextlib.suppress(Exception):
             self.store.record_worker(
                 self.worker_id, getattr(self, "_version", None), job_id, stage,
-                self._run_token)
+                self._run_token, self._address)
 
     async def _process(self, rec: JobRecord) -> None:
         job = job_from_record(rec)

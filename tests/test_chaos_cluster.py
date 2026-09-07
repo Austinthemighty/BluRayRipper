@@ -145,7 +145,7 @@ class ChaosStore(MemoryStore):
             return
         super().save(record)
 
-    def record_worker(self, worker_id, version, job_id, stage, run_token=None):
+    def record_worker(self, worker_id, version, job_id, stage, run_token=None, address=None):
         if worker_id in self._dark:
             return
         row = self._presence.get(worker_id)
@@ -862,22 +862,24 @@ def test_liveness_is_measured_by_the_database_clock_not_by_either_box(monkeypatc
         monkeypatch.setattr(store, "_connect", lambda: _Conn(list(rows)))
         return store
 
-    _store().record_worker("encoder-A", BUILD, 317, "encoding", "run-1")
+    _store().record_worker("encoder-A", BUILD, 317, "encoding", "run-1", "192.0.2.9")
     _store().heartbeat(317, "encoder-A")
     _store().claim_next("encoder-B", ["ready"], 180)
-    # The two trailing columns are what the SELECT below computes in SQL.
-    seen = _store([("encoder-A", BUILD, 317, "encoding", 3.5, 7200.0)]).list_workers()
+    # The two numeric columns are what the SELECT below computes in SQL; the
+    # address is stored as the worker reported it.
+    seen = _store([("encoder-A", BUILD, 317, "encoding", 3.5, 7200.0, "192.0.2.9")]
+                  ).list_workers()
 
     # Serve gets the database's numbers back unaltered — it must never re-derive
     # an age from its own clock on the way out, or the SQL above buys nothing.
-    assert [(w.worker_id, w.job_id, w.seconds_since_seen, w.uptime_seconds)
-            for w in seen] == [("encoder-A", 317, 3.5, 7200.0)]
+    assert [(w.worker_id, w.job_id, w.seconds_since_seen, w.uptime_seconds, w.address)
+            for w in seen] == [("encoder-A", 317, 3.5, 7200.0, "192.0.2.9")]
 
     presence_write, beat, claim = sql[0], sql[1], sql[2]
     ages = sql[-1][0]
-    assert "VALUES (%s, %s, %s, %s, now(), %s)" in presence_write[0]  # first sighting
-    assert "last_seen = now()" in presence_write[0]                   # every one after
-    assert presence_write[1] == ("encoder-A", BUILD, 317, "encoding", "run-1")
+    assert "VALUES (%s, %s, %s, %s, now(), %s, %s)" in presence_write[0]  # first sighting
+    assert "last_seen = now()" in presence_write[0]                       # every one after
+    assert presence_write[1] == ("encoder-A", BUILD, 317, "encoding", "run-1", "192.0.2.9")
     assert "SET heartbeat = now()" in beat[0] and beat[1] == (317, "encoder-A")
     # Staleness: both sides of the comparison are the database's own clock, and
     # the only thing the caller supplies is how many seconds count as stale.

@@ -61,6 +61,7 @@ class WorkerInfo:
     stage: str | None
     seconds_since_seen: float
     uptime_seconds: float = 0.0  # since the worker PROCESS (re)started
+    address: str | None = None   # the IP this worker reaches the cluster on
 
 
 @dataclass
@@ -242,7 +243,8 @@ class Store(ABC):
 
     def record_worker(self, worker_id: str, version: str | None,
                       job_id: int | None, stage: str | None,
-                      run_token: str | None = None) -> None:
+                      run_token: str | None = None,
+                      address: str | None = None) -> None:
         """Upsert a worker's presence/heartbeat. No-op for non-durable stores.
 
         ``run_token`` is a per-process id: when it changes (a worker restart), the
@@ -411,6 +413,7 @@ CREATE TABLE IF NOT EXISTS workers (
 );
 ALTER TABLE workers ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ NOT NULL DEFAULT now();
 ALTER TABLE workers ADD COLUMN IF NOT EXISTS run_token TEXT;
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS address TEXT;
 CREATE TABLE IF NOT EXISTS worker_settings (
     worker_id  TEXT PRIMARY KEY,
     overlay    JSONB NOT NULL,
@@ -547,19 +550,23 @@ class PostgresStore(Store):
 
     def record_worker(self, worker_id: str, version: str | None,
                       job_id: int | None, stage: str | None,
-                      run_token: str | None = None) -> None:
+                      run_token: str | None = None,
+                      address: str | None = None) -> None:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO workers (worker_id, version, job_id, stage, last_seen, "
-                "run_token) VALUES (%s, %s, %s, %s, now(), %s) "
+                "run_token, address) VALUES (%s, %s, %s, %s, now(), %s, %s) "
                 "ON CONFLICT (worker_id) DO UPDATE SET "
                 "version = EXCLUDED.version, job_id = EXCLUDED.job_id, "
                 "stage = EXCLUDED.stage, last_seen = now(), "
                 # Reset the clock only when the process changed (new run_token).
                 "started_at = CASE WHEN workers.run_token IS DISTINCT FROM EXCLUDED.run_token "
                 "THEN now() ELSE workers.started_at END, "
-                "run_token = EXCLUDED.run_token",
-                (worker_id, version, job_id, stage, run_token),
+                "run_token = EXCLUDED.run_token, "
+                # Keep the last known address when a heartbeat can't work one out
+                # (a momentary routing hiccup shouldn't blank the panel).
+                "address = COALESCE(EXCLUDED.address, workers.address)",
+                (worker_id, version, job_id, stage, run_token, address),
             )
 
     def request_cluster_signal(self, action: str, target: str = ALL_WORKERS) -> None:
@@ -625,11 +632,11 @@ class PostgresStore(Store):
             cur.execute(
                 "SELECT worker_id, version, job_id, stage, "
                 "EXTRACT(EPOCH FROM (now() - last_seen)), "
-                "EXTRACT(EPOCH FROM (now() - started_at)) FROM workers "
+                "EXTRACT(EPOCH FROM (now() - started_at)), address FROM workers "
                 "WHERE last_seen > now() - interval '10 minutes' ORDER BY worker_id")
             rows = cur.fetchall()
-        return [WorkerInfo(w, v, j, s, float(age or 0), float(up or 0))
-                for (w, v, j, s, age, up) in rows]
+        return [WorkerInfo(w, v, j, s, float(age or 0), float(up or 0), addr)
+                for (w, v, j, s, age, up, addr) in rows]
 
 
 def make_store(database_url: str | None) -> Store:

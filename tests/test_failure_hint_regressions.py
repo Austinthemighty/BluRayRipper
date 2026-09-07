@@ -99,7 +99,7 @@ async def test_a_worker_publishes_the_job_it_claimed_before_it_starts_encoding(
     class Store(MemoryStore):
         @property
         def durable(self): return True
-        def record_worker(self, worker_id, version, job_id, stage, run_token):
+        def record_worker(self, worker_id, version, job_id, stage, run_token, address=None):
             registered.append((worker_id, job_id, stage))
 
     runner = WorkerRunner(s, worker_id="encoder-A")

@@ -609,7 +609,7 @@ function renderWorkers(workers){
       <div style="min-width:0;flex:1;">
         <div class="wname"><b>${w.id}</b></div>
         <div class="muted wsub">${state}${busy && w.stage ? ' · '+w.stage : ''}</div>
-        <div class="muted" style="font-size:11px;">v${w.version||'?'} · seen ${w.age}s ago${w.uptime != null ? ' · up '+fmtUptime(w.uptime) : ''}</div>
+        <div class="muted" style="font-size:11px;">v${w.version||'?'}${w.address ? ' · <span title="The address this worker reaches the cluster on — use it to ssh in.">'+esc(w.address)+'</span>' : ''} · seen ${w.age}s ago${w.uptime != null ? ' · up '+fmtUptime(w.uptime) : ''}</div>
         <div class="row" style="gap:4px;margin-top:4px;">
           <button class="sec" data-wact="drain"   data-w="${esc(w.id)}" title="Finish the current encode and place it, then exit. Stays down until you start it again." style="padding:1px 7px;font-size:11px;">Drain</button>
           <button class="sec" data-wact="restart" data-w="${esc(w.id)}" title="Finish the current encode, then restart on the code already on this worker." style="padding:1px 7px;font-size:11px;">Restart</button>

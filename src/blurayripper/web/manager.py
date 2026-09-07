@@ -1126,7 +1126,7 @@ class JobManager:
             {"id": w.worker_id, "version": w.version, "job_id": w.job_id,
              "stage": w.stage, "age": round(w.seconds_since_seen),
              "stale": w.seconds_since_seen > stale,
-             "uptime": round(w.uptime_seconds)}
+             "uptime": round(w.uptime_seconds), "address": w.address}
             for w in self._workers_cache if not presence.is_serve(w.worker_id)
         ]
         return {

@@ -459,7 +459,7 @@ async def test_a_worker_that_cannot_see_the_ripped_files_says_so_in_the_panel(
     class Store(MemoryStore):
         @property
         def durable(self): return True
-        def record_worker(self, worker_id, version, job_id, stage, run_token):
+        def record_worker(self, worker_id, version, job_id, stage, run_token, address=None):
             stages.append(stage)
 
     runner = WorkerRunner(s, worker_id="encoder-A")
@@ -501,7 +501,7 @@ async def test_a_worker_with_genuinely_nothing_to_do_still_reads_as_idle(
     class Store(MemoryStore):
         @property
         def durable(self): return True
-        def record_worker(self, worker_id, version, job_id, stage, run_token):
+        def record_worker(self, worker_id, version, job_id, stage, run_token, address=None):
             stages.append(stage)
 
     runner = WorkerRunner(s, worker_id="encoder-A")

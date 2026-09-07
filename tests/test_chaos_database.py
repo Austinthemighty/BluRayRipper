@@ -93,7 +93,7 @@ class FlakyStore(MemoryStore):
     def heartbeat(self, job_id, worker_id):
         self._guard("heartbeat")
 
-    def record_worker(self, worker_id, version, job_id, stage, run_token=None):
+    def record_worker(self, worker_id, version, job_id, stage, run_token=None, address=None):
         self.on_tick()
         self._guard("record_worker")
 

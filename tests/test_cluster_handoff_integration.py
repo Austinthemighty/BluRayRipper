@@ -89,7 +89,7 @@ class ClusterStore(SharedStore):
     def owner_of(self, job_id):
         return self._owner.get(job_id)
 
-    def record_worker(self, worker_id, version, job_id, stage, run_token=None):
+    def record_worker(self, worker_id, version, job_id, stage, run_token=None, address=None):
         self._workers[worker_id] = (version, job_id, stage, self.now)
 
     def list_workers(self):

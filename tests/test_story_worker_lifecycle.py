@@ -74,7 +74,7 @@ class ClusterStore(MemoryStore):
     def come_back(self, box_id: str) -> None:
         self._dark.discard(box_id)
 
-    def record_worker(self, worker_id, version, job_id, stage, run_token=None) -> None:
+    def record_worker(self, worker_id, version, job_id, stage, run_token=None, address=None) -> None:
         if worker_id in self._dark:
             return
         row = self._presence.get(worker_id)

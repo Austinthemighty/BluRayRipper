@@ -669,3 +669,79 @@ def test_an_unscanned_job_offers_no_merge(tmp_path):
     a = _scanned(mgr, 1, None, state=JobState.SCANNING)
     _scanned(mgr, 2, None, state=JobState.SCANNING)
     assert mgr._merge_candidates(a) == []
+
+
+# --- a worker's address ------------------------------------------------------
+
+def test_a_worker_reports_the_address_that_reaches_the_cluster(monkeypatch):
+    """A worker has several addresses — ZeroTier, a LAN NIC, Docker bridges,
+    loopback — and only the one the cluster sees is any use for reaching it.
+    Asking the routing table picks that one; resolving the local hostname picks
+    whatever the resolver likes, which on these boxes is often 127.0.1.1."""
+    import socket as _socket
+    from blurayripper import worker as worker_mod
+
+    asked = {}
+
+    class _Sock:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def settimeout(self, t): pass
+        def connect(self, addr): asked["to"] = addr
+        def getsockname(self): return ("192.0.2.9", 51820)
+
+    monkeypatch.setattr(_socket, "socket", lambda *a, **k: _Sock())
+    got = worker_mod.local_address("postgresql://u:p@192.0.2.38:5432/brr")
+    assert got == "192.0.2.9"
+    assert asked["to"][0] == "192.0.2.38", "must route toward the cluster"
+
+
+def test_a_hostname_database_url_is_never_resolved(monkeypatch):
+    """connect() on a NAME does a DNS lookup, and settimeout does not cover
+    getaddrinfo — so a hostname would block the heartbeat on the resolver for as
+    long as it felt like taking. Costing a worker its heartbeat to decorate a
+    panel is not a trade worth making: fall back to the default route."""
+    import socket as _socket
+    from blurayripper import worker as worker_mod
+
+    asked = {}
+
+    class _Sock:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def settimeout(self, t): pass
+        def connect(self, addr): asked["to"] = addr
+        def getsockname(self): return ("192.168.1.50", 51820)
+
+    monkeypatch.setattr(_socket, "socket", lambda *a, **k: _Sock())
+    worker_mod.local_address("postgresql://u:p@db.internal.example:5432/brr")
+    assert asked["to"][0] == "8.8.8.8", "a hostname must not be resolved here"
+
+
+def test_an_address_that_cannot_be_worked_out_is_not_fatal(monkeypatch):
+    """No route, no network yet, a locked-down box: the panel loses one line of
+    decoration. It must never cost the worker its heartbeat."""
+    import socket as _socket
+    from blurayripper import worker as worker_mod
+
+    def boom(*a, **k): raise OSError("network is unreachable")
+    monkeypatch.setattr(_socket, "socket", boom)
+    assert worker_mod.local_address("postgresql://u:p@192.0.2.38:5432/brr") is None
+
+
+def test_the_workers_panel_is_actually_given_each_box_s_address(tmp_path):
+    """The whole point is seeing it in the UI. The store can hold the address and
+    the worker can report it, and the panel still shows nothing if serve drops it
+    on the way out — which is a wire with no other symptom."""
+    from blurayripper.persistence import WorkerInfo
+
+    mgr = _mgr(tmp_path)
+    mgr._workers_cache = [
+        WorkerInfo("handbreak01", "0.1.0", 49, "Encode: working", 3.0, 7200.0,
+                   "192.0.2.9"),
+        WorkerInfo("older-box", "0.1.0", None, "idle", 3.0, 60.0, None),
+    ]
+    panel = {w["id"]: w for w in mgr.snapshot()["workers"]}
+    assert panel["handbreak01"]["address"] == "192.0.2.9"
+    # A worker that predates this, or can't work its address out, still lists.
+    assert panel["older-box"]["address"] is None
