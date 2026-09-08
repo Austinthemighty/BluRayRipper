@@ -224,3 +224,35 @@ def test_a_job_with_no_name_or_disc_does_not_crash_the_search():
                     "disc_name": None, "source": None})
     assert js(f"matchesQuery({j}, 'anything')") is False
     assert js(f"matchesQuery({j}, '7')") is True
+
+
+# --- the maintenance window's clock conversions ------------------------------
+
+def test_a_deadline_is_sent_as_utc_not_as_whatever_the_browser_calls_it():
+    """A datetime-local input carries no timezone. Sending it raw would mean a
+    different instant on every box in the cluster."""
+    iso = js("localToUtcIso('2026-08-30T02:00')")
+    assert iso is not None and iso.endswith("Z")
+
+
+def test_a_blank_deadline_is_not_turned_into_a_date():
+    """An empty box must read as "nothing scheduled", not as the epoch — which
+    would be a deadline permanently in the past and hold the cluster forever."""
+    assert js("localToUtcIso('')") is None
+    assert js("localToUtcIso('not a date')") is None
+
+
+def test_a_stored_deadline_comes_back_into_the_form():
+    """Reopening the dialog has to show what is actually scheduled; a blank box
+    would invite you to overwrite a window you meant to keep."""
+    assert js("utcIsoToLocalInput('') === ''") is True
+    out = js("utcIsoToLocalInput(new Date(Date.UTC(2026,7,30,2,0)).toISOString())")
+    assert len(out) == 16 and out[10] == "T"
+
+
+def test_a_countdown_reads_in_hours_and_minutes():
+    assert js("fmtLeft(3600*3 + 60*15)") == "3h 15m"
+    assert js("fmtLeft(900)") == "15m"
+    assert js("fmtLeft(0)") == "now"
+    assert js("fmtLeft(-10)") == "now"
+    assert js("fmtLeft(null)") == ""

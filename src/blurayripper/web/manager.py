@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from datetime import datetime, timezone
 import itertools
 import json
 import re
@@ -44,7 +45,7 @@ from ..persistence import (
 )
 from ..pipeline import Job, JobState, Pipeline, _resolve_path
 from ..scheduler import EncodeScheduler
-from .. import boxset_plan, mkv_folder, presence
+from .. import boxset_plan, maintenance, mkv_folder, presence
 from ..services import library, naming
 from ..services import aacs_dump
 from ..services.drive_names import DriveNames
@@ -684,6 +685,11 @@ class JobManager:
             except Exception as exc:
                 tick_ok = False
                 self._log_store_error("list_workers", exc)
+            try:
+                await asyncio.to_thread(self._fire_due_maintenance)
+            except Exception as exc:
+                tick_ok = False
+                self._log_store_error("maintenance", exc)
             try:
                 records = {r.id: r for r in await asyncio.to_thread(self.store.load_all)}
                 changed = False
@@ -2455,6 +2461,70 @@ class JobManager:
         async with lock:
             async with self._prep_sem:
                 yield
+
+    def _fire_due_maintenance(self) -> None:
+        """Raise the drain once the maintenance deadline passes, then clear it.
+
+        Cleared rather than left standing so the window fires ONCE. A schedule
+        that stayed set would keep every worker held after the maintenance was
+        over, and the symptom — boxes up, idle, refusing work — reads as a
+        broken queue rather than a schedule nobody cancelled."""
+        window = maintenance.load(self.store)
+        if not window.scheduled or not window.due(datetime.now(timezone.utc)):
+            return
+        self.store.request_cluster_signal("drain", ALL_WORKERS)
+        maintenance.save(self.store, maintenance.Window(lead_hours=window.lead_hours))
+        self._notify(
+            "🛠 Maintenance window reached",
+            "Every worker has been told to drain: each finishes the job it holds, "
+            "then exits. Any still busy are listed in the workers panel.")
+
+    def maintenance_window(self) -> dict:
+        """The schedule plus what it means right now, for the UI."""
+        window = maintenance.load(self.store)
+        now = datetime.now(timezone.utc)
+        busy = [{"worker": w.worker_id, "job_id": w.job_id, "stage": w.stage}
+                for w in self._workers_cache
+                if w.job_id is not None and not presence.is_serve(w.worker_id)]
+        out = maintenance.to_dict(window)
+        out.update({
+            "quiet_from": window.quiet_from().isoformat() if window.scheduled else None,
+            "holding": window.holds_new_work(now),
+            "seconds_until_quiet": (
+                (window.quiet_from() - now).total_seconds() if window.scheduled else None),
+            "seconds_until_drain": (
+                (window.drain_at - now).total_seconds() if window.scheduled else None),
+            "busy": busy,
+        })
+        return out
+
+    def set_maintenance(self, drain_at: str | None, lead_hours: float | None,
+                        note: str = "") -> dict:
+        """Schedule (or clear, with drain_at None) the window."""
+        window = maintenance.from_dict({
+            "drain_at": drain_at,
+            "lead_hours": (maintenance.DEFAULT_LEAD_HOURS if lead_hours is None
+                           else lead_hours),
+            "note": note,
+        })
+        if drain_at and window.drain_at is None:
+            raise ValueError(
+                f"Could not read {drain_at!r} as a date and time. Use an ISO "
+                f"timestamp, e.g. 2026-08-30T02:00:00Z.")
+        # A deadline in the past is due the moment it is saved, so it would drain
+        # the whole cluster on the next poll. That is never what someone booking
+        # maintenance meant — it is a mistyped year — and "Drain all" is right
+        # there for when you do want it now.
+        if window.drain_at is not None:
+            now = datetime.now(timezone.utc)
+            if window.drain_at <= now:
+                raise ValueError(
+                    f"{window.drain_at:%Y-%m-%d %H:%M} UTC has already passed, so "
+                    f"that would drain every worker straight away. Pick a time in "
+                    f"the future, or use Drain all if you meant now.")
+        maintenance.save(self.store, window)
+        self.bus.publish()
+        return self.maintenance_window()
 
     def _merge_candidates(self, wj: WebJob) -> list[WebJob]:
         """Other jobs for the SAME disc that hold no finished work.

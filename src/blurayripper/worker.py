@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from datetime import datetime, timezone
 import ipaddress
 import json
 import socket
@@ -17,7 +18,7 @@ import time
 import urllib.parse
 import uuid
 
-from . import handbrake_store, presence
+from . import handbrake_store, maintenance, presence
 from .config import Settings, load_settings
 from .persistence import (
     ALL_WORKERS,
@@ -261,6 +262,21 @@ class WorkerRunner:
               "draining, then git pull + restart.", flush=True)
         self.request_update()
 
+    def _maintenance_hold(self) -> str | None:
+        """A stage string while a maintenance window says take no new work.
+
+        Reading the window is best-effort: an unreachable database means no
+        hold. "I could not read the schedule" turning into "stop working" would
+        let a blip idle the whole cluster."""
+        window = maintenance.load(self.store)
+        if not window.scheduled:
+            return None
+        now = datetime.now(timezone.utc)
+        if not window.holds_new_work(now):
+            return None
+        return (f"holding for maintenance — no new jobs "
+                f"(drain at {window.drain_at:%Y-%m-%d %H:%M} UTC)")
+
     def _check_update_signal(self) -> None:
         """Act on a signal the serve box aimed at this worker (or at all of them),
         once, when its token rises above what we saw at startup.
@@ -351,6 +367,14 @@ class WorkerRunner:
             self._maybe_auto_update()       # rip box on a newer build?
             if self._stop:
                 break
+            hold = self._maintenance_hold()
+            if hold is not None:
+                # Deliberately BEFORE claim_next: the whole point of a scheduled
+                # window is that nothing new is picked up, and a job claimed here
+                # is one that runs past the deadline.
+                self._register(None, hold)
+                await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
+                continue
             try:
                 rec = self.store.claim_next(
                     self.worker_id, self._claimable_states(),

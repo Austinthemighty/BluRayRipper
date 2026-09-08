@@ -183,16 +183,50 @@
         <div class="phead-actions">
           <button class="sec" onclick="event.stopPropagation();workerAction('drain','*')" title="Tell every worker to finish its current encode and then stop. Nothing in flight is lost; they stay down until restarted.">⏹ Drain all</button>
           <button class="sec" onclick="event.stopPropagation();updateAllWorkers()" title="Tell every worker to finish its current encode, then git pull and restart. In-progress encodes are not interrupted.">↻ Update all</button>
+          <button class="sec" onclick="event.stopPropagation();openMaintenance()" title="Have every box idle by a given time: workers stop taking NEW jobs a lead time before it, then drain at the deadline.">🛠 Maintenance</button>
           <span class="chev">▾</span>
         </div>
       </div>
-      <div class="pbody"><div id="workers"></div></div>
+      <div class="pbody"><div id="maint-banner"></div><div id="workers"></div></div>
     </div>
   </div>
   <div class="panel">
     <h2>Queue</h2>
     <div id="pager" class="pager"></div>
     <div id="jobs"><span id="placeholder" class="muted">No jobs yet. Add a disc from the Drives panel.</span></div>
+  </div>
+</div>
+
+<div id="maint-modal" class="modal" onclick="if(event.target===this)closeMaintenance();">
+  <div class="sheet" style="max-width:520px;">
+    <div class="shead"><h2>Maintenance window</h2></div>
+    <div style="padding:10px 0;">
+      <div class="muted" style="font-size:12px;margin-bottom:8px;">
+        Every box idle by a time you choose. Workers stop taking <b>new</b> jobs a
+        lead time before it — draining only at the deadline would not help, because
+        a job claimed a minute earlier still runs for as long as it runs.
+      </div>
+      <div class="row" style="gap:8px;align-items:center;">
+        <label style="min-width:150px;">Everything idle by</label>
+        <input id="maint-when" type="datetime-local" style="flex:1;">
+      </div>
+      <div class="row" style="gap:8px;align-items:center;margin-top:6px;">
+        <label style="min-width:150px;">Stop taking work</label>
+        <input id="maint-lead" type="number" min="0" step="1" value="24" style="width:80px;">
+        <span class="muted">hours before &mdash; set this to your longest encode.</span>
+      </div>
+      <div class="row" style="gap:8px;align-items:center;margin-top:6px;">
+        <label style="min-width:150px;">Note (optional)</label>
+        <input id="maint-note" placeholder="e.g. swapping the NAS disks" style="flex:1;">
+      </div>
+      <div id="maint-preview" class="muted" style="font-size:12px;margin-top:10px;"></div>
+    </div>
+    <div class="sfoot">
+      <button onclick="saveMaintenance()">Schedule</button>
+      <button class="sec" onclick="clearMaintenance()">Clear schedule</button>
+      <button class="sec" onclick="closeMaintenance()">Cancel</button>
+      <span id="maint-msg" class="muted"></span>
+    </div>
   </div>
 </div>
 
@@ -593,6 +627,93 @@ function fmtUptime(sec){
   if (h) return `${h}h ${m}m`;
   if (m) return `${m}m ${s}s`;
   return `${s}s`;
+}
+
+// --- maintenance window ------------------------------------------------------
+// The deadline is entered and shown in LOCAL time (a datetime-local input has no
+// timezone) and sent as UTC: workers sit in whatever timezone they sit in, and a
+// deadline meaning a different instant on each box would be worse than none.
+function localToUtcIso(v){
+  if (!v) return null;
+  const d = new Date(v);                    // a datetime-local string is local time
+  return isNaN(d) ? null : d.toISOString();
+}
+function utcIsoToLocalInput(iso){
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d)) return '';
+  const pad = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`
+       + `T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function fmtLeft(seconds){
+  if (seconds == null) return '';
+  const s = Math.round(seconds);
+  if (s <= 0) return 'now';
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60);
+  return h >= 1 ? `${h}h ${m}m` : `${m}m`;
+}
+async function openMaintenance(){
+  const el = document.getElementById('maint-modal');
+  document.getElementById('maint-msg').textContent = '';
+  try {
+    const w = await api('GET','/api/maintenance');
+    document.getElementById('maint-when').value = utcIsoToLocalInput(w.drain_at);
+    document.getElementById('maint-lead').value = w.lead_hours != null ? w.lead_hours : 24;
+    document.getElementById('maint-note').value = w.note || '';
+    renderMaintPreview(w);
+  } catch(e){ document.getElementById('maint-msg').textContent = e.message; }
+  el.style.display = 'flex';
+}
+function closeMaintenance(){ document.getElementById('maint-modal').style.display = 'none'; }
+function renderMaintPreview(w){
+  const host = document.getElementById('maint-preview');
+  if (!host) return;
+  if (!w || !w.drain_at){ host.textContent = 'Nothing scheduled — workers take jobs as normal.'; return; }
+  const busy = (w.busy||[]).length;
+  host.innerHTML =
+    `Workers stop taking new jobs at <b>${new Date(w.quiet_from).toLocaleString()}</b>`
+    + ` (${w.holding ? 'now — already holding' : 'in ' + fmtLeft(w.seconds_until_quiet)})`
+    + `, and drain at <b>${new Date(w.drain_at).toLocaleString()}</b>.`
+    + (busy ? `<br><b>${busy}</b> job${busy===1?'':'s'} running now — anything still going at the `
+              + `deadline is told to finish first, so it can overrun.` : '');
+}
+async function saveMaintenance(){
+  const msg = document.getElementById('maint-msg');
+  const when = localToUtcIso(document.getElementById('maint-when').value);
+  if (!when){ msg.textContent = 'Pick a date and time first.'; return; }
+  try {
+    const w = await api('POST','/api/maintenance', {
+      drain_at: when,
+      lead_hours: parseFloat(document.getElementById('maint-lead').value || '24'),
+      note: document.getElementById('maint-note').value || '',
+    });
+    renderMaintPreview(w); renderMaintBanner(w);
+    msg.textContent = 'Scheduled.';
+  } catch(e){ msg.textContent = e.message; }
+}
+async function clearMaintenance(){
+  const msg = document.getElementById('maint-msg');
+  try {
+    const w = await api('POST','/api/maintenance', {drain_at: null});
+    renderMaintPreview(w); renderMaintBanner(w);
+    msg.textContent = 'Cleared — workers take jobs as normal.';
+  } catch(e){ msg.textContent = e.message; }
+}
+function renderMaintBanner(w){
+  const host = document.getElementById('maint-banner');
+  if (!host) return;
+  if (!w || !w.drain_at){ host.innerHTML = ''; return; }
+  const when = new Date(w.drain_at).toLocaleString();
+  host.innerHTML = `<div class="muted" style="font-size:12px;border:1px solid #30363d;`
+    + `border-radius:6px;padding:6px 8px;margin-bottom:8px;">🛠 Maintenance: idle by <b>${when}</b>`
+    + (w.holding ? ' — <b>holding, no new jobs</b>'
+                 : ` — new jobs stop in ${fmtLeft(w.seconds_until_quiet)}`)
+    + (w.note ? `<br>${esc(w.note)}` : '') + '</div>';
+}
+// Refreshed on the same beat as the panel so a countdown doesn't sit stale.
+async function refreshMaintenance(){
+  try { renderMaintBanner(await api('GET','/api/maintenance')); } catch(e){}
 }
 
 function renderWorkers(workers){
@@ -1931,6 +2052,8 @@ ev.onmessage = (m) => { try { renderJobs(JSON.parse(m.data)); } catch (e) { /* i
 restorePanelCollapse();
 loadDrives();
 setInterval(loadDrives, 10000);   // keep the drive list / loaded discs current
+refreshMaintenance();
+setInterval(refreshMaintenance, 30000);  // countdown to the window, kept honest
 fetch('/api/jobs').then(r=>r.json()).then(renderJobs).catch(()=>{});
 </script>
 </body>

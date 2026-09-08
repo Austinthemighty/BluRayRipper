@@ -458,6 +458,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             lambda wj: manager._live_state(wj).value in wanted)
         return {"removed": n}
 
+    @app.get("/api/maintenance")
+    async def get_maintenance():
+        return manager.maintenance_window()
+
+    @app.post("/api/maintenance")
+    async def set_maintenance(body: dict = Body(...)):
+        try:
+            return manager.set_maintenance(
+                body.get("drain_at"), body.get("lead_hours"), body.get("note") or "")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
     @app.post("/api/jobs/{job_id}/merge")
     async def merge_duplicates(job_id: int):
         try:
