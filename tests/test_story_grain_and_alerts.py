@@ -42,7 +42,7 @@ EPISODE_SECONDS = 44 * 60
 # couldn't tell you which disc of the set to go and find.
 # The name carries the disc marker read off the label ("FIREFLY_D1" -> D1), so a
 # push tells you which disc to reach for, not just which episodes it held.
-JOB_NAME = f"{SHOW} D1 S01E01–E02"
+JOB_NAME = f"{SHOW} S01 D01 E01–E02"
 
 
 class ClusteredStore(MemoryStore):

@@ -2615,23 +2615,20 @@ class JobManager:
     def _name_of(self, wj: WebJob) -> str:
         return self._display_name(wj)
 
-    def _disc_marker(self, wj: WebJob) -> str | None:
-        """Which disc of the set this is, as its case prints it: "S5D2".
+    def _disc_hint(self, wj: WebJob) -> tuple[int | None, int | None]:
+        """(season, disc) as the disc's own label prints them, e.g. HOUSE_S5_D2.
 
-        The episode range says what a job HOLDS; it does not say which disc to
-        put back in the drive. Re-ripping a bad rip of "House S05E06–E10" means
-        working out from an episode guide that those five are on disc 2 — while
-        the label on the disc already said S5_D2 when it was scanned.
+        Together they are the disc's address on the shelf. The episode range says
+        what a job HOLDS; it does not say which disc to put back in the drive, and
+        re-ripping a bad rip of "House S05E06–E10" otherwise means opening an
+        episode guide to work out that those five are on disc 2.
 
-        The season comes from the LABEL rather than the confirmed mapping,
-        because this is meant to match what is printed on the case, and a box set
-        occasionally labels a disc with a season its episodes disagree with. When
-        the label gives no season, the disc number alone still finds it."""
+        The season is taken from the LABEL first because here it is part of that
+        address rather than a description of the contents — "S05 D02" is the case
+        you reach for. Where the label doesn't say, the season you gave when
+        naming the job stands in."""
         hints = self._label_hints(wj)
-        disc, season = hints.get("label_disc"), hints.get("label_season")
-        if disc is None:
-            return None
-        return f"S{season}D{disc}" if season is not None else f"D{disc}"
+        return hints.get("label_season"), hints.get("label_disc")
 
     def _display_name(self, wj: WebJob) -> str:
         """A name that identifies the physical DISC, not just its label.
@@ -2648,10 +2645,13 @@ class JobManager:
             # have worked out the show/season, which is enough to find the disc.
             show = (wj.show_title or "").strip()
             if show:
-                marker = self._disc_marker(wj)
-                if marker:
-                    return f"{show} {marker}"
-                return f"{show} S{wj.season:02d}" if wj.season is not None else show
+                label_season, disc = self._disc_hint(wj)
+                season = label_season if label_season is not None else wj.season
+                if disc is not None and season is not None:
+                    return f"{show} S{season:02d} D{disc:02d}"
+                if disc is not None:
+                    return f"{show} D{disc:02d}"
+                return f"{show} S{season:02d}" if season is not None else show
             return fallback
         first = assigns[0]
         title = (first.show_or_movie_title or "").strip()
@@ -2659,9 +2659,7 @@ class JobManager:
             return fallback
         if first.kind is not MediaKind.TV:
             return f"{title} ({first.year})" if first.year else title
-        marker = self._disc_marker(wj)
-        if marker:
-            title = f"{title} {marker}"
+        label_season, disc = self._disc_hint(wj)
         seasons = sorted({a.season for a in assigns if a.season is not None})
         episodes = sorted({a.episode for a in assigns if a.episode is not None})
         if len(seasons) > 1:
@@ -2674,17 +2672,30 @@ class JobManager:
                            if a.season is not None and a.episode is not None)
             if pairs:
                 (s0, e0), (s1, e1) = pairs[0], pairs[-1]
-                return f"{title} S{s0:02d}E{e0:02d}–S{s1:02d}E{e1:02d}"
-        parts = []
+                # Both ends stay season-qualified; there is no one season to put
+                # in the address, so the disc number leads on its own.
+                lead = f"{title} D{disc:02d}" if disc is not None else title
+                return f"{lead} S{s0:02d}E{e0:02d}–S{s1:02d}E{e1:02d}"
         if len(seasons) == 1:
-            parts.append(f"S{seasons[0]:02d}")
+            season = label_season if label_season is not None else seasons[0]
+            season_part = f"S{season:02d}"
         elif seasons:
-            parts.append(f"S{seasons[0]:02d}–S{seasons[-1]:02d}")
+            season_part = f"S{seasons[0]:02d}–S{seasons[-1]:02d}"
+        else:
+            season_part = ""
         if len(episodes) == 1:
-            parts.append(f"E{episodes[0]:02d}")
+            episode_part = f"E{episodes[0]:02d}"
         elif episodes:
-            parts.append(f"E{episodes[0]:02d}–E{episodes[-1]:02d}")
-        return f"{title} {''.join(parts)}" if parts else title
+            episode_part = f"E{episodes[0]:02d}–E{episodes[-1]:02d}"
+        else:
+            episode_part = ""
+        if disc is not None:
+            # "House S05 D02 E06–E10": season and disc are the shelf address,
+            # spaced apart from the episodes so the two read as separate facts.
+            lead = " ".join(p for p in (season_part, f"D{disc:02d}") if p)
+            return " ".join(p for p in (title, lead, episode_part) if p)
+        joined = f"{season_part}{episode_part}"
+        return f"{title} {joined}" if joined else title
 
     def artwork_path(self, job_id: int):
         """Path to a job's extracted cover art (poster preferred, else fanart),

@@ -398,15 +398,16 @@ def test_a_disc_that_spans_a_season_boundary_is_named_unambiguously(tmp_path):
     wj.disc = _tv_disc()
     wj.assignments = {a.title_id: a for a in (ep(0, 1, 22), ep(1, 2, 1), ep(2, 2, 2))}
 
-    # "S1D1" is the disc's own label, so the name says which disc to pick up.
-    assert m._display_name(wj) == "House S1D1 S01E22–S02E02"
+    # A disc spanning two seasons has no single season for the address, so the
+    # disc number leads and both ends of the span stay season-qualified.
+    assert m._display_name(wj) == "House D01 S01E22–S02E02"
 
     # A disc inside one season is untouched — the span there was never ambiguous.
     # Note the label (S1_D1) and the episodes (season 2) disagree here: the marker
     # follows the LABEL on purpose, because that is what is printed on the case
     # you have to find.
     wj.assignments = {a.title_id: a for a in (ep(0, 2, 3), ep(1, 2, 4))}
-    assert m._display_name(wj) == "House S1D1 S02E03–E04"
+    assert m._display_name(wj) == "House S01 D01 E03–E04"
 
 
 def test_the_mapping_form_prefills_from_the_iso_volume_label(tmp_path):
@@ -770,15 +771,16 @@ def test_a_tv_job_names_the_disc_it_came_off(tmp_path):
     while the label already said so when the disc was scanned."""
     m = _mgr(tmp_path)
     wj = _tv_job("HOUSE_S5_D2", (5, 6), (5, 7), (5, 8), (5, 9), (5, 10))
-    assert m._display_name(wj) == "House S5D2 S05E06–E10"
+    assert m._display_name(wj) == "House S05 D02 E06–E10"
 
 
 def test_a_label_with_only_a_disc_number_still_narrows_the_shelf(tmp_path):
     """Plenty of sets label discs "FIREFLY_D1" with no season at all. The disc
     number alone is still the difference between one case and five."""
     m = _mgr(tmp_path)
+    # The label gives no season, so the one you entered when naming stands in.
     assert m._display_name(_tv_job("FIREFLY_D1", (1, 1), (1, 2), show="Firefly")) \
-        == "Firefly D1 S01E01–E02"
+        == "Firefly S01 D01 E01–E02"
 
 
 def test_a_label_that_says_nothing_leaves_the_name_alone(tmp_path):
@@ -794,7 +796,7 @@ def test_the_marker_follows_the_label_not_the_episodes(tmp_path):
     — the episode range right next to it already says what is actually on it."""
     m = _mgr(tmp_path)
     assert m._display_name(_tv_job("HOUSE_S1_D3", (2, 3), (2, 4))) \
-        == "House S1D3 S02E03–E04"
+        == "House S01 D03 E03–E04"
 
 
 def test_a_movie_gets_no_disc_marker(tmp_path):
@@ -820,4 +822,37 @@ def test_a_job_that_failed_before_naming_still_points_at_the_disc(tmp_path):
                        volume_label="HOUSE_S5_D2", titles=[])
     wj.show_title = "House"
     wj.season = 5
-    assert m._display_name(wj) == "House S5D2"
+    assert m._display_name(wj) == "House S05 D02"
+
+
+def test_a_two_digit_disc_number_is_not_padded_further(tmp_path):
+    """Box sets get past nine discs; D10 must stay D10."""
+    m = _mgr(tmp_path)
+    assert m._display_name(_tv_job("HOUSE_S5_D10", (5, 6), (5, 7))) \
+        == "House S05 D10 E06–E07"
+
+
+def test_the_label_season_wins_over_the_one_you_typed(tmp_path):
+    """"S05 D02" is the disc's address on the shelf, so both halves come off the
+    label when it has them. The episode numbers beside it still say what is
+    actually on the disc."""
+    m = _mgr(tmp_path)
+    assert m._display_name(_tv_job("HOUSE_S5_D2", (9, 6), (9, 7))) \
+        == "House S05 D02 E06–E07"
+
+
+def test_a_single_episode_disc_reads_cleanly(tmp_path):
+    m = _mgr(tmp_path)
+    assert m._display_name(_tv_job("HOUSE_S5_D2", (5, 6))) == "House S05 D02 E06"
+
+
+def test_an_unnamed_job_whose_label_has_only_a_disc_still_shows_it(tmp_path):
+    """Nothing confirmed and no season on the label — the disc number is all
+    there is, and it is still the difference between one case and five."""
+    from blurayripper.models import DiscInfo
+    m = _mgr(tmp_path)
+    wj = WebJob(id=9, source="disc:0", state=JobState.FAILED)
+    wj.disc = DiscInfo(source="disc:0", disc_name="FIREFLY_D3",
+                       volume_label="FIREFLY_D3", titles=[])
+    wj.show_title = "Firefly"
+    assert m._display_name(wj) == "Firefly D03"
