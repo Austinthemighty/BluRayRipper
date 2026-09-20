@@ -398,11 +398,15 @@ def test_a_disc_that_spans_a_season_boundary_is_named_unambiguously(tmp_path):
     wj.disc = _tv_disc()
     wj.assignments = {a.title_id: a for a in (ep(0, 1, 22), ep(1, 2, 1), ep(2, 2, 2))}
 
-    assert m._display_name(wj) == "House S01E22–S02E02"
+    # "S1D1" is the disc's own label, so the name says which disc to pick up.
+    assert m._display_name(wj) == "House S1D1 S01E22–S02E02"
 
     # A disc inside one season is untouched — the span there was never ambiguous.
+    # Note the label (S1_D1) and the episodes (season 2) disagree here: the marker
+    # follows the LABEL on purpose, because that is what is printed on the case
+    # you have to find.
     wj.assignments = {a.title_id: a for a in (ep(0, 2, 3), ep(1, 2, 4))}
-    assert m._display_name(wj) == "House S02E03–E04"
+    assert m._display_name(wj) == "House S1D1 S02E03–E04"
 
 
 def test_the_mapping_form_prefills_from_the_iso_volume_label(tmp_path):
@@ -745,3 +749,75 @@ def test_the_workers_panel_is_actually_given_each_box_s_address(tmp_path):
     assert panel["handbreak01"]["address"] == "192.0.2.9"
     # A worker that predates this, or can't work its address out, still lists.
     assert panel["older-box"]["address"] is None
+
+
+# --- a job name has to say WHICH DISC ----------------------------------------
+
+def _tv_job(label, *eps, show="House"):
+    from blurayripper.models import DiscInfo
+    wj = WebJob(id=234, source="disc:0", state=JobState.FAILED)
+    wj.disc = DiscInfo(source="disc:0", disc_name=label, volume_label=label, titles=[])
+    wj.assignments = {
+        i: EpisodeAssignment(title_id=i, kind=MediaKind.TV, show_or_movie_title=show,
+                             season=s, episode=e)
+        for i, (s, e) in enumerate(eps)}
+    return wj
+
+
+def test_a_tv_job_names_the_disc_it_came_off(tmp_path):
+    """Re-ripping a bad rip means finding the physical disc. "House S05E06–E10"
+    sends you to an episode guide to work out that those five are on disc 2 —
+    while the label already said so when the disc was scanned."""
+    m = _mgr(tmp_path)
+    wj = _tv_job("HOUSE_S5_D2", (5, 6), (5, 7), (5, 8), (5, 9), (5, 10))
+    assert m._display_name(wj) == "House S5D2 S05E06–E10"
+
+
+def test_a_label_with_only_a_disc_number_still_narrows_the_shelf(tmp_path):
+    """Plenty of sets label discs "FIREFLY_D1" with no season at all. The disc
+    number alone is still the difference between one case and five."""
+    m = _mgr(tmp_path)
+    assert m._display_name(_tv_job("FIREFLY_D1", (1, 1), (1, 2), show="Firefly")) \
+        == "Firefly D1 S01E01–E02"
+
+
+def test_a_label_that_says_nothing_leaves_the_name_alone(tmp_path):
+    """Every disc in some sets reports a bare "HOUSE". Inventing a marker there
+    would be worse than none — it would send you to a disc that doesn't exist."""
+    m = _mgr(tmp_path)
+    assert m._display_name(_tv_job("HOUSE", (5, 6), (5, 7))) == "House S05E06–E07"
+
+
+def test_the_marker_follows_the_label_not_the_episodes(tmp_path):
+    """A box set occasionally labels a disc with a season its contents disagree
+    with. The marker exists to match the printing on the case, so the LABEL wins
+    — the episode range right next to it already says what is actually on it."""
+    m = _mgr(tmp_path)
+    assert m._display_name(_tv_job("HOUSE_S1_D3", (2, 3), (2, 4))) \
+        == "House S1D3 S02E03–E04"
+
+
+def test_a_movie_gets_no_disc_marker(tmp_path):
+    """A film is one disc; "D1" on it is noise, and the year is what identifies
+    a movie."""
+    from blurayripper.models import DiscInfo
+    m = _mgr(tmp_path)
+    wj = WebJob(id=1, source="disc:0")
+    wj.disc = DiscInfo(source="disc:0", disc_name="JUMANJI_D1",
+                       volume_label="JUMANJI_D1", titles=[])
+    wj.assignments = {0: EpisodeAssignment(0, MediaKind.MOVIE, "Jumanji", 1995)}
+    assert m._display_name(wj) == "Jumanji (1995)"
+
+
+def test_a_job_that_failed_before_naming_still_points_at_the_disc(tmp_path):
+    """This is the case that needs it most: nothing was confirmed, so the
+    episode range doesn't exist yet, and the label is the only thing that can
+    tell you which disc to put back in."""
+    from blurayripper.models import DiscInfo
+    m = _mgr(tmp_path)
+    wj = WebJob(id=234, source="disc:0", state=JobState.FAILED)
+    wj.disc = DiscInfo(source="disc:0", disc_name="HOUSE_S5_D2",
+                       volume_label="HOUSE_S5_D2", titles=[])
+    wj.show_title = "House"
+    wj.season = 5
+    assert m._display_name(wj) == "House S5D2"

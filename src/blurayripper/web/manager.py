@@ -2615,6 +2615,24 @@ class JobManager:
     def _name_of(self, wj: WebJob) -> str:
         return self._display_name(wj)
 
+    def _disc_marker(self, wj: WebJob) -> str | None:
+        """Which disc of the set this is, as its case prints it: "S5D2".
+
+        The episode range says what a job HOLDS; it does not say which disc to
+        put back in the drive. Re-ripping a bad rip of "House S05E06–E10" means
+        working out from an episode guide that those five are on disc 2 — while
+        the label on the disc already said S5_D2 when it was scanned.
+
+        The season comes from the LABEL rather than the confirmed mapping,
+        because this is meant to match what is printed on the case, and a box set
+        occasionally labels a disc with a season its episodes disagree with. When
+        the label gives no season, the disc number alone still finds it."""
+        hints = self._label_hints(wj)
+        disc, season = hints.get("label_disc"), hints.get("label_season")
+        if disc is None:
+            return None
+        return f"S{season}D{disc}" if season is not None else f"D{disc}"
+
     def _display_name(self, wj: WebJob) -> str:
         """A name that identifies the physical DISC, not just its label.
 
@@ -2630,6 +2648,9 @@ class JobManager:
             # have worked out the show/season, which is enough to find the disc.
             show = (wj.show_title or "").strip()
             if show:
+                marker = self._disc_marker(wj)
+                if marker:
+                    return f"{show} {marker}"
                 return f"{show} S{wj.season:02d}" if wj.season is not None else show
             return fallback
         first = assigns[0]
@@ -2638,6 +2659,9 @@ class JobManager:
             return fallback
         if first.kind is not MediaKind.TV:
             return f"{title} ({first.year})" if first.year else title
+        marker = self._disc_marker(wj)
+        if marker:
+            title = f"{title} {marker}"
         seasons = sorted({a.season for a in assigns if a.season is not None})
         episodes = sorted({a.episode for a in assigns if a.episode is not None})
         if len(seasons) > 1:

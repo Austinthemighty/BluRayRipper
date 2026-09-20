@@ -40,7 +40,9 @@ DISC_LABEL = "FIREFLY_D1"
 EPISODE_SECONDS = 44 * 60
 # How an alert names a two-episode job: an alert that only said "FIREFLY_D1"
 # couldn't tell you which disc of the set to go and find.
-JOB_NAME = f"{SHOW} S01E01–E02"
+# The name carries the disc marker read off the label ("FIREFLY_D1" -> D1), so a
+# push tells you which disc to reach for, not just which episodes it held.
+JOB_NAME = f"{SHOW} D1 S01E01–E02"
 
 
 class ClusteredStore(MemoryStore):
