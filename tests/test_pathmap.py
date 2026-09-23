@@ -17,7 +17,7 @@ def test_translates_a_windows_path_to_the_linux_mount():
 def test_matching_ignores_separator_style_and_case():
     """The same location gets written differently depending on which box stored
     it, and Windows paths are case-insensitive — neither can be trusted."""
-    assert translate("Z:/media/MakeMKV/x.mkv", RULES) == "/mnt/TrueNas/media/MakeMKV/x.mkv"
+    assert translate("Z:/MEDIA/MakeMKV/x.mkv", RULES) == "/mnt/TrueNas/media/MakeMKV/x.mkv"
     assert translate(r"z:\media\MakeMKV\x.mkv", RULES) == "/mnt/TrueNas/media/MakeMKV/x.mkv"
 
 
