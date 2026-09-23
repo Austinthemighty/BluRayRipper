@@ -235,3 +235,13 @@ Tests cover the MakeMKV robot-output parser, HandBrake JSON progress, MKVToolNix
 track identification, Plex naming, disc fingerprinting, the settings schema, the
 job state machine (scan → rip → subs → encode → place), crash recovery, and the
 cluster claim/queue logic — all without external tools or a disc.
+
+## Licence
+
+GPL-3.0-or-later — see [LICENSE](LICENSE).
+
+This is copyleft: you may use, modify and redistribute it, and anyone who
+distributes a modified version has to publish their source under the same terms.
+It sits naturally beside the GPL tools this drives (HandBrake, MKVToolNix,
+ffmpeg), none of which are bundled here — you install them yourself, and
+`scripts/setup-linux.sh` will do that for you.
