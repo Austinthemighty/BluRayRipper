@@ -236,6 +236,19 @@ track identification, Plex naming, disc fingerprinting, the settings schema, the
 job state machine (scan → rip → subs → encode → place), crash recovery, and the
 cluster claim/queue logic — all without external tools or a disc.
 
+## Documentation
+
+- [docs/SETUP.md](docs/SETUP.md) — building a cluster: Postgres, the NAS mount,
+  systemd units, and the failure modes that are easy to hit.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — how the pieces fit, and the
+  four invariants that aren't obvious from the code.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — running the tests, and what a test is for
+  in this repo.
+- [SECURITY.md](SECURITY.md) — where credentials live, and why the web UI has no
+  authentication.
+- `/docs` on a running server — the HTTP API, generated from the route
+  docstrings.
+
 ## Licence
 
 GPL-3.0-or-later — see [LICENSE](LICENSE).
