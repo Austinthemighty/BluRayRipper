@@ -856,3 +856,108 @@ def test_an_unnamed_job_whose_label_has_only_a_disc_still_shows_it(tmp_path):
                        volume_label="FIREFLY_D3", titles=[])
     wj.show_title = "Firefly"
     assert m._display_name(wj) == "Firefly D03"
+
+
+# --- a disc carrying two cuts of one film ------------------------------------
+
+def _movie_disc(*seconds, label="FIFTY_SHADES"):
+    from blurayripper.models import DiscInfo, Title
+    return DiscInfo(
+        source="disc:0", disc_name=label, volume_label=label,
+        titles=[Title(title_id=i, duration_seconds=s, chapter_count=12,
+                      source_filename=f"{i:05d}.mpls")
+                for i, s in enumerate(seconds)])
+
+
+def test_both_cuts_of_a_film_are_suggested_not_just_the_longest(tmp_path):
+    """Taken from job #363, Fifty Shades of Grey: the disc offered 7512s and
+    7711s — a theatrical and an unrated cut — and only the longer was ripped.
+    The job completed, the file looked right, and one of the two films on the
+    disc simply did not exist."""
+    m = _mgr(tmp_path)
+    disc = _movie_disc(7512, 7711, 330, 149, 150)
+    assert m._suggested_titles(disc) == {0, 1}
+
+
+def test_the_second_cut_is_found_however_the_disc_orders_its_titles(tmp_path):
+    """Job #361, Fifty Shades Darker: the cuts were titles 0 and 3, with trailers
+    in between. Nothing may assume the features come first or adjacently."""
+    m = _mgr(tmp_path)
+    assert m._suggested_titles(_movie_disc(7068, 325, 325, 7888)) == {0, 3}
+
+
+def test_extras_are_still_left_out(tmp_path):
+    """The gate only helps if it stays quiet on an ordinary disc. Norbit's
+    longest bonus feature ran 1293s against a 6125s film — a fifth of it."""
+    m = _mgr(tmp_path)
+    assert m._suggested_titles(_movie_disc(6125, 509, 1293, 244, 290, 711)) == {0}
+    assert m._suggested_titles(_movie_disc(6417, 216)) == {0}                 # Whiplash
+    assert m._suggested_titles(_movie_disc(5178, 208, 135, 135, 359, 199)) == {0}  # Sherlock Gnomes
+
+
+def test_a_single_cut_disc_still_goes_straight_through(tmp_path):
+    """One suggested title is what keeps a normal film hands-off: auto-selected,
+    and auto-ripped when TMDB matches it exactly. Opening the gate for every
+    disc would be a worse bug than the one being fixed."""
+    m = _mgr(tmp_path)
+    assert len(m._suggested_titles(_movie_disc(6125, 509, 244))) == 1
+
+
+def test_two_cuts_without_editions_are_refused_rather_than_overwritten(tmp_path):
+    """Both cuts carry the same title and year, so with no Edition they compute
+    the SAME path and the second replaces the first — the original loss moved one
+    step later, where it would be even harder to notice."""
+    import pytest as _pytest
+    m = _mgr(tmp_path)
+    both = [EpisodeAssignment(0, MediaKind.MOVIE, "Fifty Shades of Grey", 2015),
+            EpisodeAssignment(1, MediaKind.MOVIE, "Fifty Shades of Grey", 2015)]
+    with _pytest.raises(ValueError, match="overwrite"):
+        m._refuse_colliding_assignments(both)
+
+
+def test_two_cuts_with_distinct_editions_are_accepted(tmp_path):
+    """Which is the whole point: Plex shows them as two versions of one film."""
+    m = _mgr(tmp_path)
+    m._refuse_colliding_assignments([
+        EpisodeAssignment(0, MediaKind.MOVIE, "Fifty Shades of Grey", 2015,
+                          edition="Theatrical"),
+        EpisodeAssignment(1, MediaKind.MOVIE, "Fifty Shades of Grey", 2015,
+                          edition="Unrated"),
+    ])
+
+
+def test_two_titles_mapped_to_one_episode_are_caught_too(tmp_path):
+    """The same guard, for the other way a mapping silently loses a file."""
+    import pytest as _pytest
+    m = _mgr(tmp_path)
+    with _pytest.raises(ValueError, match="overwrite"):
+        m._refuse_colliding_assignments([
+            EpisodeAssignment(0, MediaKind.TV, "House", 2004, season=1, episode=3),
+            EpisodeAssignment(1, MediaKind.TV, "House", 2004, season=1, episode=3),
+        ])
+
+
+def test_an_ordinary_single_movie_mapping_is_untouched(tmp_path):
+    m = _mgr(tmp_path)
+    m._refuse_colliding_assignments(
+        [EpisodeAssignment(0, MediaKind.MOVIE, "Whiplash", 2014)])
+
+
+def test_confirming_two_colliding_cuts_is_refused_through_set_mapping(tmp_path):
+    """Through the real entry point, not the helper. The guard existing is no
+    use if nothing calls it, and a deleted call is invisible to a test that
+    reaches past set_mapping."""
+    import pytest as _pytest
+    m = _mgr(tmp_path)
+    wj = WebJob(id=363, source="disc:0", state=JobState.AWAITING_MAPPING)
+    wj.disc = _movie_disc(7512, 7711)
+    m.jobs[wj.id] = wj
+
+    with _pytest.raises(ValueError, match="overwrite"):
+        m.set_mapping(363, [
+            EpisodeAssignment(0, MediaKind.MOVIE, "Fifty Shades of Grey", 2015),
+            EpisodeAssignment(1, MediaKind.MOVIE, "Fifty Shades of Grey", 2015),
+        ])
+    # and the job stays at the gate, so the naming can simply be corrected
+    assert wj.state is JobState.AWAITING_MAPPING
+    assert not wj.assignments

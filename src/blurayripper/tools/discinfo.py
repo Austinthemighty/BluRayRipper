@@ -76,3 +76,32 @@ def main_feature(disc: DiscInfo) -> Title | None:
     if not disc.titles:
         return None
     return max(disc.titles, key=lambda t: t.duration_seconds)
+
+
+# How short a title can be, against the longest one, and still be a cut of the
+# same film rather than an extra. Measured against real discs: an unrated cut
+# runs 0.89-0.97 of its theatrical counterpart, while the longest bonus feature
+# on those same discs came in at 0.21. 0.6 sits in the gap with room either side.
+ALT_CUT_RATIO = 0.6
+
+
+def feature_titles(disc: DiscInfo, ratio: float = ALT_CUT_RATIO) -> list[Title]:
+    """Every title long enough to be a CUT of the feature, longest first.
+
+    A disc that carries a theatrical and an unrated version offers two
+    feature-length playlists, and taking only the longest silently discards the
+    other — the rip looks like it worked and one of the two films you own is
+    simply not there.
+
+    Deliberately inclusive: including an extra costs one untick at the title
+    gate, while excluding a real cut loses a film with no sign that it happened.
+    """
+    if not disc.titles:
+        return []
+    longest = max(t.duration_seconds for t in disc.titles)
+    if longest <= 0:
+        return []
+    return sorted(
+        (t for t in disc.titles if t.duration_seconds >= longest * ratio),
+        key=lambda t: (-t.duration_seconds, t.title_id),
+    )

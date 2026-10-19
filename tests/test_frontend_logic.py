@@ -256,3 +256,41 @@ def test_a_countdown_reads_in_hours_and_minutes():
     assert js("fmtLeft(0)") == "now"
     assert js("fmtLeft(-10)") == "now"
     assert js("fmtLeft(null)") == ""
+
+
+# --- a disc with two cuts of one film ----------------------------------------
+
+def test_runtimes_are_shown_so_you_can_tell_the_cuts_apart():
+    """The runtime is the only thing distinguishing the rows: a theatrical and an
+    unrated cut carry the same title and differ by minutes."""
+    assert js("fmtRuntime(7512)") == "2h05m"
+    assert js("fmtRuntime(7888)") == "2h11m"
+    assert js("fmtRuntime(216)") == "4m"
+    assert js("fmtRuntime(0)") == "0m"
+
+
+def test_a_runtime_never_renders_sixty_minutes():
+    """7199s rounds to 120 minutes. Rounding the remainder rather than the whole
+    gives "1h60m" — rare, but it appears exactly where someone is trying to tell
+    two cuts apart by their length."""
+    assert js("fmtRuntime(7199)") == "2h00m"
+    assert js("fmtRuntime(3599)") == "1h00m"
+
+
+def test_each_cut_gets_its_own_edition_control():
+    """One Edition box for a two-cut disc meant both titles took the same value,
+    so both computed the same filename."""
+    j = json.dumps({"id": 363, "selected": [0, 1],
+                    "titles": [{"id": 0, "seconds": 7512}, {"id": 1, "seconds": 7711}]})
+    html = js(f"editionPerTitleHtml({j})")
+    assert html.count("data-edrow") == 2
+    assert 'data-edrow="0"' in html and 'data-edrow="1"' in html
+    assert "2h05m" in html and "2h09m" in html
+
+
+def test_a_title_the_disc_did_not_report_still_renders_a_row():
+    """A selected id with no matching entry in titles must not throw and take the
+    whole naming form down with it."""
+    j = json.dumps({"id": 1, "selected": [0, 9], "titles": [{"id": 0, "seconds": 6000}]})
+    html = js(f"editionPerTitleHtml({j})")
+    assert html.count("data-edrow") == 2

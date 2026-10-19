@@ -477,6 +477,28 @@ async function submitAddSelector(){
 function badgeClass(s){ if(s==='done')return'done'; if(s==='failed')return'failed'; if(s.startsWith('awaiting'))return'await'; return''; }
 
 const EDITIONS = ['Theatrical Cut','Extended Cut',"Director's Cut",'Unrated','Special Edition'];
+function fmtRuntime(sec){
+  // Round to whole minutes FIRST, then split. Rounding the remainder instead
+  // renders 7199s as "1h60m" — rare, but it reads as a bug in the one place the
+  // operator is trying to tell two runtimes apart.
+  const mins = Math.round(Math.max(0, sec||0) / 60);
+  const h = Math.floor(mins/60), m = mins % 60;
+  return h ? `${h}h${String(m).padStart(2,'0')}m` : `${m}m`;
+}
+// One Edition control per selected title, for a disc carrying more than one cut
+// of the same film. The runtime is shown because it is the only thing that tells
+// you which row is which — a theatrical and an unrated cut differ by minutes,
+// and nothing else on the disc says so.
+function editionPerTitleHtml(j){
+  const byId = Object.fromEntries((j.titles||[]).map(t=>[t.id, t]));
+  return j.selected.map(tid => {
+    const t = byId[tid] || {};
+    return `<div class="row" data-edrow="${tid}" style="gap:8px;align-items:center;">
+      <span style="min-width:150px;">Title ${tid} · <b>${fmtRuntime(t.seconds)}</b></span>
+      ${editionSelectHtml()}
+    </div>`;
+  }).join('');
+}
 function editionSelectHtml(){
   const opts = EDITIONS.map(e=>`<option>${e}</option>`).join('');
   return `<select data-edsel><option value="">(none)</option>${opts}<option value="__other">Other…</option></select>`
@@ -1210,9 +1232,17 @@ function buildMapping(card, j){
         } catch(e){ alert(e.message); }
       };
     } else {
-      tv.innerHTML = `<div class="muted">Will name ${j.selected.length} selected title(s) as this movie.</div>
-        <div class="row">Edition ${editionSelectHtml()}</div>`;
-      wireEdition(tv);
+      if (j.selected.length > 1) {
+        tv.innerHTML = `<div class="muted">This disc has <b>${j.selected.length}</b> cuts of this film `
+          + `selected. Give each one a different Edition — Plex then shows them as `
+          + `two versions of one film instead of one overwriting the other.</div>`
+          + editionPerTitleHtml(j);
+        tv.querySelectorAll('[data-edrow]').forEach(wireEdition);
+      } else {
+        tv.innerHTML = `<div class="muted">Will name ${j.selected.length} selected title(s) as this movie.</div>
+          <div class="row">Edition ${editionSelectHtml()}</div>`;
+        wireEdition(tv);
+      }
       body.querySelector('[data-confirm]').disabled=false;
     }
   }
@@ -1222,8 +1252,23 @@ function buildMapping(card, j){
     if(!state.chosen){ alert('Pick a title first'); return; }
     let assignments=[];
     if (state.kind==='movie') {
-      const ed = editionValue(body);
-      assignments = j.selected.map(tid=>({title_id:tid, kind:'movie', show_or_movie_title:state.chosen.title, year:state.chosen.year, edition:ed}));
+      const rows = [...body.querySelectorAll('[data-edrow]')];
+      if (rows.length > 1) {
+        assignments = rows.map(r=>({title_id:+r.dataset.edrow, kind:'movie',
+          show_or_movie_title:state.chosen.title, year:state.chosen.year,
+          edition:editionValue(r)}));
+        const eds = assignments.map(a=>(a.edition||'').toLowerCase());
+        if (new Set(eds).size !== eds.length) {
+          // The server refuses this too, but saying it here costs a round trip
+          // less and points at the control that fixes it.
+          alert('Two cuts would be saved under the same name and one would '
+              + 'overwrite the other. Give each a different Edition.');
+          return;
+        }
+      } else {
+        const ed = editionValue(body);
+        assignments = j.selected.map(tid=>({title_id:tid, kind:'movie', show_or_movie_title:state.chosen.title, year:state.chosen.year, edition:ed}));
+      }
     } else {
       const s=+body.querySelector('[data-season]').value;
       const byNum=state.byNum||{};

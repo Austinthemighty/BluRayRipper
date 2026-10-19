@@ -60,6 +60,13 @@ from ..version import get_version
 _STATUS_CONTROL_C_EXIT = 3221225786  # 0xC000013A — Windows process terminated
 
 
+def _hms(seconds: int) -> str:
+    """A runtime in the form you can match against a disc case: "2h09m"."""
+    seconds = max(0, int(seconds or 0))
+    h, m = divmod(seconds // 60, 60)
+    return f"{h}h{m:02d}m" if h else f"{m}m"
+
+
 def _drive_index(source: str | None) -> int | None:
     """The makemkvcon drive index from a 'disc:N' selector, else None."""
     src = source or ""
@@ -1466,12 +1473,37 @@ class JobManager:
                     f"{self._live_state(wj).value.replace('_', ' ')} now. Nothing "
                     "was lost; use Rename if you need to change the naming.")
             raise ValueError(f"Job {job_id} is not awaiting a naming mapping.")
+        self._refuse_colliding_assignments(assignments)
         wj.assignments = {a.title_id: a for a in assignments}
         wj.selected_title_ids = [a.title_id for a in assignments]
         wj.grain_mode = grain_mode
         wj.tune_grain = tune_grain
         wj.state = JobState.READY
         self._start_job(wj)
+
+    def _refuse_colliding_assignments(self, assignments) -> None:
+        """Stop two titles being filed under one name, overwriting each other.
+
+        Two cuts of a film carry the same title and year, so without a distinct
+        Edition they compute the SAME output path and the second silently
+        replaces the first — the exact loss the title gate was opened to prevent,
+        moved one step later. The same check catches two titles mapped to one
+        episode number."""
+        seen: dict[str, object] = {}
+        for a in assignments:
+            try:
+                dest = str(self.pipeline._video_path_for(a))
+            except Exception:
+                continue            # unnameable yet; the pipeline will complain
+            other = seen.get(dest)
+            if other is not None:
+                raise ValueError(
+                    f"Titles {other.title_id} and {a.title_id} would both be saved "
+                    f"as \"{Path(dest).name}\", so one would overwrite the other. "
+                    f"Give them different Editions (Plex shows "
+                    f"\"{{edition-Theatrical}}\" and \"{{edition-Unrated}}\" as two "
+                    f"versions of one film), or untick one.")
+            seen[dest] = a
 
     def rename_job(self, job_id: int, title: str, year: int | None) -> None:
         """Fix a job's identity — a movie OR a show whose title/year is wrong (e.g.
@@ -1914,6 +1946,19 @@ class JobManager:
                     reporter.on_event("Single title — auto-selected; confirm the name.")
                 else:
                     wj.state = JobState.AWAITING_TITLES
+                    if discinfo.guess_kind(job.disc) is MediaKind.MOVIE:
+                        # Say why this one stopped when a single-cut disc would
+                        # have sailed through, and say it before the operator
+                        # wonders whether something went wrong.
+                        runs = ", ".join(
+                            _hms(t.duration_seconds)
+                            for t in discinfo.feature_titles(job.disc))
+                        reporter.on_event(
+                            f"This disc carries {len(suggested)} feature-length cuts "
+                            f"({runs}) — usually a theatrical and an extended or "
+                            f"unrated version. Both are ticked: untick any you "
+                            f"don't want, and give each one a different Edition so "
+                            f"they don't land on the same filename.")
                 # scan_disc leaves the pipeline job at SCANNING; sync it to the
                 # parked gate so _live_state can't surface a phantom "scanning"
                 # that the UI shows forever with no way to reach the gate.
@@ -2856,7 +2901,13 @@ class JobManager:
 
     @staticmethod
     def _suggested_titles(disc: DiscInfo) -> set[int]:
+        """Which titles to tick for the operator.
+
+        For a movie this is every FEATURE-LENGTH title, not just the longest.
+        A disc carrying a theatrical and an unrated cut offers two, and
+        suggesting only the longest meant the other was never ripped: the job
+        completed, the file looked right, and one of the two films on the disc
+        simply did not exist."""
         if discinfo.guess_kind(disc) is MediaKind.MOVIE:
-            mf = discinfo.main_feature(disc)
-            return {mf.title_id} if mf else set()
+            return {t.title_id for t in discinfo.feature_titles(disc)}
         return {t.title_id for t in discinfo.episode_candidate_titles(disc)}
