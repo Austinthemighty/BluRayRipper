@@ -118,8 +118,24 @@ def test_a_stalled_job_still_reads_as_stalled_whatever_its_state():
     """Stalled is the more urgent thing to say: the state says "encoding" and
     nothing is encoding it."""
     assert js(f"catOf({_job(state='encoding', stalled=True)})") == "enc"
-    src = INDEX.read_text()
-    assert "j.stalled ? 'stalled'" in src
+    assert js(f"stallBadge({_job(state='encoding', stalled=True)}).text") == "stalled"
+
+
+def test_a_stall_that_kept_its_rip_is_not_dressed_up_as_a_failure():
+    """Two jobs stalled the same evening: one whose drive died part-way through
+    the rip, and one that ripped its disc, verified it, and then stopped dead
+    afterwards. Both cards showed the same red "stalled", so the second sent its
+    operator looking for a disc to re-insert over a rip that had already
+    succeeded and was sitting on disk. Amber, and say which it is."""
+    saved = _job(state="ripping", lane="rip", stalled=True, stall_kind="rip_saved")
+    lost = _job(state="ripping", lane="rip", stalled=True, stall_kind="rip_unfinished")
+    assert js(f"stallBadge({saved}).text") == "stalled · rip saved"
+    assert js(f"stallBadge({saved}).cls") == "await"    # amber: nothing was lost
+    assert js(f"stallBadge({lost}).text") == "stalled"
+    assert js(f"stallBadge({lost}).cls") == "failed"
+    # needs_review keeps its own wording; a stall doesn't swallow it.
+    assert js(f"stallBadge({_job(state='failed', needs_review=True)}).text") \
+        == "needs review"
 
 
 def test_a_ready_job_is_queued_on_whichever_side_it_is_waiting():

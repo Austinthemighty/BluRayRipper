@@ -139,6 +139,20 @@ class _Child:
         return self._returncode
 
 
+class _UnkillableChild(_Child):
+    """A child SIGKILL cannot end. A process blocked in uninterruptible I/O —
+    a tool talking to an optical drive that has stopped answering, or a NAS that
+    has gone away — stays in the process table with the signal pending until the
+    kernel finally gives up on the transfer, which can be minutes or never."""
+
+    async def wait(self) -> int:
+        self.waits += 1
+        if self.kill_calls:
+            self.waits_after_kill += 1
+        await asyncio.Event().wait()          # never set: this never returns
+        raise AssertionError("unreachable")   # pragma: no cover
+
+
 def _spawn(monkeypatch, child):
     """Replace the real spawn. ``child`` may be a _Child (reused for every
     spawn) or a zero-arg factory. Returns the list of (argv, kwargs) calls."""
@@ -316,9 +330,18 @@ async def test_the_timeout_message_tells_the_operator_how_long_it_waited(monkeyp
     child = _Child(never_ends=True)
     _spawn(monkeypatch, child)
 
+    real_wait_for = asyncio.wait_for
+    armed: list[float | None] = []
+
     async def instant_timeout(awaitable, timeout):
-        awaitable.close()  # never awaited: don't leave a dangling coroutine
-        raise asyncio.TimeoutError
+        armed.append(timeout)
+        if len(armed) == 1:
+            awaitable.close()  # never awaited: don't leave a dangling coroutine
+            raise asyncio.TimeoutError
+        # Every later bound is the reap of the child we just killed, which is
+        # itself a wait_for now — expiring that too would stub out the very
+        # teardown this test is here to check.
+        return await real_wait_for(awaitable, timeout)
 
     monkeypatch.setattr(asyncio, "wait_for", instant_timeout)
 
@@ -466,7 +489,10 @@ async def test_a_wedged_probe_is_bounded_and_the_child_is_killed_not_orphaned(
     with pytest.raises(asyncio.TimeoutError):
         await MkvTools(_settings(tmp_path)).probe(tmp_path / "t.mkv")
 
-    assert armed == [120]                # the bound the wrapper asked for
+    # 120 is the bound the wrapper asked for; the reap of the killed child
+    # is bounded in turn, so SIGKILL landing on a process wedged in kernel
+    # I/O cannot turn the cancellation itself into a permanent wait.
+    assert armed == [120, process._REAP_TIMEOUT]
     assert child.kill_calls == 1         # ...and the child it took down with it
     assert child.waits_after_kill == 1
 
@@ -557,7 +583,9 @@ async def test_a_hung_ocr_is_killed_at_the_configured_per_track_timeout(
         await se.ocr_to_srt(sup, "eng", out_dir)
 
     # The --help probe is bounded at 60s; the OCR itself at the configured 1800.
-    assert armed[-1] == 1800
+    # (Each killed child then arms the bounded reap, so 1800 isn't the last one.)
+    assert 1800 in armed
+    assert armed[-1] == process._REAP_TIMEOUT
     assert "exceeded 1800s and was killed" in str(excinfo.value)
     assert "seconv" in str(excinfo.value)
     assert children[-1].kill_calls == 1
@@ -738,3 +766,29 @@ async def test_an_encode_killed_by_a_signal_places_nothing_and_frees_its_slot(
     assert [p for p in settings.storage.output_dir.rglob("*") if p.suffix == ".mkv"] == []
     # It did report progress before dying, tagged with the stage the operator sees.
     assert ("Encode: working", 0.31) in report.progress
+
+
+async def test_a_tool_that_cannot_be_killed_still_releases_the_caller(monkeypatch):
+    """This one froze a finished rip for an hour. makemkvcon enumerating drives
+    while one of them answers "HARDWARE ERROR:TIMEOUT ON LOGICAL UNIT" sits in
+    uninterruptible I/O, where SIGKILL is not delivered until the transfer
+    errors. The reap after a timeout waited for that unconditionally, so
+    wait_for's TimeoutError could never propagate out of the cancellation: the
+    caller's 15-second bound silently became "wait forever", and the job's task
+    hung for good. Nothing else looked wrong — the event loop stayed healthy and
+    every other job kept running — so the only symptom was one job stopped dead
+    mid-pipeline with no error. The bound has to survive an unkillable child.
+    """
+    child = _UnkillableChild(never_ends=True)
+    _spawn(monkeypatch, child)
+    monkeypatch.setattr(process, "_REAP_TIMEOUT", 0.05)
+
+    task = asyncio.ensure_future(
+        process.run(["makemkvcon", "-r", "info", "disc:99999"], timeout=0.05))
+    done, _pending = await asyncio.wait({task}, timeout=5)
+
+    assert task in done, "run() never returned: the reap of an unkillable child hung"
+    with pytest.raises(TimeoutError, match="exceeded 0s and was killed"):
+        task.result()
+    assert child.kill_calls == 1         # we did ask it to end
+    assert child.waits_after_kill == 1   # ...and waited for it, but not forever

@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import subprocess
 import sys
+# Imported by name, not reached through the module: tests stub the module-global
+# ``subprocess`` wholesale, and an `except subprocess.TimeoutExpired` would then
+# raise AttributeError from inside exception handling.
+from subprocess import TimeoutExpired
 
 
 def eject(device: str | None, method: str = "auto") -> None:
@@ -28,19 +32,35 @@ def eject(device: str | None, method: str = "auto") -> None:
         _run_or_raise(cmd, "eject")
 
 
-def _run_or_raise(cmd: list[str], what: str) -> None:
+# A tray command talks to the drive, so it can block as long as the drive does.
+# Bounded so an unresponsive drive reports a failure instead of never returning.
+TRAY_TIMEOUT = 30.0
+
+
+def _run_or_raise(cmd: list[str], what: str, timeout: float = TRAY_TIMEOUT) -> None:
     """Run a tray command and FAIL on a non-zero exit.
 
     check=False discarded the exit status, so a busy drive, a wrong /dev/srN or
     a jammed tray returned normally — and the pipeline then logged "Ejected
     disc — safe to load the next one" and pushed a notification saying so, while
     the tray never moved. Only Windows could ever report a failure.
+
+    The timeout matters as much as the exit status: `eject /dev/srN` opens the
+    device and issues an ioctl, so on a drive that has stopped answering (SCSI
+    timeouts) it blocks in the kernel rather than failing. Without a bound that
+    turned "pop the tray" into a permanent stall of whoever called it.
     """
     try:
-        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True,
+                                timeout=timeout)
     except FileNotFoundError as exc:
         raise RuntimeError(
             f"Could not {what}: '{cmd[0]}' is not installed on this machine."
+        ) from exc
+    except TimeoutExpired as exc:
+        raise TimeoutError(
+            f"Could not {what}: '{' '.join(cmd)}' did not return within "
+            f"{timeout:.0f}s — the drive is not responding."
         ) from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip().splitlines()

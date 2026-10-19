@@ -129,6 +129,27 @@ def test_a_missing_eject_binary_says_which_one(monkeypatch):
         eject_mod.eject("/dev/sr0")
 
 
+def test_a_drive_that_never_answers_an_eject_times_out_instead_of_waiting(monkeypatch):
+    """`eject /dev/srN` opens the device and issues an ioctl, so a drive that has
+    stopped answering (the SCSI timeouts a dying disc or drive produces) blocks
+    in the kernel rather than failing. Unbounded, that stalled whoever asked for
+    the eject — on the rip box, the job that had just finished ripping, which
+    then sat there with its work complete and nothing in its log to say why.
+    The bound has to be asked for, and its expiry reported as what it is."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    seen: dict = {}
+
+    def never_answers(cmd, **kw):
+        seen.update(kw)
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+
+    monkeypatch.setattr(eject_mod.subprocess, "run", never_answers)
+
+    with pytest.raises(TimeoutError, match="not responding"):
+        eject_mod.eject("/dev/sr0")
+    assert seen.get("timeout") == eject_mod.TRAY_TIMEOUT
+
+
 # --- 3. an empty Dolby Vision mux was moved into the library -----------------
 
 def test_an_empty_dolby_vision_mux_is_refused(tmp_path, monkeypatch):

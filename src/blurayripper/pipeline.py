@@ -40,6 +40,11 @@ from .tools.makemkv import MakeMKV
 from .tools.mkvtools import MkvTools, SubtitleTrack
 from .tools.subtitleedit import SubtitleEdit
 
+# How long the post-rip auto-eject may take before the job gives up on the tray
+# and moves on. Generous: a healthy drive takes a second or two, and a disc that
+# is still being flushed can take longer.
+_EJECT_TIMEOUT = 60.0
+
 
 class JobState(str, Enum):
     QUEUED = "queued"
@@ -920,12 +925,27 @@ class Pipeline:
             if self.settings.auto_eject:
                 device = await self._eject_device_for(job)
                 try:
-                    eject(device)
+                    # In a thread and bounded. Ejecting talks to the drive, so a
+                    # drive that has stopped answering blocks for as long as it
+                    # likes — and this used to run INLINE on the event loop, so
+                    # one unresponsive tray froze the entire server, not just
+                    # this job. The rip is finished and checkpointed by the time
+                    # we get here, so a tray that won't open must cost a log
+                    # line, never the job: past the deadline the thread is
+                    # abandoned (it ends when the drive finally errors) and the
+                    # job carries on to subtitles and the encode.
+                    await asyncio.wait_for(
+                        asyncio.to_thread(eject, device), _EJECT_TIMEOUT)
                     ejected = True
                     _emit_ejected(report, device)  # drop the drive's cached disc name
                     report.on_event(
                         f"Ejected disc ({device or 'default drive'}) — safe to load the next one."
                     )
+                except (TimeoutError, asyncio.TimeoutError):
+                    report.on_event(
+                        f"Auto-eject timed out after {_EJECT_TIMEOUT:.0f}s "
+                        f"({device or 'default drive'}) — the drive isn't responding. "
+                        f"The rip is complete and saved; eject it by hand.")
                 except Exception as exc:
                     hint = (" — on Windows the force-eject IOCTL needs admin; run "
                             "`serve` as Administrator" if sys.platform.startswith("win") else "")

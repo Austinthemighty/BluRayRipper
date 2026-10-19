@@ -610,6 +610,31 @@ class JobManager:
                 return False  # a live remote worker is heartbeating it
         return True
 
+    def _stall_info(self, wj: WebJob, live_state: JobState,
+                    stalled: bool) -> tuple[str | None, str | None]:
+        """(kind, sentence) for a stalled job — WHICH kind of stall this is.
+
+        "Stalled" on its own reads as "your rip is lost", and that is wrong half
+        the time. A rip-lane job can stall with the rip unfinished (the disc has
+        to go back in the drive, and Requeue re-rips) or *after* the rip finished
+        and was checkpointed (the file is safe, and Requeue carries on from it).
+        Those ask opposite things of whoever is looking at the card, both showed
+        the same red "stalled", and only this side can tell them apart.
+        """
+        if not stalled:
+            return None, None
+        if live_state in self._ACTIVE_RIP_STATES:
+            if self._rip_pending(wj):
+                return "rip_unfinished", (
+                    "The rip stopped before it finished — a bad disc, or a drive "
+                    "that stopped answering. The disc is still needed: Requeue "
+                    "cancels the stuck rip and re-rips what's missing.")
+            return "rip_saved", (
+                "The rip finished and is saved — the job stopped after it. "
+                "Requeue carries on from the ripped file and won't re-rip.")
+        return "no_worker", (
+            "No worker is running this any more. Requeue puts it back in the queue.")
+
     # Grace before "no task is working this" counts as stalled. Covers the gap
     # between a job being marked RIPPING and its task being attached.
     _RIP_TASK_GRACE = 90
@@ -2810,6 +2835,7 @@ class JobManager:
 
     def _job_dict(self, wj: WebJob) -> dict:
         live_state = self._live_state(wj)
+        stalled = self._is_stalled(wj, live_state)
         return {
             "id": wj.id,
             "source": wj.source,
@@ -2818,7 +2844,11 @@ class JobManager:
             "progress": round(wj.progress, 4),
             # True when the state says "encoding/OCR/placing" but nothing is actually
             # working it (worker died/restarted). Lets the UI flag a frozen job.
-            "stalled": self._is_stalled(wj, live_state),
+            "stalled": stalled,
+            # WHICH kind of stall — "the disc is still needed" vs "the rip is
+            # saved, just requeue". The two look identical from the outside.
+            **dict(zip(("stall_kind", "stall_detail"),
+                       self._stall_info(wj, live_state, stalled))),
             "lane": self._lane(wj, live_state),  # 'rip' | 'encode' | None (resting)
             "priority": wj.priority,  # higher = bumped ahead in the encode queue
             "error": wj.error,

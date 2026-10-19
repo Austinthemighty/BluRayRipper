@@ -1,5 +1,7 @@
 """Drive-device resolution (for auto-eject), rip-speed formatting, and ETA."""
 
+import asyncio
+
 from blurayripper.pipeline import _RipSpeed, _fmt_eta
 from blurayripper.tools.makemkv import parse_info
 
@@ -217,3 +219,81 @@ async def test_prep_phase_no_grain_prompt_when_all_decided(tmp_path, monkeypatch
     _job, asked = await _run_prep_grain(
         tmp_path, monkeypatch, decided={0: True, 1: False, 2: True})
     assert asked == []
+
+
+async def test_a_tray_that_never_opens_neither_freezes_serve_nor_strands_the_job(
+        tmp_path, monkeypatch):
+    """Ejecting talks to the drive, so a drive that has stopped answering blocks
+    for as long as it likes. This ran INLINE on the event loop, so one stuck
+    tray froze the entire server — every other job, the UI, the SSE stream — over
+    a disc that had already been ripped. And since it ran straight after the rip
+    was verified and checkpointed, the job itself stopped there: complete work,
+    no error, no log line, just stopped.
+
+    So: off the loop, and bounded. By this point the rip is safe on disk, so a
+    tray that won't open costs a log line and nothing else — the job goes on to
+    subtitles and the encode, and the disc can be taken out by hand.
+    """
+    import threading
+    import time
+
+    import blurayripper.pipeline as pl
+    from blurayripper.config import load_settings
+    from blurayripper.models import DiscInfo, Title
+    from blurayripper.pipeline import Job, Pipeline
+
+    s = load_settings()
+    s.auto_eject = True
+    s.rip_duration_tolerance_pct = 0          # skip the post-rip duration probe
+    monkeypatch.setattr(s.storage, "staging_dir", tmp_path)
+    monkeypatch.setattr(pl, "_EJECT_TIMEOUT", 0.05)
+    pipe = Pipeline(s)
+
+    job = Job(source="disc:0")
+    job.disc = DiscInfo(source="disc:0", disc_name="X", drive_device="/dev/sr1",
+                        titles=[Title(title_id=0)])
+    job.selected_title_ids = [0]
+
+    async def fake_rip(source, title_id, rip_dir, on_progress=None, on_message=None):
+        rip_dir.mkdir(parents=True, exist_ok=True)
+        out = rip_dir / f"t{title_id}.mkv"
+        out.write_text("x")
+        return [out]
+    monkeypatch.setattr(pipe.makemkv, "rip_title", fake_rip)
+
+    async def fake_dev(_job):
+        return "/dev/sr1"
+    monkeypatch.setattr(pipe, "_eject_device_for", fake_dev)
+
+    ran_on: list[int] = []
+
+    def never_opens(_device):
+        ran_on.append(threading.get_ident())
+        time.sleep(0.4)          # the drive never answers
+    monkeypatch.setattr(pl, "eject", never_opens)
+
+    class _Rec:
+        def __init__(self): self.events = []
+        def on_event(self, m): self.events.append(m)
+        def on_progress(self, *a): pass
+
+    # Something else on the loop, to prove the loop kept turning throughout.
+    turns = 0
+
+    async def _other_work():
+        nonlocal turns
+        while True:
+            turns += 1
+            await asyncio.sleep(0)
+
+    beat = asyncio.ensure_future(_other_work())
+    r = _Rec()
+    ripped = await asyncio.wait_for(
+        pipe._ensure_ripped(job, 0, tmp_path / "job_1", r), 5)
+    beat.cancel()
+
+    assert ripped.exists()                               # the rip is kept
+    assert ran_on and ran_on[0] != threading.get_ident()  # ejected off the loop
+    assert turns > 0                                     # ...which kept turning
+    assert any("Auto-eject timed out" in m for m in r.events)
+    assert not any("Ejected disc" in m for m in r.events)  # and never claimed success

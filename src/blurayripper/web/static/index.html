@@ -476,6 +476,22 @@ async function submitAddSelector(){
 
 function badgeClass(s){ if(s==='done')return'done'; if(s==='failed')return'failed'; if(s.startsWith('awaiting'))return'await'; return''; }
 
+// A job's badge: the text and the colour class.
+//
+// needs_review is a slice of failed with its own chip, so the badge has to say
+// so too — otherwise the card reads FAILED, the Failed chip reads 0, and
+// clicking it shows nothing while the card is right there.
+//
+// And a stall whose rip FINISHED says so, in amber rather than red: the work is
+// on disk and a Requeue carries on from it, so a bare red "stalled" sent you
+// hunting for a disc over a rip that had already succeeded.
+function stallBadge(j){
+  if (j.stall_kind === 'rip_saved') return { text:'stalled · rip saved', cls:'await' };
+  if (j.stalled)     return { text:'stalled', cls:'failed' };
+  if (j.needs_review) return { text:'needs review', cls:'failed' };
+  return { text:(j.state||'').replace(/_/g,' '), cls:badgeClass(j.state) };
+}
+
 const EDITIONS = ['Theatrical Cut','Extended Cut',"Director's Cut",'Unrated','Special Edition'];
 function fmtRuntime(sec){
   // Round to whole minutes FIRST, then split. Rounding the remainder instead
@@ -1027,19 +1043,14 @@ function liveUpdate(card, j){
   const nm = j.display_name || j.disc_name || j.source;
   if (nameEl && nameEl.textContent !== nm) nameEl.textContent = nm;
   const badge = card.querySelector('[data-badge]');
-  // needs_review is a slice of failed with its own chip, so the badge has to say
-  // so too — otherwise the card reads FAILED, the Failed chip reads 0, and
-  // clicking it shows nothing while the card is right there.
-  badge.textContent = j.stalled ? 'stalled'
-    : j.needs_review ? 'needs review'
-    : j.state.replace(/_/g,' ');
-  badge.className = 'badge ' + (j.stalled || j.needs_review ? 'failed'
-                                : badgeClass(j.state));
+  const bdg = stallBadge(j);
+  badge.textContent = bdg.text;
+  badge.className = 'badge ' + bdg.cls;
   card.querySelector('[data-bar]').style.width = Math.round(j.progress*100)+'%';
   card.querySelector('[data-stage]').textContent =
     j.error ? ('⚠ '+j.error)
-    : (j.stalled && j.lane==='rip') ? ('⚠ Rip stopped responding (last: '+(j.stage||'—')+') — the disc/drive may be stuck. Requeue to cancel and retry.')
-    : j.stalled ? ('⚠ No worker is running this (last: '+(j.stage||'—')+') — waiting for a free worker to reclaim it.')
+    : j.stall_detail ? ('⚠ '+j.stall_detail+' (last: '+(j.stage||'—')+')')
+    : j.stalled ? ('⚠ Stalled (last: '+(j.stage||'—')+').')
     : (j.stage||'');
   const logEl = card.querySelector('[data-log]');
   const logText = (j.log||[]).join('\n');
@@ -1117,9 +1128,8 @@ function liveUpdate(card, j){
   if (j.stalled && !rq) {
     const b=document.createElement('button'); b.dataset.requeue='1'; b.textContent='Requeue';
     b.style.marginTop='8px';
-    b.title = j.lane==='rip'
-      ? 'The rip stopped responding (a bad disc or an unresponsive drive). Cancel the stuck makemkvcon and re-run from the last checkpoint.'
-      : 'This job stalled (its worker died or the server restarted mid-step). Reset it to the queue and re-run from its finished rip.';
+    b.title = j.stall_detail
+      || 'Reset this job to the queue and re-run it from its last checkpoint.';
     b.onclick=()=>api('POST','/api/jobs/'+j.id+'/requeue').catch(e=>alert(e.message));
     card.querySelector('[data-body]').appendChild(b);
   } else if (!j.stalled && rq) {

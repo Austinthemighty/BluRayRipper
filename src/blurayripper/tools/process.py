@@ -48,18 +48,36 @@ async def _maybe_await(value) -> None:
         await value
 
 
+# How long to wait for a killed child to actually die before abandoning it.
+_REAP_TIMEOUT = 10.0
+
+
 async def _kill_and_reap(proc) -> None:
     """End the child and wait for it, tolerating one that has already exited.
 
     ProcessLookupError is swallowed because this only ever runs while another
     exception is in flight; letting a lost race replace it would hide the real
     reason the run failed.
+
+    The wait is BOUNDED, and that bound is load-bearing. SIGKILL is not
+    delivered to a process sitting in uninterruptible I/O, which is exactly
+    where a tool that touches a failing optical drive sits (makemkvcon on a
+    "HARDWARE ERROR:TIMEOUT ON LOGICAL UNIT" drive). An unbounded proc.wait()
+    here meant a timed-out child never finished being cancelled, so wait_for's
+    TimeoutError could never propagate: every caller's timeout silently became
+    "wait forever" and the awaiting task hung permanently — with the event loop
+    still perfectly healthy, so nothing else on the box looked wrong. Past the
+    deadline the child is left to the OS (it exits once its I/O finally errors)
+    and the exception already in flight is allowed through.
     """
     try:
         proc.kill()
     except ProcessLookupError:
         pass
-    await proc.wait()
+    try:
+        await asyncio.wait_for(proc.wait(), _REAP_TIMEOUT)
+    except (TimeoutError, asyncio.TimeoutError):
+        pass  # unkillable for now (stuck in kernel I/O) — don't hang on it
 
 
 def _low_priority_kwargs() -> dict:

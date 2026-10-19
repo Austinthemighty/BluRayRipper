@@ -753,6 +753,47 @@ def test_rip_stall_watchdog(manager):
     assert manager._is_stalled(wj, JobState.RIPPING) is False
 
 
+async def test_a_stall_says_whether_the_rip_survived_it(manager):
+    """Two jobs stalled the same evening. One lost its drive part-way through the
+    rip; the other ripped its disc, verified the length, and then stopped dead
+    after. Both read "stalled", which is the same word for "put the disc back in
+    and start again" and "your file is on disk, just requeue it" — so the second
+    one got hunted for a disc it no longer needed.
+
+    The checkpoint already knows: a selected title with no ripped_path means the
+    disc is still needed. That's the discriminator, so the flag can carry it."""
+    wj = WebJob(id=365, source="disc:1", state=JobState.RIPPING)
+    wj._pipeline_job = job = Job(source="disc:1")
+    job.state = JobState.RIPPING
+    wj.selected_title_ids = job.selected_title_ids = [3]
+    wj._activity_at = time.monotonic() - (manager.settings.rip_stall_after_seconds + 5)
+    assert manager._is_stalled(wj, manager._live_state(wj)) is True
+
+    # Nothing ripped yet -> the disc is still needed.
+    job.checkpoints = {3: {}}
+    kind, detail = manager._stall_info(wj, JobState.RIPPING, True)
+    assert kind == "rip_unfinished"
+    assert "disc is still needed" in detail
+
+    # The rip finished and was checkpointed -> the file is safe where it is.
+    job.checkpoints = {3: {"ripped_path": "rip/t003/title.mkv"}}
+    kind, detail = manager._stall_info(wj, JobState.RIPPING, True)
+    assert kind == "rip_saved"
+    assert "won't re-rip" in detail
+
+    # A worker-side stall is neither of those.
+    assert manager._stall_info(wj, JobState.ENCODING, True)[0] == "no_worker"
+    # ...and a job that isn't stalled gets no wording to show.
+    assert manager._stall_info(wj, JobState.RIPPING, False) == (None, None)
+
+    # And it has to reach the payload, or the card still can't tell them apart.
+    manager.jobs[wj.id] = wj
+    payload = next(j for j in manager.snapshot()["jobs"] if j["id"] == 365)
+    assert payload["stalled"] is True
+    assert payload["stall_kind"] == "rip_saved"
+    assert "won't re-rip" in payload["stall_detail"]
+
+
 async def test_add_mkv_file_skips_rip(manager, monkeypatch, tmp_path):
     from blurayripper.tools.mkvtools import ProbedFile, SubtitleTrack
 
