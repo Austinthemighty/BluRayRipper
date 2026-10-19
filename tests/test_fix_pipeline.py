@@ -860,3 +860,104 @@ async def test_tv_is_never_given_a_version_suffix(tmp_path):
     a = EpisodeAssignment(0, MediaKind.TV, "House", 2004, season=1, episode=1)
     await pipe._apply_version_suffix(a, {}, ripped, _Rep())
     assert a.version is None
+
+
+# --- nothing reaches the library until the item is whole ---------------------
+
+def test_a_movie_folder_is_published_in_one_step(tmp_path):
+    """The complaint that prompted this: a movie folder appeared with a poster
+    and subtitles the moment naming was confirmed, and gained its video hours
+    later when the encode finished. Long enough to copy the folder — or for Plex
+    to scan it — and find no film in it."""
+    from blurayripper.services import library
+
+    staged = tmp_path / "stage" / "library" / "Movies" / "Jumanji (1995)"
+    staged.mkdir(parents=True)
+    for name in ("Jumanji (1995).mkv", "Jumanji (1995).en.default.srt",
+                 "Jumanji (1995).nfo", "poster.jpg"):
+        (staged / name).write_text("x")
+    final = tmp_path / "out" / "Movies" / "Jumanji (1995)" / "Jumanji (1995).mkv"
+
+    assert not final.parent.exists(), "the library must show nothing beforehand"
+    library.publish(staged / "Jumanji (1995).mkv", final)
+
+    assert sorted(p.name for p in final.parent.iterdir()) == [
+        "Jumanji (1995).en.default.srt", "Jumanji (1995).mkv",
+        "Jumanji (1995).nfo", "poster.jpg"]
+    assert not staged.exists(), "staging should be emptied, not copied"
+
+
+def test_an_existing_season_folder_receives_the_video_last(tmp_path):
+    """A season folder already holds earlier episodes, so it cannot be moved
+    wholesale. The video is what makes a scanner treat an episode as present, so
+    it lands after its sidecars — never before them."""
+    from blurayripper.services import library
+
+    staged = tmp_path / "stage" / "library" / "TV" / "House (2004)" / "Season 01"
+    staged.mkdir(parents=True)
+    (staged / "House - S01E02.mkv").write_text("x")
+    (staged / "House - S01E02.en.srt").write_text("x")
+    # A .nfo sorts AFTER .mkv. Without it, alphabetical order puts the video
+    # last by accident and the test passes even when the ordering is removed.
+    (staged / "House - S01E02.nfo").write_text("x")
+
+    final_dir = tmp_path / "out" / "TV" / "House (2004)" / "Season 01"
+    final_dir.mkdir(parents=True)
+    (final_dir / "House - S01E01.mkv").write_text("x")   # last week's episode
+
+    written = library.publish(staged / "House - S01E02.mkv",
+                              final_dir / "House - S01E02.mkv")
+    assert written[-1].name == "House - S01E02.mkv", "the video must land last"
+    assert (final_dir / "House - S01E01.mkv").exists(), "the earlier episode survived"
+    assert (final_dir / "House - S01E02.en.srt").exists()
+    assert (final_dir / "House - S01E02.nfo").exists()
+
+
+def test_show_artwork_above_the_season_folder_is_published_too(tmp_path):
+    """A show's poster sits beside Season NN, not inside it. Publishing only the
+    episode's own folder would leave it in staging to be swept away."""
+    from blurayripper.services import library
+
+    staged_season = tmp_path / "stage" / "library" / "TV" / "House (2004)" / "Season 01"
+    staged_season.mkdir(parents=True)
+    (staged_season / "House - S01E01.mkv").write_text("x")
+    (staged_season.parent / "poster.jpg").write_text("x")
+
+    final = tmp_path / "out" / "TV" / "House (2004)" / "Season 01" / "House - S01E01.mkv"
+    final.parent.mkdir(parents=True)                      # force the merge path
+    library.publish(staged_season / "House - S01E01.mkv", final)
+    assert (final.parent.parent / "poster.jpg").exists()
+
+
+def test_publishing_a_title_whose_staging_is_gone_is_not_an_error(tmp_path):
+    """A retry after the staging dir was swept must not raise on its way to
+    discovering there is nothing to move."""
+    from blurayripper.services import library
+    assert library.publish(tmp_path / "nope" / "x.mkv", tmp_path / "out" / "x.mkv") == []
+
+
+def test_a_resume_finds_sidecars_that_are_still_in_staging(tmp_path):
+    """The sidecars are recorded under their library names but sit in staging
+    until the video is ready. Treating that as "missing" would re-run OCR — the
+    expensive half — on every resume during a long encode, which is exactly the
+    window this design opens."""
+    from blurayripper.config import load_settings
+    from blurayripper.pipeline import Pipeline, configure_path_map
+
+    s = load_settings()
+    s.storage.output_dir = tmp_path / "out"
+    s.storage.staging_dir = tmp_path / "stage"
+    configure_path_map([])
+    pipe = Pipeline(s)
+
+    staging_root = tmp_path / "stage" / "job_1"
+    final = s.storage.movies_root / "Jumanji (1995)" / "Jumanji (1995).en.srt"
+    staged = pipe._staged_of(staging_root, final)
+    staged.parent.mkdir(parents=True)
+    staged.write_text("srt")
+
+    cp = {"subs_done": [str(final.relative_to(s.storage.output_dir))]}
+    assert pipe._subs_already_done(cp, staging_root) == [final]
+    # Without the staging root it still reads as missing, which is what any
+    # caller outside a running job should see.
+    assert pipe._subs_already_done(cp) is None

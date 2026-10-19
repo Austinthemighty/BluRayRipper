@@ -37,6 +37,60 @@ def place(src: Path, dest: Path, *, overwrite: bool = True) -> Path:
     return dest
 
 
+def publish(staged_video: Path, final_video: Path) -> list[Path]:
+    """Move a title's finished set out of staging and into the library.
+
+    Everything a title contributes — the video, its subtitle sidecars, its .nfo,
+    and the folder artwork — is assembled under staging first, so the library
+    never shows a half-built item. Writing them as they were produced meant the
+    movie folder appeared with a poster and subtitles the moment naming was
+    confirmed and gained its video hours later, when the encode finished: long
+    enough to copy the folder, or for Plex to scan it, and find no film in it.
+
+    Two ways in, picked by whether the destination folder already exists:
+
+    * New folder (a movie, or the first episode of a season): the staged folder
+      is RENAMED into place. One filesystem operation, so the item appears whole
+      or not at all.
+    * Existing folder (later episodes): files are moved individually and the
+      VIDEO GOES LAST, because the video is what makes a scanner treat the item
+      as present — its sidecars are already there when it lands.
+
+    Artwork sitting above the video's folder (a show's poster, beside Season NN)
+    is published too; it belongs to the show rather than this title, and later
+    titles simply find it already gone from staging.
+
+    Returns the paths actually written, newest layout first.
+    """
+    staged_video, final_video = Path(staged_video), Path(final_video)
+    written: list[Path] = []
+    src_dir, dst_dir = staged_video.parent, final_video.parent
+    if not src_dir.exists():
+        return written
+
+    if not dst_dir.exists():
+        dst_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src_dir), str(dst_dir))
+        written.extend(sorted(dst_dir.iterdir()))
+    else:
+        for item in sorted(src_dir.iterdir()):
+            if item.name == staged_video.name or item.is_dir():
+                continue                      # the video lands last
+            written.append(place(item, dst_dir / item.name))
+        if staged_video.exists():
+            written.append(place(staged_video, final_video))
+
+    # Show-level artwork, which sits above the season folder.
+    parent = src_dir.parent
+    final_parent = dst_dir.parent
+    if parent.exists() and parent.name and final_parent != dst_dir:
+        for item in sorted(parent.iterdir()):
+            if item.is_dir():
+                continue
+            written.append(place(item, final_parent / item.name))
+    return written
+
+
 def cleanup(job_staging_dir: Path) -> None:
     """Remove a job's staging directory and all intermediates within it."""
     if job_staging_dir.exists():

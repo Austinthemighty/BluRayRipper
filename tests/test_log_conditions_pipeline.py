@@ -712,8 +712,12 @@ async def test_one_track_failing_ocr_keeps_the_other_and_leaves_a_cheap_retry(
 
     result = await pipe._prepare_title(job, 0, a, _staging_root(pipe), rip, r)
 
-    # The track that OCR'd is still delivered.
-    assert len(result.subtitle_paths) == 1 and result.subtitle_paths[0].exists()
+    # The track that OCR'd is still delivered. Its path is recorded under the
+    # library name it will have, while the file itself waits in staging until
+    # the video is ready — so look for it there, the video not being encoded yet.
+    assert len(result.subtitle_paths) == 1
+    staged = pipe._staged_of(_staging_root(pipe), result.subtitle_paths[0])
+    assert staged.exists(), f"sidecar not assembled: {staged}"
     # The title is NOT recorded done, so the retry re-runs OCR.
     cp = job.checkpoints[0]
     assert "subs_done" not in cp and pipe._subs_already_done(cp) is None

@@ -265,6 +265,15 @@ def _movie_dir(pipeline: Pipeline) -> Path:
     return pipeline.settings.storage.movies_root / "WarGames (1983)"
 
 
+def _staged_movie_dir(pipeline: Pipeline) -> Path:
+    """Where a title is ASSEMBLED before it is published to the library.
+
+    Sidecars and artwork wait here until the video is ready, so the library
+    never shows a movie folder with no film in it."""
+    rel = _movie_dir(pipeline).relative_to(pipeline.settings.storage.output_dir)
+    return pipeline.settings.storage.staging_dir / JOB_NAME / "library" / rel
+
+
 def _watch_eject(monkeypatch) -> list:
     calls = []
 
@@ -524,7 +533,11 @@ async def test_enospc_partway_through_an_encode_keeps_the_rip_and_places_nothing
     assert job.state is JobState.FAILED
     # The half-written encode stays in staging and never reaches the library.
     assert (staging / JOB_NAME / "encode" / VIDEO_NAME).exists()
-    assert _library_files(pipeline) == [SRT_NAME]
+    # NOTHING reaches the library — which is what this test's name claims. The
+    # sidecar used to land there on its own, leaving a movie folder holding
+    # subtitles and no film for as long as the encode took.
+    assert _library_files(pipeline) == []
+    assert (_staged_movie_dir(pipeline) / SRT_NAME).exists()
     assert "Placed video:" not in report.log
     assert not job.checkpoints[0].get("placed")
     # The disc was released back when the rip finished, so nobody is standing
@@ -630,7 +643,10 @@ async def test_the_output_share_going_read_only_never_marks_the_title_placed(
     assert not job.checkpoints[0].get("placed")
     assert "Placed video:" not in report.log
     # The sidecar landed before the share flipped; the video did not land at all.
-    assert _library_files(pipeline) == [SRT_NAME]
+    # The subtitles are still in staging, so the library shows nothing at all
+    # rather than a movie folder that will never gain its film.
+    assert _library_files(pipeline) == []
+    assert (_staged_movie_dir(pipeline) / SRT_NAME).exists()
     # The rip is untouched, so fixing the share costs no disc time.
     ripped = staging / job.checkpoints[0]["ripped_path"]
     assert ripped.exists()
@@ -704,10 +720,15 @@ async def test_a_sidecar_that_vanished_from_the_share_is_re_ocred_from_the_kept_
     assert isinstance(await _run(pipeline, job, Report(job)), OSError)
 
     srt = _movie_dir(pipeline) / SRT_NAME
-    assert srt.exists()
+    staged_srt = _staged_movie_dir(pipeline) / SRT_NAME
+    # The encode failed, so NOTHING was published: the sidecar is still waiting
+    # in staging and the library has no half-built movie folder in it.
+    assert staged_srt.exists() and not srt.exists()
+    assert not _movie_dir(pipeline).exists()
+    # The checkpoint still speaks in library paths — only the bytes are waiting.
     assert job.checkpoints[0]["subs_done"] == [f"Movies/WarGames (1983)/{SRT_NAME}"]
 
-    srt.unlink()   # the share dropped it between runs
+    staged_srt.unlink()   # the share dropped it between runs
     _click_retry(job)
     tools.encode_fault = None
     report = Report(job)

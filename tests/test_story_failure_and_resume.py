@@ -163,6 +163,16 @@ def _click_retry(job: Job) -> None:
 
 def _library_files(pipeline: Pipeline) -> list[str]:
     root = pipeline.settings.storage.movies_root
+    if not root.exists():
+        return []
+    return sorted(p.name for p in root.rglob("*") if p.is_file())
+
+
+def _staged_files(pipeline: Pipeline) -> list[str]:
+    """What a title has ASSEMBLED but not yet published to the library."""
+    root = pipeline.settings.storage.staging_dir / JOB_NAME / "library"
+    if not root.exists():
+        return []
     return sorted(p.name for p in root.rglob("*") if p.is_file())
 
 
@@ -238,10 +248,12 @@ async def test_a_night_of_failures_resumes_instead_of_starting_over(tmp_path):
                and "subs" not in snap.get(0, {})
                and "subs_done" not in snap.get(0, {})
                for snap in report.snapshots)
-    # The subtitles got all the way to a placed sidecar and were checkpointed,
+    # The subtitles got all the way to a finished sidecar and were checkpointed,
     # again relative — but the title is NOT marked placed, because the video
-    # never made it into the library.
-    assert _library_files(pipeline) == ["WarGames (1983).en.default.srt"]
+    # never made it into the library. The sidecar is therefore still in staging:
+    # the library shows nothing rather than a movie folder with no film in it.
+    assert _library_files(pipeline) == []
+    assert _staged_files(pipeline) == ["WarGames (1983).en.default.srt"]
     assert len(cp["subs_done"]) == 1
     assert not Path(cp["subs_done"][0]).is_absolute()
     assert not cp.get("placed")

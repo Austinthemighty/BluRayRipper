@@ -285,8 +285,10 @@ class Pipeline:
         # and always pushed a spurious "safe to swap the next one" notification.
         job._ripped_this_run = False
         await self._resolve_source_drive(job, report)  # follow the disc across drives
-        await self._place_cover_art(job, report)  # before any rip/eject
-        await self._place_tmdb_art(job, report)   # real poster/backdrop overrides disc art
+        # Into STAGING, not the library: artwork written straight to the movie
+        # folder created it hours before the video arrived.
+        await self._place_cover_art(job, report, staging_root)  # before any rip/eject
+        await self._place_tmdb_art(job, report, staging_root)   # real art overrides disc art
         for title_id in job.selected_title_ids:
             assignment = job.assignments.get(title_id)
             if assignment is None:
@@ -311,8 +313,8 @@ class Pipeline:
         # 0) Follow the disc across drives, then grab the disc's cover art while
         #    it's still in the drive, then override it with the real TMDB art.
         await self._resolve_source_drive(job, report)
-        await self._place_cover_art(job, report)
-        await self._place_tmdb_art(job, report)
+        await self._place_cover_art(job, report, staging_root)
+        await self._place_tmdb_art(job, report, staging_root)
         # 1) Rip per title (sequential — one drive).
         todo: list[tuple[int, EpisodeAssignment, Path, Path]] = []
         for title_id, assignment in _assigned_titles(job):
@@ -325,7 +327,7 @@ class Pipeline:
 
         # 2) Subtitles (extract + OCR + place sidecars) — unless a worker will.
         if include_subs:
-            await self._subtitles_for_titles(job, todo, report)
+            await self._subtitles_for_titles(job, todo, report, staging_root)
 
         # 3) Resolve grain — ONCE per disc, not per title. Preview mode renders a
         #    sample and parks the UI for a pick; a disc's titles share the same
@@ -343,13 +345,15 @@ class Pipeline:
             _checkpoint(report)
 
     async def _subtitles_for_titles(
-        self, job: Job, todo: list[tuple[int, EpisodeAssignment, Path, Path]], report
+        self, job: Job, todo: list[tuple[int, EpisodeAssignment, Path, Path]], report,
+        staging_root: Path | None = None,
     ) -> None:
         """Extract + OCR (concurrent) + place sidecars for a set of ripped titles.
         Shared by prep_phase (rip box) and the worker's encode_phase."""
         pending = []
         for entry in todo:
-            done = self._subs_already_done(job.checkpoints.setdefault(entry[0], {}))
+            done = self._subs_already_done(
+                job.checkpoints.setdefault(entry[0], {}), staging_root)
             if done is None:
                 pending.append(entry)
             else:
@@ -368,7 +372,11 @@ class Pipeline:
             video_dest = self._video_path_for(assignment)
             await self._place_title_subs(
                 result, video_dest, ocr.get(title_id, []), report,
-                source_video=ripped, assignment=assignment)
+                source_video=ripped, assignment=assignment,
+                stage_to=(self._staged_of(staging_root, video_dest)
+                          if staging_root is not None
+                          and not job.checkpoints.get(title_id, {}).get("placed")
+                          else None))
             self._cache_subs(video_dest, extracted[title_id])
             self._record_if_complete(job.checkpoints.setdefault(title_id, {}),
                                      extracted[title_id], ocr.get(title_id, []),
@@ -436,6 +444,7 @@ class Pipeline:
         self, result: TitleResult, video_dest: Path,
         ocr_pairs: list[tuple[Path, SubtitleTrack]], report,
         *, source_video: Path | None = None, assignment: EpisodeAssignment | None = None,
+        stage_to: Path | None = None,
     ) -> None:
         """Place OCR'd SRT sidecars next to the video, disambiguating same-language
         tracks by forced/SDH flags and an index so they never collide. When
@@ -485,13 +494,23 @@ class Pipeline:
                 video_dest, language,
                 default=is_default, forced=track.forced, sdh=is_sdh, index=index,
             )
-            library.place(srt, srt_dest)
+            # Written beside the STAGED video while the title is still being
+            # assembled, but recorded under its final name either way: every
+            # checkpoint, resume check and caller speaks in library paths, and
+            # only the bytes wait for the video to be ready.
+            written = (naming.subtitle_sidecar_path(
+                stage_to, language,
+                default=is_default, forced=track.forced, sdh=is_sdh, index=index,
+            ) if stage_to is not None else srt_dest)
+            library.place(srt, written)
             result.subtitle_paths.append(srt_dest)
-            report.on_event(f"Placed subtitle: {srt_dest.name}")
+            report.on_event(
+                f"Subtitle ready: {srt_dest.name}" if stage_to is not None
+                else f"Placed subtitle: {srt_dest.name}")
             if export_dir and assignment is not None:
                 try:
                     os_upload.export_subtitle(
-                        export_dir, srt_dest, assignment=assignment,
+                        export_dir, written, assignment=assignment,
                         language_code=track.language, is_sdh=is_sdh, forced=track.forced,
                         height=height, fps=fps, version=get_version())
                     report.on_event(f"Exported for OpenSubtitles upload: {srt_dest.name}")
@@ -541,7 +560,7 @@ class Pipeline:
             todo.append((title_id, assignment, ripped, staging_root / "sub" / f"t{title_id:03d}"))
         if todo:
             report.on_event("Extracting + OCR'ing subtitles (worker) …")
-            await self._subtitles_for_titles(job, todo, report)
+            await self._subtitles_for_titles(job, todo, report, staging_root)
 
     def _sub_cache_dir(self, video_dest: Path) -> Path:
         return (self.settings.storage.output_dir / ".blurayripper" / "subcache"
@@ -979,7 +998,7 @@ class Pipeline:
 
         # Extract subtitle images, OCR them, and place the SRT sidecars. (The
         # parallel path lives in prep_phase; here OCR runs inline for one title.)
-        done = self._subs_already_done(cp)
+        done = self._subs_already_done(cp, staging_root)
         if done is not None:
             # Carry them onto the result: the output check at the end compares
             # against these, so a resume that skipped OCR must not look like a
@@ -993,7 +1012,14 @@ class Pipeline:
             pairs = ocr.get(title_id, [])
             await self._place_title_subs(
                 result, video_dest, pairs, report,
-                source_video=ripped_mkv, assignment=assignment)
+                source_video=ripped_mkv, assignment=assignment,
+                # Assemble in staging ONLY while the video is still to come.
+                # Once it is placed there is no half-built item to protect, and
+                # staging a re-OCR'd sidecar would strand it: the encode step
+                # returns early for an already-placed title, so nothing would
+                # ever publish it.
+                stage_to=(None if cp.get("placed")
+                          else self._staged_of(staging_root, video_dest)))
             self._cache_subs(video_dest, sub_jobs)
             self._record_if_complete(cp, sub_jobs, pairs, result, report)
             _checkpoint(report)
@@ -1138,7 +1164,8 @@ class Pipeline:
                 f"Reusing the finished encode from the previous run "
                 f"({finished.name}) — only placing it failed last time.")
             return await self._place_encoded(
-                job, cp, finished, video_dest, assignment, result, report)
+                job, cp, finished, video_dest, assignment, result, report,
+                staging_root)
         height = await self._probe_height(ripped_mkv, report)
         weight = encode_weight(height)
         deinterlace = self._should_deinterlace(height)
@@ -1220,11 +1247,12 @@ class Pipeline:
         cp["encoded_grain"] = bool(tune_grain)
         _checkpoint(report)
         return await self._place_encoded(
-            job, cp, encoded, video_dest, assignment, result, report)
+            job, cp, encoded, video_dest, assignment, result, report, staging_root)
 
     async def _place_encoded(
         self, job: Job, cp: dict, encoded: Path, video_dest: Path,
         assignment: EpisodeAssignment, result: TitleResult, report,
+        staging_root: Path | None = None,
     ) -> TitleResult:
         """Move a finished encode into the library and checkpoint it as placed.
 
@@ -1234,18 +1262,33 @@ class Pipeline:
         when the encode succeeded and the share is the problem. Opposite fixes.
         """
         job.state = JobState.PLACING
-        result.video_path = library.place(encoded, video_dest)
+        if staging_root is not None:
+            # Finish ASSEMBLING, then publish the whole item at once. The
+            # sidecars and artwork have been waiting in staging precisely so the
+            # library never shows a folder with a poster and subtitles and no
+            # film in it — which is long enough to copy, or for Plex to scan.
+            staged = self._staged_of(staging_root, video_dest)
+            library.place(encoded, staged)
+            if self.settings.write_nfo:
+                try:
+                    nfo.write_nfo(staged, assignment)
+                except OSError as exc:
+                    report.on_event(f"NFO sidecar skipped ({type(exc).__name__}: {exc}).")
+            library.publish(staged, video_dest)
+            result.video_path = video_dest
+        else:
+            result.video_path = library.place(encoded, video_dest)
+            if self.settings.write_nfo:
+                try:
+                    nfo.write_nfo(result.video_path, assignment)
+                except OSError as exc:
+                    report.on_event(f"NFO sidecar skipped ({type(exc).__name__}: {exc}).")
         cp["placed"] = True
         # The staging file was MOVED into the library, so the reuse record above
         # now points at nothing; leaving it would make a later re-encode (the
         # library file deleted, say) "reuse" a file that isn't there.
         cp.pop("encoded_path", None)
         cp.pop("encoded_grain", None)
-        if self.settings.write_nfo:
-            try:
-                nfo.write_nfo(result.video_path, assignment)
-            except OSError as exc:
-                report.on_event(f"NFO sidecar skipped ({type(exc).__name__}: {exc}).")
         _checkpoint(report)
         report.on_event(f"Placed video: {result.video_path}")
         return result
@@ -1423,7 +1466,8 @@ class Pipeline:
             "failed OCR — NOT marking subtitles done, so a retry re-runs them "
             "(the extracted images are kept, so no re-rip).")
 
-    def _subs_already_done(self, cp: dict) -> list[Path] | None:
+    def _subs_already_done(self, cp: dict,
+                           staging_root: Path | None = None) -> list[Path] | None:
         """The placed sidecars, if every one is still on disk; else None (redo).
 
         Only the extracted .sup images were checkpointed before, so a resume
@@ -1438,7 +1482,19 @@ class Pipeline:
             return None
         out = self.settings.storage.output_dir
         paths = [_resolve_path(out, rel) for rel in saved]
-        if any(not p.exists() for p in paths):
+
+        def present(p: Path) -> bool:
+            # A sidecar that is ASSEMBLED but not yet published lives in staging
+            # under the same relative name. Counting that as missing re-ran OCR
+            # — the expensive half, minutes to hours — on every resume between
+            # finishing the subtitles and finishing the encode, which is exactly
+            # the window a long encode leaves open.
+            if p.exists():
+                return True
+            return (staging_root is not None
+                    and self._staged_of(staging_root, p).exists())
+
+        if any(not present(p) for p in paths):
             return None   # deleted, or a box that cannot see them — redo properly
         return paths
 
@@ -1527,10 +1583,25 @@ class Pipeline:
 
     # --- naming ---------------------------------------------------------
 
-    def _poster_folder(self, a: EpisodeAssignment) -> Path:
+    def _staged_of(self, staging_root: Path, final: Path) -> Path:
+        """Where a finished library file is ASSEMBLED before it is published.
+
+        Mirrors the library layout under the job's staging dir, so a movie
+        folder is built complete and then moved in one step rather than growing
+        a poster and subtitles hours before it gains a video."""
+        out = self.settings.storage.output_dir
+        try:
+            rel = Path(final).relative_to(out)
+        except ValueError:
+            rel = Path(final.name)        # outside the library: stage by name
+        return staging_root / "library" / rel
+
+    def _poster_folder(self, a: EpisodeAssignment, staging_root: Path | None = None) -> Path:
         """Where Plex wants the poster: the movie folder, or a show's root folder
         (above Season NN) for TV."""
         vp = self._video_path_for(a)
+        if staging_root is not None:
+            vp = self._staged_of(staging_root, vp)
         return vp.parent.parent if a.kind is MediaKind.TV else vp.parent
 
     async def _resolve_source_drive(self, job: Job, report) -> None:
@@ -1599,7 +1670,8 @@ class Pipeline:
             if drive.device:
                 job.disc.drive_device = drive.device
 
-    async def _place_cover_art(self, job: Job, report) -> None:
+    async def _place_cover_art(self, job: Job, report,
+                               staging_root: Path | None = None) -> None:
         """Copy the disc's own cover art to each output folder as poster.jpg.
         Best-effort and idempotent; must run BEFORE ripping (auto-eject removes
         the disc after the last rip)."""
@@ -1611,7 +1683,7 @@ class Pipeline:
         if root is None and iso is None:
             return  # unsupported source (e.g. a Linux optical device path)
         folders = {
-            self._poster_folder(a)
+            self._poster_folder(a, staging_root)
             for tid in job.selected_title_ids
             if (a := job.assignments.get(tid)) is not None
         }
@@ -1636,13 +1708,15 @@ class Pipeline:
             except Exception as exc:
                 report.on_event(f"Cover art skipped ({type(exc).__name__}: {exc}).")
 
-    async def _place_tmdb_art(self, job: Job, report) -> None:
+    async def _place_tmdb_art(self, job: Job, report,
+                              staging_root: Path | None = None) -> None:
         """Prep-time hook: place TMDB art for the job's selected titles."""
         assignments = [job.assignments[t] for t in job.selected_title_ids
                        if t in job.assignments]
-        await self.place_tmdb_art(assignments, report)
+        await self.place_tmdb_art(assignments, report, staging_root)
 
-    async def place_tmdb_art(self, assignments, report) -> int:
+    async def place_tmdb_art(self, assignments, report,
+                             staging_root: Path | None = None) -> int:
         """Fetch the real poster + backdrop from TMDB and write them as
         poster.jpg / fanart.jpg for each assignment's folder, OVERRIDING whatever
         art is there (disc menu graphics, a stale/wrong poster from a prior tool,
@@ -1657,7 +1731,7 @@ class Pipeline:
         for a in assignments:
             if a is None:
                 continue
-            folder = self._poster_folder(a)
+            folder = self._poster_folder(a, staging_root)
             if folder in seen:
                 continue
             seen.add(folder)

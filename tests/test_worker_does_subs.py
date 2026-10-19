@@ -39,7 +39,7 @@ async def test_prep_defers_subs_worker_runs_them_before_encode(tmp_path, monkeyp
     async def fake_ripped(job, tid, sr, report):
         order.append("rip"); return ripped
 
-    async def fake_subs(job, todo, report):
+    async def fake_subs(job, todo, report, staging_root=None):
         order.append("subs")
 
     async def fake_grain(job, r, tid, sr, report):
@@ -69,7 +69,7 @@ async def test_flag_off_worker_skips_subs(tmp_path, monkeypatch):
     ripped = tmp_path / "m.mkv"; ripped.write_bytes(b"x")
     order = []
 
-    async def fake_subs(job, todo, report):
+    async def fake_subs(job, todo, report, staging_root=None):
         order.append("subs")
 
     async def fake_encode(job, tid, a, sr, r, sch, report):
