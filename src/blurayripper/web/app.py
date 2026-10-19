@@ -811,6 +811,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception as exc:  # network/DNS/HTTP errors reaching TMDB
             raise HTTPException(status_code=502, detail=f"TMDB request failed: {type(exc).__name__}: {exc}")
 
+    @app.get("/api/tmdb/movie/{tmdb_id}/runtime")
+    async def tmdb_movie_runtime(tmdb_id: int):
+        """The film's canonical runtime in minutes, for telling two cuts apart.
+
+        TMDB carries ONE runtime per film — the theatrical release in nearly
+        every case — not one per edition. So this says which of a disc's
+        feature-length titles is the theatrical cut; it cannot say whether the
+        other is unrated, extended or a director's cut.
+        """
+        if not tmdb.configured:
+            raise HTTPException(status_code=400, detail="TMDB API key not configured.")
+        try:
+            return {"tmdb_id": tmdb_id, "runtime": await tmdb.movie_runtime(tmdb_id)}
+        except MetadataError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=502,
+                                detail=f"TMDB request failed: {type(exc).__name__}: {exc}")
+
     @app.get("/api/tmdb/season")
     async def tmdb_season(tv_id: int, season: int):
         """The episode list for one season, from TMDB."""

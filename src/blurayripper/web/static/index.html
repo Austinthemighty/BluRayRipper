@@ -485,23 +485,66 @@ function fmtRuntime(sec){
   const h = Math.floor(mins/60), m = mins % 60;
   return h ? `${h}h${String(m).padStart(2,'0')}m` : `${m}m`;
 }
+// Work out which of a disc's cuts is the theatrical one, from TMDB's runtime.
+//
+// TMDB carries ONE runtime per film — the theatrical release in nearly every
+// case — not one per edition. So it can identify the canonical cut and nothing
+// more: whether the longer title is "Unrated", "Extended" or a director's cut is
+// not in the data, and is left as a suggestion the operator can correct.
+//
+// Only suggests when the closest title is within TOLERANCE of TMDB's figure. If
+// nothing is close, TMDB is probably listing a different edition than this disc
+// carries, and a confident wrong label is worse than none.
+const EDITION_MATCH_TOLERANCE_MIN = 5;
+function suggestEditions(titles, selected, tmdbMinutes){
+  const byId = Object.fromEntries((titles||[]).map(t=>[t.id, t]));
+  const mins = tid => Math.round(((byId[tid]||{}).seconds || 0) / 60);
+  const out = {};
+  if (!tmdbMinutes) {
+    selected.forEach(tid => { out[tid] = {edition:'', note:''}; });
+    return out;
+  }
+  let best = null, bestDelta = Infinity;
+  selected.forEach(tid => {
+    const d = Math.abs(mins(tid) - tmdbMinutes);
+    if (d < bestDelta) { bestDelta = d; best = tid; }
+  });
+  const confident = bestDelta <= EDITION_MATCH_TOLERANCE_MIN;
+  selected.forEach(tid => {
+    const delta = mins(tid) - tmdbMinutes;
+    if (!confident) {
+      out[tid] = {edition:'', note:`${delta>=0?'+':''}${delta}m vs TMDB ${tmdbMinutes}m — no close match, so pick the edition yourself`};
+    } else if (tid === best) {
+      out[tid] = {edition:'Theatrical Cut', note:`matches TMDB's ${tmdbMinutes}m`};
+    } else if (delta > 0) {
+      out[tid] = {edition:'Extended Cut', note:`+${delta}m longer — extended or unrated; check the case`};
+    } else {
+      out[tid] = {edition:'', note:`${delta}m shorter than TMDB's ${tmdbMinutes}m`};
+    }
+  });
+  return out;
+}
+
 // One Edition control per selected title, for a disc carrying more than one cut
 // of the same film. The runtime is shown because it is the only thing that tells
 // you which row is which — a theatrical and an unrated cut differ by minutes,
 // and nothing else on the disc says so.
-function editionPerTitleHtml(j){
+function editionPerTitleHtml(j, suggestions){
   const byId = Object.fromEntries((j.titles||[]).map(t=>[t.id, t]));
+  const sugg = suggestions || {};
   return j.selected.map(tid => {
     const t = byId[tid] || {};
-    return `<div class="row" data-edrow="${tid}" style="gap:8px;align-items:center;">
+    const s = sugg[tid] || {edition:'', note:''};
+    return `<div class="row" data-edrow="${tid}" style="gap:8px;align-items:center;flex-wrap:wrap;">
       <span style="min-width:150px;">Title ${tid} · <b>${fmtRuntime(t.seconds)}</b></span>
-      ${editionSelectHtml()}
+      ${editionSelectHtml(s.edition)}
+      ${s.note ? `<span class="muted" style="font-size:12px;">${esc(s.note)}</span>` : ''}
     </div>`;
   }).join('');
 }
-function editionSelectHtml(){
-  const opts = EDITIONS.map(e=>`<option>${e}</option>`).join('');
-  return `<select data-edsel><option value="">(none)</option>${opts}<option value="__other">Other…</option></select>`
+function editionSelectHtml(preset){
+  const opts = EDITIONS.map(e=>`<option${e===preset?' selected':''}>${e}</option>`).join('');
+  return `<select data-edsel><option value=""${preset?'':' selected'}>(none)</option>${opts}<option value="__other">Other…</option></select>`
        + `<input data-edother placeholder="Custom edition" style="width:150px;display:none;">`;
 }
 function wireEdition(scope){
@@ -1233,10 +1276,21 @@ function buildMapping(card, j){
       };
     } else {
       if (j.selected.length > 1) {
+        // Ask TMDB for the film's runtime only here — the search endpoint does
+        // not carry it, and a single-cut disc has nothing to tell apart.
+        let runtime = null;
+        tv.innerHTML = '<div class="muted">Checking TMDB for the runtime…</div>';
+        try {
+          const r = await api('GET', `/api/tmdb/movie/${state.chosen.id}/runtime`);
+          runtime = r && r.runtime;
+        } catch (e) { /* no key, or TMDB down: fall back to bare runtimes */ }
+        const sugg = suggestEditions(j.titles, j.selected, runtime);
         tv.innerHTML = `<div class="muted">This disc has <b>${j.selected.length}</b> cuts of this film `
           + `selected. Give each one a different Edition — Plex then shows them as `
-          + `two versions of one film instead of one overwriting the other.</div>`
-          + editionPerTitleHtml(j);
+          + `two versions of one film instead of one overwriting the other.`
+          + (runtime ? ` TMDB lists <b>${runtime}m</b>, which is normally the theatrical cut.`
+                     : ` <b>No runtime from TMDB</b>, so the editions below are not suggested.`)
+          + `</div>` + editionPerTitleHtml(j, sugg);
         tv.querySelectorAll('[data-edrow]').forEach(wireEdition);
       } else {
         tv.innerHTML = `<div class="muted">Will name ${j.selected.length} selected title(s) as this movie.</div>

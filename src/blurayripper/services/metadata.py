@@ -157,6 +157,21 @@ class TMDBClient:
             for r in data.get("results", [])
         ]
 
+    async def movie_runtime(self, tmdb_id: int) -> int | None:
+        """The film's runtime in minutes, or None if TMDB doesn't say.
+
+        Needs /movie/{id}: the search endpoint omits runtime entirely. Used to
+        work out WHICH of a disc's feature-length titles is the canonical cut —
+        TMDB carries one runtime per film, not one per edition, so it can
+        identify the theatrical release but cannot name the other cut.
+        """
+        try:
+            data = await self._get(f"/movie/{int(tmdb_id)}", {})
+        except Exception:
+            return None                 # a missing hint must not block naming
+        runtime = data.get("runtime")
+        return int(runtime) if isinstance(runtime, int) and runtime > 0 else None
+
     async def search_tv(self, query: str) -> list[ShowCandidate]:
         data = await self._get("/search/tv", {"query": query})
         return [

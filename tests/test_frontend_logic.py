@@ -294,3 +294,65 @@ def test_a_title_the_disc_did_not_report_still_renders_a_row():
     j = json.dumps({"id": 1, "selected": [0, 9], "titles": [{"id": 0, "seconds": 6000}]})
     html = js(f"editionPerTitleHtml({j})")
     assert html.count("data-edrow") == 2
+
+
+# --- telling a theatrical cut from an unrated one ----------------------------
+
+def _titles(*pairs):
+    return json.dumps([{"id": i, "seconds": s} for i, s in pairs])
+
+
+def test_tmdbs_runtime_identifies_the_theatrical_cut():
+    """Job #363: the disc offered 125m and 129m, and TMDB lists 125m for Fifty
+    Shades of Grey. The matching title is the theatrical cut; the longer one is
+    whatever the disc calls its alternate."""
+    out = js(f"suggestEditions({_titles((0,7512),(1,7711))}, [0,1], 125)")
+    assert out["0"]["edition"] == "Theatrical Cut"
+    assert out["1"]["edition"] == "Extended Cut"
+    assert "matches" in out["0"]["note"] and "+4m" in out["1"]["note"]
+
+
+def test_it_works_when_the_cuts_are_far_apart():
+    """Job #361: 118m and 131m against TMDB's 118m."""
+    out = js(f"suggestEditions({_titles((0,7068),(3,7888))}, [0,3], 118)")
+    assert out["0"]["edition"] == "Theatrical Cut"
+    assert out["3"]["edition"] == "Extended Cut"
+    assert "+13m" in out["3"]["note"]
+
+
+def test_the_theatrical_cut_is_found_whatever_order_the_titles_are_in():
+    """Nothing may assume the shorter cut comes first — on #361 it did, on other
+    discs it won't."""
+    out = js(f"suggestEditions({_titles((0,7888),(1,7068))}, [0,1], 118)")
+    assert out["1"]["edition"] == "Theatrical Cut"
+    assert out["0"]["edition"] == "Extended Cut"
+
+
+def test_nothing_is_suggested_when_no_cut_is_close_to_tmdb():
+    """If TMDB lists an edition this disc doesn't carry, every label would be a
+    guess. A confident wrong label is worse than none — the operator still gets
+    the deltas and decides."""
+    out = js(f"suggestEditions({_titles((0,7068),(1,7888))}, [0,1], 95)")
+    assert out["0"]["edition"] == "" and out["1"]["edition"] == ""
+    assert "no close match" in out["0"]["note"]
+
+
+def test_no_runtime_from_tmdb_means_no_suggestion_and_no_crash():
+    """No API key, TMDB down, or a film it has no runtime for. The form must
+    still work — this is a hint, not a dependency."""
+    for arg in ("null", "0", "undefined"):
+        out = js(f"suggestEditions({_titles((0,7068),(1,7888))}, [0,1], {arg})")
+        assert out["0"]["edition"] == "" and out["0"]["note"] == ""
+
+
+def test_a_suggested_edition_is_preselected_in_the_dropdown():
+    """The suggestion is only useful if it arrives chosen; making the operator
+    re-pick what we just worked out would defeat it."""
+    html = js("editionSelectHtml('Theatrical Cut')")
+    assert "<option selected>Theatrical Cut</option>" in html
+    assert 'value="" selected' not in html
+
+
+def test_with_no_suggestion_the_dropdown_starts_on_none():
+    html = js("editionSelectHtml('')")
+    assert 'value="" selected' in html

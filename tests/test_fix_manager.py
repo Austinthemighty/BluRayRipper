@@ -961,3 +961,28 @@ def test_confirming_two_colliding_cuts_is_refused_through_set_mapping(tmp_path):
     # and the job stays at the gate, so the naming can simply be corrected
     assert wj.state is JobState.AWAITING_MAPPING
     assert not wj.assignments
+
+
+async def test_a_movie_runtime_lookup_tolerates_tmdb_being_unhelpful(tmp_path):
+    """The runtime is a hint for labelling cuts, never a dependency. TMDB
+    rate-limiting, a film with no runtime recorded, or a dead network must leave
+    naming working rather than failing the job."""
+    from blurayripper.services.metadata import TMDBClient
+
+    client = TMDBClient.__new__(TMDBClient)
+
+    async def boom(path, params): raise OSError("TMDB unreachable")
+    client._get = boom
+    assert await client.movie_runtime(550) is None
+
+    async def no_runtime(path, params): return {"id": 550}
+    client._get = no_runtime
+    assert await client.movie_runtime(550) is None
+
+    async def zero(path, params): return {"id": 550, "runtime": 0}
+    client._get = zero
+    assert await client.movie_runtime(550) is None
+
+    async def ok(path, params): return {"id": 550, "runtime": 125}
+    client._get = ok
+    assert await client.movie_runtime(550) == 125
