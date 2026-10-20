@@ -213,3 +213,38 @@ class _Rep:
     def checkpoint(self): pass
     def notify(self, *a, **k): pass
     def ejected(self, *a, **k): pass
+
+
+def test_a_lost_libredrive_mode_is_named_rather_than_called_a_read_error(
+        tmp_path, monkeypatch):
+    """Job 367's log: LibreDrive mode on open, 20 GB ripped, then SCSI timeouts,
+    and then SCSI REPORT KEY failures — "COPY PROTECTION KEY EXCHANGE FAILURE".
+
+    Key exchange being attempted at all means the session is no longer in
+    LibreDrive mode (a drive reset drops its patched state), and on a UHD disc
+    key exchange can never succeed — so that makemkvcon run is finished whatever
+    else happens. "Disc read error, clean the disc" is true of the timeouts and
+    useless here: the disc is fine, the session is dead, and only a fresh one
+    recovers it. The specific sign has to beat the generic one, even though the
+    same log matches both."""
+    m = _mgr(tmp_path, monkeypatch)
+    timeout = ("Error 'Scsi error - HARDWARE ERROR:TIMEOUT ON LOGICAL UNIT' "
+               "occurred while issuing SCSI command 28080..001 to device 'SG:dev_21:3'")
+    key_failure = ("Error 'Scsi error - ILLEGAL REQUEST:COPY PROTECTION KEY "
+                   "EXCHANGE FAILURE - AUTHENTICATION FAILURE' occurred while "
+                   "issuing SCSI command A30..002007401 to device 'SG:dev_21:3'")
+
+    wj = _job([timeout, key_failure], error=None)
+    wj._log_mark = 0
+    hint, terminal = m._rip_failure_hint(wj)
+    assert "LibreDrive" in hint
+    assert "Retry starts a fresh session" in hint
+    assert "clean the disc" not in hint.lower()
+    assert terminal is True       # a fresh session is needed, not another attempt
+
+    # Timeouts alone are still the ordinary read-error case.
+    wj = _job([timeout], error=None)
+    wj._log_mark = 0
+    read_hint, _ = m._rip_failure_hint(wj)
+    assert "LibreDrive" not in read_hint and "read error" in read_hint.lower()
+

@@ -2549,6 +2549,13 @@ class JobManager:
     _DRIVE_OFFLINE_SIGNS = (
         "no usable optical drives", "device does not exist", "no such device")
     _READ_ERROR_SIGNS = ("scsi error", "read error", "hash check failed", "fetchframes")
+    # AACS key exchange (SCSI REPORT KEY) being ATTEMPTED at all means the
+    # session is not in LibreDrive mode — and on a UHD disc, key exchange can
+    # never succeed. Checked before the generic read-error signs because a log
+    # full of SCSI timeouts matches those too, while this says which failure
+    # actually ended the rip and what will and won't fix it.
+    _KEY_EXCHANGE_SIGNS = ("copy protection key exchange failure",
+                           "authentication failure")
     # Ambiguous on its own: could be a dead drive, a disc the drive cannot read,
     # or a missing volume key. Worth saying, but NOT worth suppressing a retry.
     _OPEN_FAILED_SIGNS = ("failed to open disc",)
@@ -2573,6 +2580,15 @@ class JobManager:
                     "off the bus. The disc being inserted isn't enough: check the drive's "
                     "power/connection or reset it (or use another drive), then click Retry.",
                     True)
+        if any(s in blob for s in self._KEY_EXCHANGE_SIGNS):
+            return ("The drive fell back to AACS key exchange, which means it lost "
+                    "LibreDrive mode part-way through — the usual cause is the drive "
+                    "being reset after it stopped answering, and a reset drops the "
+                    "patched state LibreDrive needs. On a UHD disc key exchange can "
+                    "never succeed, so this run cannot recover: Retry starts a fresh "
+                    "session, which gets LibreDrive back. If it keeps stopping at "
+                    "roughly the same point, the drive is dropping under sustained "
+                    "reads — check its cable and power, or use another drive.", True)
         if any(s in blob for s in self._READ_ERROR_SIGNS):
             return ("Disc read error — the drive couldn't read the disc (a bad sector, a "
                     "dirty/scratched disc, or the drive dropping mid-read). Clean the disc "
