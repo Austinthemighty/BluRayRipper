@@ -372,3 +372,28 @@ def test_a_suggested_edition_is_preselected_in_the_dropdown():
 def test_with_no_suggestion_the_dropdown_starts_on_none():
     html = js("editionSelectHtml('')")
     assert 'value="" selected' in html
+
+
+# --- which drive can read a UHD disc ----------------------------------------
+
+def test_a_drive_that_cannot_read_uhd_says_so_before_a_disc_is_queued():
+    """Two physically identical ASUS drives on this box behaved completely
+    differently — one had patched LibreDrive firmware and read UHD, the other
+    could not read it at all and its SCSI retries blocked drive detection for
+    both. Nothing visible distinguished them; the firmware version pointed the
+    wrong way, the HIGHER number being the capable one."""
+    cap = json.dumps({"libredrive": True, "disc_bytes": 65e9})
+    nocap = json.dumps({"libredrive": False, "disc_bytes": 48e9})
+    mismatch = json.dumps({"libredrive": False, "disc_bytes": 65e9})
+    unknown = json.dumps({"libredrive": None, "disc_bytes": 65e9})
+
+    assert "UHD" in js(f"driveCapsHtml({cap})")
+    assert "standard discs only" in js(f"driveCapsHtml({nocap})")
+    # A standard-size disc in the limited drive is fine, so no warning.
+    assert "cannot read it" not in js(f"driveCapsHtml({nocap})")
+
+    warned = js(f"driveCapsHtml({mismatch})")
+    assert "cannot read it" in warned and "65 GB" in warned
+
+    # Never opened a disc in this drive -> nothing is known, so claim nothing.
+    assert js(f"driveCapsHtml({unknown})") == ""

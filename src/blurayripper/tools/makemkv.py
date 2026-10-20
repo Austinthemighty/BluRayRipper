@@ -117,6 +117,36 @@ def _linux_disc_label(device: str) -> str | None:
     return None
 
 
+# A BD-50 holds at most ~50.05 GB, a UHD disc is BD-66 or BD-100. Anything past
+# this is physically not a standard Blu-ray. Deliberately a floor, not a
+# classifier: UHD titles pressed on BD-50 media exist and will not be caught,
+# which costs a missed warning — never a wrong refusal of a disc that would
+# have ripped fine.
+UHD_CAPACITY_FLOOR_BYTES = 51_000_000_000
+
+
+def os_disc_capacity_bytes(device: str | None) -> int | None:
+    """The loaded disc's capacity in bytes, per the OS, or None if unknown.
+
+    Read from the kernel, which answers READ CAPACITY even on a drive that
+    cannot decrypt or read the content — that is the whole point of asking it
+    here rather than asking MakeMKV. Returns None off Linux (unknown, so
+    callers must treat it as "no opinion", never as "small").
+    """
+    if not device or not sys.platform.startswith("linux"):
+        return None
+    name = Path(device).name
+    if not name.startswith("sr"):
+        return None
+    try:
+        # /sys/block/<dev>/size is in 512-byte sectors regardless of the media's
+        # own 2048-byte sector size.
+        sectors = int(Path(f"/sys/block/{name}/size").read_text().strip())
+    except (OSError, ValueError):
+        return None
+    return (sectors * 512) or None
+
+
 def os_disc_label(device: str | None) -> str | None:
     """The OS's volume label for an optical drive letter (Windows only), or None.
 
@@ -318,6 +348,8 @@ def parse_info(lines: list[str], source: str) -> DiscInfo:
     titles: dict[int, Title] = {}
     streams: dict[tuple[int, int], Stream] = {}
     drv_devices: dict[int, str] = {}
+    drv_names: dict[int, str] = {}
+    libredrive_seen = False
 
     for line in lines:
         prefix, _, payload = line.partition(":")
@@ -340,6 +372,8 @@ def parse_info(lines: list[str], source: str) -> DiscInfo:
             disc_name = fields[5]
             if disc_name and not disc.disc_name:
                 disc.disc_name = disc_name
+            if drv_index is not None and fields[4]:
+                drv_names[drv_index] = fields[4]
             if drv_index is not None and len(fields) >= 7 and fields[6]:
                 drv_devices[drv_index] = fields[6]
 
@@ -351,6 +385,10 @@ def parse_info(lines: list[str], source: str) -> DiscInfo:
             value = fields[3]
             title = titles.setdefault(title_id, Title(title_id=title_id))
             _apply_title_attr(title, attr_id, value)
+
+        elif prefix == "MSG" and len(fields) >= 4:
+            if "using libredrive" in fields[3].casefold():
+                libredrive_seen = True
 
         elif prefix == "SINFO" and len(fields) >= 5:
             title_id = _to_id(fields[0])
@@ -376,8 +414,15 @@ def parse_info(lines: list[str], source: str) -> DiscInfo:
         selector = source.split(":", 1)[1]
         if selector.isdigit():
             disc.drive_device = drv_devices.get(int(selector))
+            disc.drive_name = drv_names.get(int(selector))
         else:
             disc.drive_device = selector  # dev:/dev/sr0 -> "/dev/sr0"
+            disc.drive_name = next(
+                (n for i, n in drv_names.items() if drv_devices.get(i) == selector), None)
+        # Only a real drive can tell us anything about a drive, and only an open
+        # that produced titles proves the announcement would have been made.
+        if disc.titles:
+            disc.libredrive = libredrive_seen
     return disc
 
 

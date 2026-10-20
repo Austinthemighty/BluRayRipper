@@ -183,6 +183,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def drives():
         """Every optical drive and what is currently in it."""
         from ..config import ToolNotFoundError
+        from ..tools.makemkv import os_disc_capacity_bytes
 
         # Prefer the watcher's cache; if it hasn't populated yet, do a one-off
         # live scan so the panel isn't blank (and surface real errors).
@@ -204,6 +205,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "disc_name": d.disc_name, "label": manager.drive_names.get(d.device),
                 "os_detected": getattr(d, "os_detected", False),
                 "makemkv_blind": getattr(d, "makemkv_blind", False),
+                # Two identical-looking drives can differ here (LibreDrive comes
+                # from patched firmware), and it decides whether UHD is readable
+                # at all. None until a disc has been opened in that drive.
+                "libredrive": manager.drive_caps.libredrive(d.name),
+                "disc_bytes": os_disc_capacity_bytes(d.device),
             }
             for d in found
         ]

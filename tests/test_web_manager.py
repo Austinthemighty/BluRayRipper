@@ -2051,3 +2051,100 @@ def test_no_drives_attached_counts_as_the_disc_being_missing(manager):
 
     manager._drives_scanned = True
     assert manager._source_disc_missing(wj) is True     # looked, no drives at all
+
+
+# --- a UHD disc in the drive that cannot read it ----------------------------
+
+_BAD = "BD-RE ASUS BW-16D1HT 3.01 KLUL75I4959"    # no LibreDrive
+_GOOD = "BD-RE ASUS BW-16D1HT 3.10 KX1P71E4206"   # LibreDrive v06.3
+
+
+def _two_drives(manager):
+    from blurayripper.tools.makemkv import Drive
+    manager._drives_cache = [
+        Drive(index=0, name=_GOOD, device="/dev/sr1", disc_name=None),
+        Drive(index=1, name=_BAD, device="/dev/sr0", disc_name="BOURNESUPREMACYUHD_UPK1"),
+    ]
+    manager.drive_caps.note_libredrive(_GOOD, True)
+    manager.drive_caps.note_libredrive(_BAD, False)
+
+
+async def test_a_uhd_disc_is_refused_before_it_can_wedge_the_other_drive(
+        manager, monkeypatch):
+    """A UHD disc in a drive with no LibreDrive cannot be read at all: it fails
+    in the first megabyte with a SCSI timeout and keeps retrying, and those
+    retries stop makemkvcon emitting DRV lines for ANY drive. So the cost isn't
+    one failed job — the other drive reads as dead, and a job that had already
+    finished ripping hung on its post-rip drive lookup.
+
+    Which means the check has to land BEFORE the scan, not on its failure."""
+    _two_drives(manager)
+    monkeypatch.setattr("blurayripper.web.manager.os_disc_capacity_bytes",
+                        lambda dev: 65_000_000_000 if dev == "/dev/sr0" else None)
+    manager.drive_names.set("/dev/sr1", "Black Drive")
+
+    async def must_not_scan(source, report):
+        raise AssertionError("scanned the disc it was told not to touch")
+    monkeypatch.setattr(manager.pipeline, "scan_disc", must_not_scan)
+
+    wj = manager.add_disc("disc:1")
+    await _settle()
+
+    assert wj.state is JobState.FAILED
+    assert "UHD" in wj.error and "65 GB" in wj.error
+    assert "no LibreDrive" in wj.error
+    assert "Move it to Black Drive" in wj.error, wj.error   # says where, by its name
+    assert any("LibreDrive" in line for line in wj.log)
+
+
+async def test_only_a_known_incapable_drive_and_a_known_big_disc_is_refused(
+        manager, monkeypatch):
+    """Three ways to be unsure, and every one of them has to proceed as before.
+    Refusing on a guess would strand discs that rip perfectly well — and this
+    runs on every scan, including Retry."""
+    _two_drives(manager)
+    big = lambda dev: 65_000_000_000          # noqa: E731
+    monkeypatch.setattr("blurayripper.web.manager.os_disc_capacity_bytes", big)
+
+    # 1. the capable drive, same disc size
+    assert manager._unreadable_in_this_drive(WebJob(id=1, source="disc:0")) is None
+    # 2. the bad drive, but a standard-size disc
+    monkeypatch.setattr("blurayripper.web.manager.os_disc_capacity_bytes",
+                        lambda dev: 48_000_000_000)
+    assert manager._unreadable_in_this_drive(WebJob(id=2, source="disc:1")) is None
+    # 3. the bad drive, big disc, but the OS can't tell us the size (Windows)
+    monkeypatch.setattr("blurayripper.web.manager.os_disc_capacity_bytes",
+                        lambda dev: None)
+    assert manager._unreadable_in_this_drive(WebJob(id=3, source="disc:1")) is None
+
+    # ...and a drive we have simply never opened a disc in is not yet guilty.
+    monkeypatch.setattr("blurayripper.web.manager.os_disc_capacity_bytes", big)
+    manager._drives_cache[1].name = "BD-RE SOME BRAND NEW DRIVE 1.00 ABC123"
+    assert manager._unreadable_in_this_drive(WebJob(id=4, source="disc:1")) is None
+
+    # A file job has no drive at all.
+    assert manager._unreadable_in_this_drive(
+        WebJob(id=5, source="/mnt/rip/Movie.mkv")) is None
+
+
+async def test_a_scan_teaches_the_check_what_the_drive_can_do(manager, monkeypatch):
+    """The capability can only be learned by opening a disc, so the scan that
+    does it has to write it down — otherwise the refusal above can never fire."""
+    from blurayripper.models import DiscInfo, Title
+    from blurayripper.pipeline import Job
+
+    async def scan_on_the_good_drive(source, report):
+        job = Job(source=source)
+        job.disc = DiscInfo(source=source, disc_name="LANDMAN_SEASON2",
+                            drive_name=_GOOD, libredrive=True,
+                            titles=[Title(title_id=0, duration_seconds=3000)])
+        job.fingerprint = "fp_landman"
+        return job
+    monkeypatch.setattr(manager.pipeline, "scan_disc", scan_on_the_good_drive)
+
+    assert manager.drive_caps.libredrive(_GOOD) is None   # nothing known yet
+    manager.add_disc("disc:0")
+    await _settle()
+
+    assert manager.drive_caps.libredrive(_GOOD) is True
+    assert manager.drive_caps.uhd_capable_drives() == [_GOOD]

@@ -48,12 +48,18 @@ from ..scheduler import EncodeScheduler
 from .. import boxset_plan, maintenance, mkv_folder, presence
 from ..services import library, naming
 from ..services import aacs_dump
+from ..services.drive_caps import DriveCaps
 from ..services.drive_names import DriveNames
 from ..services.notify import notify
 from ..services.opensubtitles import OpenSubtitlesClient, gather_references
 from ..services.sub_match import identify
 from ..tools import discinfo
-from ..tools.makemkv import Drive, os_media_snapshot
+from ..tools.makemkv import (
+    UHD_CAPACITY_FLOOR_BYTES,
+    Drive,
+    os_disc_capacity_bytes,
+    os_media_snapshot,
+)
 from ..version import get_version
 
 
@@ -227,6 +233,10 @@ class JobManager:
         self.store = store or make_store(settings.database_url)
         self.drive_names = DriveNames(
             settings.storage.output_dir / ".blurayripper" / "drive_names.json")
+        # Keyed on model+serial, so unlike drive_names (keyed on device) this one
+        # is safe to share between boxes and survives /dev/srN being reassigned.
+        self.drive_caps = DriveCaps(
+            settings.storage.output_dir / ".blurayripper" / "drive_caps.json")
         self.closing = False
         # Monotonic so the reported uptime is immune to wall-clock adjustments.
         self._start_monotonic = time.monotonic()
@@ -931,6 +941,55 @@ class JobManager:
             and (wj.disc.disc_name or "").strip() == disc_name
             and self._rip_pending(wj)
         ]
+
+    def _unreadable_in_this_drive(self, wj: WebJob) -> str | None:
+        """Why this disc cannot be read in the drive it is sitting in, or None.
+
+        One case so far, and it is the expensive one: a UHD disc in a drive with
+        no LibreDrive. MakeMKV cannot read those at all — it fails a few hundred
+        KB in with "HARDWARE ERROR:TIMEOUT ON LOGICAL UNIT" and keeps retrying,
+        and those retries block drive enumeration for EVERY drive on the box.
+        Two physically identical drives can differ here, because LibreDrive comes
+        from patched firmware, so this is not something an operator can see.
+
+        Deliberately conservative: it needs the disc's capacity from the OS (we
+        have no opinion off Linux) AND a recorded observation that this specific
+        drive lacks LibreDrive. Anything unknown proceeds as before.
+        """
+        src = (wj.source or "").strip()
+        if not src.startswith(("disc:", "dev:")):
+            return None
+        drive = self._drive_for_source(src)
+        if drive is None or self.drive_caps.libredrive(drive.name) is not False:
+            return None
+        size = os_disc_capacity_bytes(drive.device)
+        if size is None or size < UHD_CAPACITY_FLOOR_BYTES:
+            return None
+        here = self.drive_names.get(drive.device) or drive.name
+        return (
+            f"This looks like a UHD disc ({size / 1_000_000_000:.0f} GB) and "
+            f"{here} has no LibreDrive, so MakeMKV cannot read it — it fails in "
+            f"the first megabyte and its retries block drive detection for every "
+            f"other drive on this machine. {self._uhd_drive_hint()}")
+
+    def _uhd_drive_hint(self) -> str:
+        """Where the disc should go instead, named the way the panel names it."""
+        for name in self.drive_caps.uhd_capable_drives():
+            drive = next((d for d in self._drives_cache if d.name == name), None)
+            if drive is None:
+                continue
+            label = self.drive_names.get(drive.device)
+            return (f"Move it to {label or name}"
+                    + (f" ({name})" if label else "") + ", then Retry.")
+        return "Move it to a drive with LibreDrive, then Retry."
+
+    def _drive_for_source(self, src: str) -> Drive | None:
+        """The cached Drive a 'disc:N' / 'dev:/dev/srN' source points at."""
+        selector = src.split(":", 1)[1] if ":" in src else ""
+        if src.startswith("disc:") and selector.isdigit():
+            idx = int(selector)
+            return next((d for d in self._drives_cache if d.index == idx), None)
+        return next((d for d in self._drives_cache if d.device == selector), None)
 
     def _disc_is_loaded(self, wj: WebJob) -> bool:
         """Whether this job's disc is in a drive right now, so the UI can say so
@@ -1914,11 +1973,27 @@ class JobManager:
     async def _scan_job(self, wj: WebJob) -> None:
         reporter = _Reporter(self, wj)
         started = time.time()   # bounds the AACS dump search on failure (see below)
+        # Before the scan, not after: scanning a UHD disc in a drive that cannot
+        # read it doesn't just fail, it retries at the SCSI layer until the whole
+        # drive enumeration is blocked — which makes every other drive look dead
+        # and strands unrelated jobs. Covers Retry too, since that re-enters here.
+        unreadable = self._unreadable_in_this_drive(wj)
+        if unreadable is not None:
+            wj.state = JobState.FAILED
+            wj.error = unreadable
+            reporter.on_event(unreadable)
+            self._persist(wj)
+            self.bus.publish()
+            return
         try:
             job = await self.pipeline.scan_disc(wj.source, reporter)
             wj._pipeline_job = job
             wj.disc = job.disc
             wj.fingerprint = job.fingerprint
+            # What this scan taught us about the DRIVE, not the disc. Only a scan
+            # that opened a disc knows, and only it can teach the check above.
+            await asyncio.to_thread(
+                self.drive_caps.note_libredrive, job.disc.drive_name, job.disc.libredrive)
             dupe = self._active_duplicate(wj)
             if dupe is not None:
                 # Park instead of ripping. FAILED + a pending rip is what puts a

@@ -71,6 +71,15 @@ class DiscInfo:
     disc_name: str | None = None
     volume_label: str | None = None
     drive_device: str | None = None  # OS device for eject, e.g. "F:" or "/dev/sr0"
+    # The drive this scan actually used, as model+serial ("BD-RE ASUS BW-16D1HT
+    # 3.10 KX1P71E4206"). The stable identity of a physical drive: disc:N and
+    # /dev/srN both get reassigned across reboots, the serial never does.
+    drive_name: str | None = None
+    # Whether MakeMKV announced LibreDrive on this drive. True/False only when
+    # the disc actually opened (no titles = we learned nothing, so None). It is
+    # announced for ANY disc, not just UHD, so a successful open with no
+    # announcement means the drive genuinely lacks it.
+    libredrive: bool | None = None
     titles: list[Title] = field(default_factory=list)
 
     def title(self, title_id: int) -> Title | None:

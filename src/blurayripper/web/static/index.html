@@ -398,7 +398,7 @@ async function loadDrives() {
         div.innerHTML =
           `<div class="drive-info"><b>${title}</b>` +
           `<small class="disc-name" title="${d.disc_name||''}">${d.disc_name||''}</small>` +
-          `<small style="color:#f85149;">⚠ Windows sees this disc but MakeMKV can't open the drive — reset/reconnect it (or try another drive).</small></div>`;
+          `<small style="color:#f85149;">⚠ The OS sees this disc but MakeMKV can't open the drive — reset/reconnect it (or try another drive).</small></div>`;
         el.appendChild(div);
         continue;
       }
@@ -406,7 +406,7 @@ async function loadDrives() {
         ? (d.disc_name + (d.os_detected ? ' <span class="muted" title="Detected by the OS — makemkvcon\'s quick probe missed it; a scan may still be slow or fail.">(via OS)</span>' : ''))
         : '<i>no disc / mounting…</i>';
       div.innerHTML =
-        `<div class="drive-info"><b>${title}</b><small class="disc-name" title="${d.disc_name||''}">${disc}</small><small>disc:${d.index} ${d.device||''}</small></div>`;
+        `<div class="drive-info"><b>${title}</b><small class="disc-name" title="${d.disc_name||''}">${disc}</small><small>disc:${d.index} ${d.device||''}</small>${driveCapsHtml(d)}</div>`;
       const btns = document.createElement('div');
       btns.className = 'drive-btns';
       const add = document.createElement('button');
@@ -475,6 +475,30 @@ async function submitAddSelector(){
 }
 
 function badgeClass(s){ if(s==='done')return'done'; if(s==='failed')return'failed'; if(s.startsWith('awaiting'))return'await'; return''; }
+
+// What a drive can do, and whether what is in it right now is a mismatch.
+//
+// Invisible otherwise, and not guessable: two physically identical drives
+// differ when only one has patched (LibreDrive) firmware, and on this rip box
+// the HIGHER firmware number was the capable one. A drive with no LibreDrive
+// cannot read a UHD disc at all — it fails inside the first megabyte and its
+// SCSI retries stop drive detection working for EVERY drive on the machine, so
+// the mismatch is worth saying out loud before the disc is queued.
+//
+// null means "no disc has been opened in this drive yet", which says nothing.
+const UHD_FLOOR_BYTES = 51e9;
+function driveCapsHtml(d){
+  const out = [];
+  if (d.libredrive === true)
+    out.push('<small class="muted" title="LibreDrive is active — this drive reads UHD (BD-66/BD-100) discs.">UHD \u2713</small>');
+  else if (d.libredrive === false)
+    out.push('<small class="muted" title="No LibreDrive, so MakeMKV cannot read a UHD disc in this drive. Standard Blu-ray and DVD are fine.">standard discs only</small>');
+  if (d.libredrive === false && d.disc_bytes > UHD_FLOOR_BYTES)
+    out.push('<small style="color:#f85149;">\u26a0 This looks like a UHD disc ('
+      + Math.round(d.disc_bytes/1e9) + ' GB) and this drive cannot read it \u2014 '
+      + 'move it to a drive with LibreDrive.</small>');
+  return out.join('');
+}
 
 // A job's badge: the text and the colour class.
 //
