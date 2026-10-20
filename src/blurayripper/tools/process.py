@@ -108,7 +108,12 @@ async def kill_stale_tools(image_names: Sequence[str]) -> list[str]:
         if sys.platform.startswith("win"):
             cmd = ["taskkill", "/F", "/IM", name]
         else:
-            cmd = ["pkill", "-9", "-f", name]
+            # -x (exact process NAME), not -f (anywhere in the command line).
+            # -f matched every process whose arguments merely mention the tool:
+            # an operator's own `grep makemkvcon`, an editor holding
+            # makemkvcon.log, a shell script named after it. Killing those with
+            # -9 while hunting a drive fault is its own kind of haunted box.
+            cmd = ["pkill", "-9", "-x", name]
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)

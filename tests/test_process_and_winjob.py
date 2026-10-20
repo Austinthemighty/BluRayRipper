@@ -389,13 +389,18 @@ async def test_stale_tools_are_reaped_with_taskkill_on_windows(monkeypatch):
 
 async def test_stale_tools_are_reaped_with_pkill_on_posix(monkeypatch):
     """Dev boxes are macOS/Linux; the reap has to use the local killer or every
-    startup logs a failure that hides real ones."""
+    startup logs a failure that hides real ones.
+
+    -x, not -f: the pattern must match the process NAME exactly. With -f it
+    matched anything whose command line merely mentioned the tool — an
+    operator's own `grep makemkvcon`, an editor holding makemkvcon.log — and
+    SIGKILLed those too."""
     monkeypatch.setattr(process.sys, "platform", "darwin")
     calls = _spawn(monkeypatch)
 
     await process.kill_stale_tools(["HandBrakeCLI"])
 
-    assert calls[0][0] == ["pkill", "-9", "-f", "HandBrakeCLI"]
+    assert calls[0][0] == ["pkill", "-9", "-x", "HandBrakeCLI"]
 
 
 async def test_the_reap_discards_the_killers_own_output(monkeypatch):
@@ -423,13 +428,13 @@ async def test_a_missing_killer_tool_does_not_stop_serve_starting(monkeypatch):
 
 async def test_the_reap_skips_blank_names(monkeypatch):
     """Tool paths are optional in settings, so an unconfigured tool arrives as
-    an empty string. ``pkill -9 -f ''`` matches every process on the box."""
+    an empty string, and no form of ``pkill -9`` should ever be handed one."""
     monkeypatch.setattr(process.sys, "platform", "darwin")
     calls = _spawn(monkeypatch)
 
     killed = await process.kill_stale_tools(["", "HandBrakeCLI"])
 
-    assert [argv for argv, _ in calls] == [["pkill", "-9", "-f", "HandBrakeCLI"]]
+    assert [argv for argv, _ in calls] == [["pkill", "-9", "-x", "HandBrakeCLI"]]
     assert killed == ["HandBrakeCLI"]
 
 

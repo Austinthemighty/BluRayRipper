@@ -32,6 +32,7 @@ from blurayripper.cli import (
     _cmd_secrets,
     _cmd_serve,
     _cmd_worker,
+    _storage_remedy,
     main,
 )
 from blurayripper.config import ToolNotFoundError, load_settings
@@ -676,7 +677,9 @@ def test_serve_stops_before_starting_when_a_storage_root_is_unreachable(
     assert rc == 2
     assert "Cannot access output_dir" in _prose(out)
     assert str(blocker / "out") in _unwrapped(out), "the failing folder must be named"
-    assert "net use" in _prose(out), "the message has to say what to check"
+    # Platform-appropriate: this suite runs on macOS/Linux, so the POSIX remedy
+    # is the correct one to print. _storage_remedy covers both wordings.
+    assert "findmnt" in _prose(out), "the message has to say what to check"
     assert "server" not in made, "uvicorn must never be started"
     assert made["create_app_calls"] == []
 
@@ -745,6 +748,48 @@ def test_serve_reaps_only_the_tools_it_will_run_itself(tmp_path, monkeypatch, ca
     assert delegated["reaped"] == [["makemkvcon"]]
     assert standalone["reaped"] == [
         ["HandBrakeCLI", "makemkvcon", "mkvextract", "seconv"]]
+
+
+def test_a_serve_that_cannot_start_does_not_reap_anything(tmp_path, monkeypatch, capsys):
+    """A rip box whose NAS was unreachable crash-looped on 10-second restarts,
+    and the stale-tool sweep ran BEFORE the pre-flight that aborted it. So every
+    10 seconds something SIGKILLed every makemkvcon on the machine — including
+    the operator's own `makemkvcon info disc:1`, run by hand to find out why a
+    drive wasn't reading. Forty-two restarts of a diagnostic dying instantly for
+    no visible reason.
+
+    A process that is about to exit 2 has no business reaping other people's."""
+    s = _settings(tmp_path, cleanup_stale_tools=True)
+    s.tools.makemkvcon = "/tools/makemkvcon"   # the one it would have SIGKILLed
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("the NAS mount point, with the share not mounted")
+    s.storage.staging_dir = blocker / "MakeMKV" / "staging"
+    _use_settings(monkeypatch, s)
+    env = _serve_env(monkeypatch)
+
+    rc = _run_serve()
+
+    assert rc == 2
+    assert env["reaped"] == [], "aborting serve still killed the box's tools"
+    assert env["create_app_calls"] == []           # and never got as far as the app
+    assert "Cannot access staging_dir" in _prose(capsys.readouterr().out)
+
+
+def test_the_unreachable_storage_remedy_fits_the_os_it_prints_on():
+    """The advice was Windows-only. A Linux box spent a night telling its
+    operator to "run: net use" and to check they were not in an elevated prompt,
+    for a CIFS share that was mounted and healthy but owned by root — which is
+    the one cause the message never mentioned."""
+    folder = Path("/mnt/TrueNas/share/MakeMKV/staging")
+
+    posix = _storage_remedy(folder, windows=False)
+    assert "net use" not in posix and "elevated" not in posix
+    assert f"findmnt -T {folder}" in posix
+    assert "uid=" in posix and "root" in posix     # names the actual cause
+
+    windows = _storage_remedy(folder, windows=True)
+    assert "net use" in windows and "elevated" in windows
+    assert "findmnt" not in windows
 
 
 def test_serve_closes_the_event_streams_the_moment_shutdown_begins(

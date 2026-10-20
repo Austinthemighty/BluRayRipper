@@ -1370,6 +1370,25 @@ async def _cmd_db_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _storage_remedy(folder, *, windows: bool) -> str:
+    """What to check when a staging/output root can't be reached.
+
+    Remedies differ per OS, and printing the wrong platform's is worse than
+    printing none at all: a Linux rip box spent a night advising its operator to
+    "run: net use" and to make sure they weren't in an elevated prompt, for a
+    CIFS share that was mounted and healthy but owned by root — the one cause
+    the message never mentioned.
+    """
+    if windows:
+        return ("  • the drive is actually mapped in THIS session — run: net use\n"
+                "  • you're NOT in an elevated/admin prompt (mapped drives are "
+                "hidden from elevated processes).")
+    return (f"  • the share is mounted where it's expected — run: findmnt -T {folder}\n"
+            f"  • THIS user can write it: a CIFS/NFS mount with no uid=/gid= option "
+            f"belongs to root, so a --user service gets exactly this error on a share "
+            f"that is mounted and healthy — check the path named below with: ls -ld")
+
+
 async def _cmd_serve(args: argparse.Namespace) -> int:
     try:
         import uvicorn
@@ -1436,9 +1455,34 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     from .tools.winjob import enable_kill_on_close
     enable_kill_on_close()
 
-    # Reap tool processes orphaned by a prior crash/power-off before starting —
-    # otherwise leftover SubtitleEdit/MakeMKV/HandBrake instances pile up across
-    # restarts until they exhaust the system commit limit (out-of-memory errors).
+    # Pre-flight: the staging/output roots (often a mapped NAS drive) must be
+    # reachable, or the app crashes deep in a mkdir with a cryptic WinError 3.
+    # Fail here with a clear, actionable message instead.
+    for label, folder in (("staging_dir", settings.storage.staging_dir),
+                          ("output_dir", settings.storage.output_dir)):
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            drive = folder.drive or str(folder)
+            how = _storage_remedy(folder, windows=sys.platform.startswith("win"))
+            console.print(
+                f"[red]Cannot access {label} at {folder}[/red]\n"
+                f"[yellow]{drive} isn't available to this process. Check:\n"
+                f"  • the NAS / network path is up (this same outage also breaks Postgres),\n"
+                f"{how}[/yellow]\n"
+                f"[dim]({type(exc).__name__}: {exc})[/dim]")
+            return 2
+
+    # Reap tool processes orphaned by a prior crash/power-off — otherwise
+    # leftover SubtitleEdit/MakeMKV/HandBrake instances pile up across restarts
+    # until they exhaust the system commit limit (out-of-memory errors).
+    #
+    # AFTER the pre-flight, never before it. This ran first, so a serve that was
+    # about to abort on an unreachable NAS still SIGKILLed every makemkvcon on
+    # the box — and under systemd's restart loop it did that 42 times in seven
+    # minutes, killing the operator's own hand-run `makemkvcon info` diagnostics
+    # as fast as they could be started, while they were trying to work out why a
+    # drive wasn't reading. A process about to exit reaps nothing.
     if settings.cleanup_stale_tools:
         from pathlib import Path as _Path
 
@@ -1459,25 +1503,6 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
         killed = await _process.kill_stale_tools(sorted(names))
         if killed:
             console.print(f"[dim]Cleaned up any stale tool processes: {', '.join(killed)}[/dim]")
-
-    # Pre-flight: the staging/output roots (often a mapped NAS drive) must be
-    # reachable, or the app crashes deep in a mkdir with a cryptic WinError 3.
-    # Fail here with a clear, actionable message instead.
-    for label, folder in (("staging_dir", settings.storage.staging_dir),
-                          ("output_dir", settings.storage.output_dir)):
-        try:
-            folder.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            drive = folder.drive or str(folder)
-            console.print(
-                f"[red]Cannot access {label} at {folder}[/red]\n"
-                f"[yellow]The drive {drive} isn't available to this process. Check:\n"
-                f"  • the NAS / network path is up (this same outage also breaks Postgres),\n"
-                f"  • the drive is actually mapped in THIS session — run: net use\n"
-                f"  • you're NOT in an elevated/admin prompt (mapped drives are hidden from "
-                f"elevated processes).[/yellow]\n"
-                f"[dim]({type(exc).__name__}: {exc})[/dim]")
-            return 2
 
     app = create_app(settings)
     where = "all interfaces" if host == "0.0.0.0" else host
