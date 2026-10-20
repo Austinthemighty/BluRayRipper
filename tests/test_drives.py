@@ -185,6 +185,10 @@ def test_a_label_lookup_tolerates_a_box_without_udevadm(monkeypatch):
     udevadm must cost a missing label, not an exception on the drives panel."""
     import subprocess as real_subprocess
 
+    # The tool resolves; it is the CALL that fails here (see the PATH test for
+    # the other half, where the tool itself cannot be found).
+    monkeypatch.setattr(makemkv, "_udevadm_path", lambda: "/usr/bin/udevadm")
+
     def missing(*a, **k):
         raise FileNotFoundError("udevadm")
     monkeypatch.setattr(real_subprocess, "run", missing)
@@ -495,3 +499,36 @@ def test_a_drives_outcome_survives_a_useless_scan_and_a_corrupt_file(tmp_path):
     path.write_text("[]")
     assert DriveCaps(path).uhd_ok("BD-RE ASUS 3.10 SERIAL") is None
     DriveCaps(tmp_path / "never-written.json").note_uhd_result("x", None)  # no raise
+
+
+def test_the_label_lookup_does_not_rely_on_the_services_PATH(monkeypatch, tmp_path):
+    """serve runs as a systemd --user service, whose PATH is a short default
+    that need not contain the sbin directories udevadm has lived in. A bare
+    "udevadm" then raises FileNotFoundError, which this swallows as "no label"
+    — indistinguishable from "no disc", so a drive with a disc in it reads as
+    empty and nothing is ever queued for it. Meanwhile an administrator's
+    interactive shell finds the tool, so the box looks perfectly healthy."""
+    import shutil
+    import subprocess as real_subprocess
+
+    from blurayripper.tools import makemkv as mk
+
+    monkeypatch.setattr(shutil, "which", lambda name: None)   # not on PATH
+    seen = {}
+
+    class _Out:
+        stdout = "ID_FS_LABEL=LANDMAN_SEASON2\nID_FS_TYPE=udf\n"
+
+    def record(cmd, **kw):
+        seen["argv"] = list(cmd)
+        return _Out()
+    monkeypatch.setattr(real_subprocess, "run", record)
+
+    # Present in an sbin directory only.
+    monkeypatch.setattr(mk.os.path, "exists", lambda p: p == "/usr/sbin/udevadm")
+    assert mk._linux_disc_label("/dev/sr0") == "LANDMAN_SEASON2"
+    assert seen["argv"][0] == "/usr/sbin/udevadm", "must not invoke a bare name"
+
+    # Nowhere at all: a missing tool is a missing label, not an exception.
+    monkeypatch.setattr(mk.os.path, "exists", lambda p: False)
+    assert mk._linux_disc_label("/dev/sr0") is None

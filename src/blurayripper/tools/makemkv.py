@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import os
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -95,6 +96,28 @@ def _linux_media_present(device: str) -> bool:
             pass
 
 
+def _udevadm_path() -> str | None:
+    """Absolute path to udevadm, or None.
+
+    Never bare "udevadm" on PATH. This runs inside a systemd --user service,
+    whose PATH is a short default that historically omits the sbin directories
+    udevadm has lived in — and a FileNotFoundError here is swallowed as "no
+    label", which is indistinguishable from "no disc". An administrator's
+    interactive shell finds the tool, so the box looks fine while the service
+    cannot see a disc at all.
+    """
+    import shutil
+
+    found = shutil.which("udevadm")
+    if found:
+        return found
+    for candidate in ("/usr/bin/udevadm", "/bin/udevadm",
+                      "/usr/sbin/udevadm", "/sbin/udevadm"):
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def _linux_disc_label(device: str) -> str | None:
     """The volume label udev read when the disc was inserted, or None.
 
@@ -103,9 +126,12 @@ def _linux_disc_label(device: str) -> str | None:
     full enumeration), never the media poll."""
     import subprocess
 
+    tool = _udevadm_path()
+    if tool is None:
+        return None
     try:
         out = subprocess.run(
-            ["udevadm", "info", "--query=property", f"--name={device}"],
+            [tool, "info", "--query=property", f"--name={device}"],
             capture_output=True, text=True, timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
