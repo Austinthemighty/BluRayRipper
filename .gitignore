@@ -11,7 +11,14 @@ venv/
 .pytest_cache/
 
 # Secrets and local config
-config/secrets.env
+# Globs, not the one exact name: this file held credentials and the repo is
+# public. `config/secrets.env` alone left a `secrets.env.old` beside it showing
+# as UNTRACKED — one `git add -A` from being published — and the same goes for
+# an editor's `secrets.env~`, `.save`, or a `.secrets.env.swp`. The example
+# template is negated back in, and stays tracked.
+config/secrets.env*
+config/.secrets.env*
+!config/secrets.env.example
 *.local.toml
 # Web-edited settings overlay (⚙ Settings in the UI). Gitignored so it survives
 # `git pull` and never clobbers the tracked settings.toml.
