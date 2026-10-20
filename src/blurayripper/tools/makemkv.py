@@ -235,17 +235,21 @@ def os_media_snapshot() -> dict[str, str] | None:
     new disc right away instead of waiting for the next full enumeration. A None
     return means "can't tell", so callers must keep doing their regular poll.
 
-    On Linux the value is a placeholder, not the label: this is polled, and only
-    the KEYS have to change when a tray does. Reading a label costs a subprocess
-    per drive, which belongs on the enumeration path (os_disc_label), not here.
+    On Linux the value is the disc's CAPACITY, not its label. Reading a label
+    costs a subprocess per drive, which belongs on the enumeration path
+    (os_disc_label) and not in a two-second poll — but a bare "there is a disc"
+    placeholder made SWAPPING one disc for another invisible here: the keys are
+    identical before and after, so the early wake never fired and a new disc
+    waited out the full poll interval. Capacity comes from a sysfs read, costs
+    nothing, and differs between almost any two discs.
     """
     if sys.platform.startswith("win"):
         return dict(os_optical_drives())
     if not sys.platform.startswith("linux"):
         return None
     try:
-        return {dev: "disc" for dev in _linux_optical_devices()
-                if _linux_media_present(dev)}
+        return {dev: str(os_disc_capacity_bytes(dev) or "disc")
+                for dev in _linux_optical_devices() if _linux_media_present(dev)}
     except Exception:
         return None
 

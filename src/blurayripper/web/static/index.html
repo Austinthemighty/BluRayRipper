@@ -402,9 +402,7 @@ async function loadDrives() {
         el.appendChild(div);
         continue;
       }
-      const disc = d.disc_name
-        ? (d.disc_name + (d.os_detected ? ' <span class="muted" title="Detected by the OS — makemkvcon\'s quick probe missed it; a scan may still be slow or fail.">(via OS)</span>' : ''))
-        : '<i>no disc / mounting…</i>';
+      const disc = discLabelHtml(d);
       div.innerHTML =
         `<div class="drive-info"><b>${title}</b><small class="disc-name" title="${d.disc_name||''}">${disc}</small><small>disc:${d.index} ${d.device||''}</small>${driveCapsHtml(d)}</div>`;
       const btns = document.createElement('div');
@@ -475,6 +473,24 @@ async function submitAddSelector(){
 }
 
 function badgeClass(s){ if(s==='done')return'done'; if(s==='failed')return'failed'; if(s.startsWith('awaiting'))return'await'; return''; }
+
+// What is in a drive, when nobody could read its name.
+//
+// "no disc / mounting…" covered two situations that want opposite reactions:
+// an empty tray, and a disc the kernel can see while makemkvcon's quick probe
+// (busy with a rip on the other drive) and udev have both come back without a
+// label. The second one is why a disc sat there not being picked up and had to
+// be added by hand — and it looked exactly like an empty drive while it did.
+// The kernel still reports the disc's size in that state, so say so.
+function discLabelHtml(d){
+  if (d.disc_name)
+    return d.disc_name + (d.os_detected
+      ? ' <span class="muted" title="Detected by the OS — makemkvcon\'s quick probe missed it; a scan may still be slow or fail.">(via OS)</span>'
+      : '');
+  if (d.disc_bytes > 0)
+    return '<i title="The kernel can see a disc here, but neither makemkvcon nor udev has given a name for it yet. Common while another rip is running.">disc present \u2014 reading its label\u2026</i>';
+  return '<i>no disc / mounting\u2026</i>';
+}
 
 // What a drive can do, and whether what is in it right now is a mismatch.
 //

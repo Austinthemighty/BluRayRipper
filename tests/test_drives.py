@@ -109,19 +109,36 @@ def test_on_linux_a_device_form_dedupes_against_what_makemkv_reported(monkeypatc
     assert drives[0].makemkv_blind is False
 
 
-def test_on_linux_the_media_poll_reports_devices_and_stays_cheap(monkeypatch):
-    """The poll runs every couple of seconds purely to notice a tray closing, so
-    its keys are what must change — never a subprocess per drive per tick."""
+def test_the_media_poll_notices_a_disc_being_SWAPPED_not_just_removed(monkeypatch):
+    """The poll exists to catch a tray closing within a couple of seconds rather
+    than at the next 15-second enumeration. Keyed on presence alone it missed the
+    commonest case of all — taking one disc out and putting another straight in,
+    which leaves the keys identical — so a swapped disc waited out the full poll
+    even though the OS knew immediately. Capacity distinguishes them, and costs a
+    sysfs read rather than a subprocess."""
     _linux(monkeypatch, devices=["/dev/sr0", "/dev/sr1"], media=["/dev/sr1"])
 
     def no_subprocess(_dev):
         raise AssertionError("the media poll must not read labels")
     monkeypatch.setattr(makemkv, "_linux_disc_label", no_subprocess)
 
-    assert makemkv.os_media_snapshot() == {"/dev/sr1": "disc"}
-    # A tray closing on the other drive changes the keys, which is the signal.
+    sizes = {"/dev/sr1": 48_627_580_928}
+    monkeypatch.setattr(makemkv, "os_disc_capacity_bytes", lambda d: sizes.get(d))
+    before = makemkv.os_media_snapshot()
+    assert before == {"/dev/sr1": "48627580928"}
+
+    # Same drive, same "a disc is present", different disc.
+    sizes["/dev/sr1"] = 47_530_508_288
+    assert makemkv.os_media_snapshot() != before, "a swapped disc must read as a change"
+
+    # A tray closing on the other drive still shows up as a new key.
     monkeypatch.setattr(makemkv, "_linux_media_present", lambda d: True)
+    sizes["/dev/sr0"] = 25_000_000_000
     assert set(makemkv.os_media_snapshot()) == {"/dev/sr0", "/dev/sr1"}
+
+    # A drive whose size can't be read still counts as holding something.
+    monkeypatch.setattr(makemkv, "os_disc_capacity_bytes", lambda d: None)
+    assert makemkv.os_media_snapshot() == {"/dev/sr0": "disc", "/dev/sr1": "disc"}
 
 
 def test_the_media_probe_opens_the_device_without_waiting_for_it(monkeypatch):

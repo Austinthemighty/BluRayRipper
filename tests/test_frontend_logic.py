@@ -397,3 +397,22 @@ def test_a_drive_that_cannot_read_uhd_says_so_before_a_disc_is_queued():
 
     # Never opened a disc in this drive -> nothing is known, so claim nothing.
     assert js(f"driveCapsHtml({unknown})") == ""
+
+
+def test_a_drive_holding_an_unreadable_disc_does_not_read_as_empty():
+    """"no disc / mounting…" covered both an empty tray and a disc the kernel
+    can see but nobody has named yet — which is the state a disc sits in while
+    another rip keeps makemkvcon busy, and the reason one had to be added by
+    hand while the panel showed an empty drive."""
+    named = json.dumps({"disc_name": "LANDMAN_SEASON2", "disc_bytes": 48627580928})
+    unnamed = json.dumps({"disc_name": None, "disc_bytes": 48627580928})
+    empty = json.dumps({"disc_name": None, "disc_bytes": None})
+
+    assert "LANDMAN_SEASON2" in js(f"discLabelHtml({named})")
+    assert "disc present" in js(f"discLabelHtml({unnamed})")
+    assert "no disc" in js(f"discLabelHtml({empty})")
+    assert "no disc" not in js(f"discLabelHtml({unnamed})")
+
+    # The "(via OS)" note still rides along with an OS-recovered name.
+    via_os = json.dumps({"disc_name": "LANDMAN", "os_detected": True, "disc_bytes": 1})
+    assert "via OS" in js(f"discLabelHtml({via_os})")
