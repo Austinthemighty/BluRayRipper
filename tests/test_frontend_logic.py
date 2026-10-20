@@ -382,10 +382,10 @@ def test_a_drive_that_cannot_read_uhd_says_so_before_a_disc_is_queued():
     could not read it at all and its SCSI retries blocked drive detection for
     both. Nothing visible distinguished them; the firmware version pointed the
     wrong way, the HIGHER number being the capable one."""
-    cap = json.dumps({"libredrive": True, "disc_bytes": 65e9})
-    nocap = json.dumps({"libredrive": False, "disc_bytes": 48e9})
-    mismatch = json.dumps({"libredrive": False, "disc_bytes": 65e9})
-    unknown = json.dumps({"libredrive": None, "disc_bytes": 65e9})
+    cap = json.dumps({"uhd_ok": True, "disc_bytes": 65e9})
+    nocap = json.dumps({"uhd_ok": False, "disc_bytes": 48e9})
+    mismatch = json.dumps({"uhd_ok": False, "disc_bytes": 65e9})
+    unknown = json.dumps({"uhd_ok": None, "disc_bytes": 65e9})
 
     assert "UHD" in js(f"driveCapsHtml({cap})")
     assert "standard discs only" in js(f"driveCapsHtml({nocap})")

@@ -207,8 +207,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "makemkv_blind": getattr(d, "makemkv_blind", False),
                 # Two identical-looking drives can differ here (LibreDrive comes
                 # from patched firmware), and it decides whether UHD is readable
-                # at all. None until a disc has been opened in that drive.
-                "libredrive": manager.drive_caps.libredrive(d.name),
+                # at all. None until a UHD-sized disc has been tried in it.
+                "uhd_ok": manager.drive_caps.uhd_ok(d.name),
                 "disc_bytes": os_disc_capacity_bytes(d.device),
             }
             for d in found

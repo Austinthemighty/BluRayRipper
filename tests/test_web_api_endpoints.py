@@ -147,7 +147,7 @@ def test_drives_serves_the_watcher_cache_without_rescanning(client, manager):
                          "os_detected": False, "makemkv_blind": False,
                          # Unknown until a disc has been opened in that drive,
                          # and no capacity to read on a fake 'F:' off Windows.
-                         "libredrive": None, "disc_bytes": None}]
+                         "uhd_ok": None, "disc_bytes": None}]
 
 
 def test_drives_falls_back_to_a_live_scan_and_keeps_the_result(client, manager):

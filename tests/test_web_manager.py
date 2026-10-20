@@ -2055,8 +2055,8 @@ def test_no_drives_attached_counts_as_the_disc_being_missing(manager):
 
 # --- a UHD disc in the drive that cannot read it ----------------------------
 
-_BAD = "BD-RE ASUS BW-16D1HT 3.01 KLUL75I4959"    # no LibreDrive
-_GOOD = "BD-RE ASUS BW-16D1HT 3.10 KX1P71E4206"   # LibreDrive v06.3
+_BAD = "BD-RE ASUS BW-16D1HT 3.01 KLUL75I4959"    # failed to read a UHD disc
+_GOOD = "BD-RE ASUS BW-16D1HT 3.10 KX1P71E4206"   # read one fine
 
 
 def _two_drives(manager):
@@ -2065,8 +2065,8 @@ def _two_drives(manager):
         Drive(index=0, name=_GOOD, device="/dev/sr1", disc_name=None),
         Drive(index=1, name=_BAD, device="/dev/sr0", disc_name="BOURNESUPREMACYUHD_UPK1"),
     ]
-    manager.drive_caps.note_libredrive(_GOOD, True)
-    manager.drive_caps.note_libredrive(_BAD, False)
+    manager.drive_caps.note_uhd_result(_GOOD, True)
+    manager.drive_caps.note_uhd_result(_BAD, False)
 
 
 async def test_a_uhd_disc_is_refused_before_it_can_wedge_the_other_drive(
@@ -2092,9 +2092,9 @@ async def test_a_uhd_disc_is_refused_before_it_can_wedge_the_other_drive(
 
     assert wj.state is JobState.FAILED
     assert "UHD" in wj.error and "65 GB" in wj.error
-    assert "no LibreDrive" in wj.error
+    assert "already failed to read one" in wj.error
     assert "Move it to Black Drive" in wj.error, wj.error   # says where, by its name
-    assert any("LibreDrive" in line for line in wj.log)
+    assert any("UHD" in line for line in wj.log)
 
 
 async def test_only_a_known_incapable_drive_and_a_known_big_disc_is_refused(
@@ -2117,7 +2117,7 @@ async def test_only_a_known_incapable_drive_and_a_known_big_disc_is_refused(
                         lambda dev: None)
     assert manager._unreadable_in_this_drive(WebJob(id=3, source="disc:1")) is None
 
-    # ...and a drive we have simply never opened a disc in is not yet guilty.
+    # ...and a drive we have never tried a big disc in is not yet guilty.
     monkeypatch.setattr("blurayripper.web.manager.os_disc_capacity_bytes", big)
     manager._drives_cache[1].name = "BD-RE SOME BRAND NEW DRIVE 1.00 ABC123"
     assert manager._unreadable_in_this_drive(WebJob(id=4, source="disc:1")) is None
@@ -2127,24 +2127,66 @@ async def test_only_a_known_incapable_drive_and_a_known_big_disc_is_refused(
         WebJob(id=5, source="/mnt/rip/Movie.mkv")) is None
 
 
-async def test_a_scan_teaches_the_check_what_the_drive_can_do(manager, monkeypatch):
-    """The capability can only be learned by opening a disc, so the scan that
-    does it has to write it down — otherwise the refusal above can never fire."""
+async def test_only_a_real_read_error_brands_a_drive_as_unable(manager, monkeypatch):
+    """How the check learns anything at all — and the trap in learning it.
+
+    "Using LibreDrive mode" cannot be used: MakeMKV emits it for whichever
+    capable drive is holding a disc, not for the drive being opened, so reading
+    a standard disc in the BAD drive while the good one held a UHD disc marked
+    the bad drive as capable — the exact inversion that would send every future
+    UHD disc to the drive that cannot read it.
+
+    So the outcome is what gets recorded, and a failure only counts when MakeMKV
+    actually reported a read error: a scan can come back empty because the disc
+    is filthy or the tray opened, and branding a good drive on one of those is
+    the same inversion with extra steps.
+    """
     from blurayripper.models import DiscInfo, Title
     from blurayripper.pipeline import Job
 
-    async def scan_on_the_good_drive(source, report):
-        job = Job(source=source)
-        job.disc = DiscInfo(source=source, disc_name="LANDMAN_SEASON2",
-                            drive_name=_GOOD, libredrive=True,
-                            titles=[Title(title_id=0, duration_seconds=3000)])
-        job.fingerprint = "fp_landman"
-        return job
-    monkeypatch.setattr(manager.pipeline, "scan_disc", scan_on_the_good_drive)
+    _two_drives(manager)
+    manager.drive_caps.note_uhd_result(_GOOD, None)   # start from "never tried"
+    manager.drive_caps._caps.clear()
+    monkeypatch.setattr("blurayripper.web.manager.os_disc_capacity_bytes",
+                        lambda dev: 65_000_000_000)
 
-    assert manager.drive_caps.libredrive(_GOOD) is None   # nothing known yet
+    def scan_returning(**kw):
+        async def _scan(source, report):
+            job = Job(source=source)
+            job.disc = DiscInfo(source=source, disc_name="BOURNE", **kw)
+            job.fingerprint = "fp_" + str(kw)
+            return job
+        return _scan
+
+    # The good drive reads it: titles came back, so it plainly managed it.
+    monkeypatch.setattr(manager.pipeline, "scan_disc", scan_returning(
+        drive_name=_GOOD, titles=[Title(title_id=0, duration_seconds=3000)]))
     manager.add_disc("disc:0")
     await _settle()
-
-    assert manager.drive_caps.libredrive(_GOOD) is True
+    assert manager.drive_caps.uhd_ok(_GOOD) is True
     assert manager.drive_caps.uhd_capable_drives() == [_GOOD]
+
+    # The bad drive reports a SCSI/hardware error and no titles: that is a real
+    # verdict on the drive.
+    monkeypatch.setattr(manager.pipeline, "scan_disc", scan_returning(
+        drive_name=_BAD, titles=[], read_error=True))
+    manager.add_disc("disc:1")
+    await _settle()
+    assert manager.drive_caps.uhd_ok(_BAD) is False
+
+    # An empty scan with no read error teaches nothing, and must not overwrite.
+    manager.drive_caps._caps.clear()
+    monkeypatch.setattr(manager.pipeline, "scan_disc", scan_returning(
+        drive_name=_BAD, titles=[], read_error=False))
+    manager.add_disc("disc:1")
+    await _settle()
+    assert manager.drive_caps.uhd_ok(_BAD) is None
+
+    # ...and neither does any scan of a standard-sized disc, in either drive.
+    monkeypatch.setattr("blurayripper.web.manager.os_disc_capacity_bytes",
+                        lambda dev: 48_000_000_000)
+    monkeypatch.setattr(manager.pipeline, "scan_disc", scan_returning(
+        drive_name=_BAD, titles=[Title(title_id=0, duration_seconds=3000)]))
+    manager.add_disc("disc:1")
+    await _settle()
+    assert manager.drive_caps.uhd_ok(_BAD) is None, "a standard disc said nothing"

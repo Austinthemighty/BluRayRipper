@@ -380,26 +380,31 @@ def test_a_scan_records_which_drive_it_used_by_serial_not_by_index():
     from blurayripper.tools.makemkv import parse_info
     scanned = parse_info(_LIBREDRIVE_SCAN, "disc:0")
     assert scanned.drive_name == "BD-RE ASUS BW-16D1HT 3.10 KX1P71E4206"
-    assert scanned.libredrive is True
+    assert scanned.read_error is False
     # dev: sources resolve the same drive the long way round, via its device.
     assert parse_info(_LIBREDRIVE_SCAN, "dev:/dev/sr1").drive_name == scanned.drive_name
 
 
-def test_libredrive_is_only_concluded_from_a_disc_that_actually_opened():
-    """MakeMKV announces LibreDrive for ANY disc it opens, not just UHD ones, so
-    a successful open with no announcement genuinely means the drive lacks it.
-    An open that FAILED teaches nothing either way and must not be recorded —
-    otherwise one dirty disc marks a perfectly good drive as incapable."""
+def test_a_read_error_is_attributed_to_the_drive_that_was_opened():
+    """What replaced the "Using LibreDrive mode" announcement, which could not be
+    used: MakeMKV emits it for whichever capable drive holds a disc, not for the
+    drive being opened, so it marked the drive that CANNOT read UHD as the one
+    that can. A read error is about the drive that was actually read."""
     from blurayripper.tools.makemkv import parse_info
 
-    quiet = [l for l in _LIBREDRIVE_SCAN if "LibreDrive" not in l]
-    assert parse_info(quiet, "disc:0").libredrive is False      # opened, silent
+    failed = [
+        'MSG:1005,0,1,"MakeMKV v1.18.3 linux(x64-release) started","%1 started","x"',
+        'DRV:1,2,999,12,"BD-RE ASUS BW-16D1HT 3.01 KLUL75I4959","BOURNE","/dev/sr0"',
+        'MSG:2003,0,3,"Error \'Scsi error - HARDWARE ERROR:TIMEOUT ON LOGICAL UNIT\' '
+        'occurred while reading at offset \'524288\'","%1","x"',
+    ]
+    scanned = parse_info(failed, "disc:1")
+    assert scanned.read_error is True
+    assert scanned.drive_name == "BD-RE ASUS BW-16D1HT 3.01 KLUL75I4959"
+    assert scanned.titles == []          # nothing readable came back
 
-    failed = [l for l in quiet if not l.startswith("TINFO")]     # no titles
-    assert parse_info(failed, "disc:0").libredrive is None       # learned nothing
-
-    # A file/ISO job has no drive to say anything about.
-    assert parse_info(_LIBREDRIVE_SCAN, "file:/mnt/rip").libredrive is None
+    # A clean scan of the same drive says the opposite, from the same field.
+    assert parse_info(_LIBREDRIVE_SCAN, "disc:0").read_error is False
 
 
 def test_disc_capacity_comes_from_the_kernel_so_it_works_on_the_bad_drive(
@@ -450,26 +455,26 @@ def test_capacity_has_no_opinion_where_it_cannot_ask(monkeypatch):
     assert mk.os_disc_capacity_bytes("/dev/sr404") is None   # no such sysfs node
 
 
-def test_a_drives_capability_survives_a_failed_scan_and_a_corrupt_file(tmp_path):
-    """Capabilities are learned once and relied on later, so the store has to be
+def test_a_drives_outcome_survives_a_useless_scan_and_a_corrupt_file(tmp_path):
+    """Outcomes are learned once and relied on later, so the store has to be
     harder to lose than it is to write."""
     from blurayripper.services.drive_caps import DriveCaps
 
     path = tmp_path / "drive_caps.json"
     caps = DriveCaps(path)
-    assert caps.libredrive("BD-RE ASUS 3.10 SERIAL") is None   # nothing known yet
+    assert caps.uhd_ok("BD-RE ASUS 3.10 SERIAL") is None   # nothing known yet
 
-    caps.note_libredrive("BD-RE ASUS 3.10 SERIAL", True)
-    caps.note_libredrive("BD-RE ASUS 3.01 OTHER", False)
-    assert DriveCaps(path).libredrive("BD-RE ASUS 3.10 SERIAL") is True
-    assert DriveCaps(path).libredrive("BD-RE ASUS 3.01 OTHER") is False
+    caps.note_uhd_result("BD-RE ASUS 3.10 SERIAL", True)
+    caps.note_uhd_result("BD-RE ASUS 3.01 OTHER", False)
+    assert DriveCaps(path).uhd_ok("BD-RE ASUS 3.10 SERIAL") is True
+    assert DriveCaps(path).uhd_ok("BD-RE ASUS 3.01 OTHER") is False
     assert DriveCaps(path).uhd_capable_drives() == ["BD-RE ASUS 3.10 SERIAL"]
 
-    # A scan that never opened the disc reports None, which is not a verdict.
-    caps.note_libredrive("BD-RE ASUS 3.10 SERIAL", None)
-    assert DriveCaps(path).libredrive("BD-RE ASUS 3.10 SERIAL") is True
+    # A scan that proved nothing reports None, which is not a verdict.
+    caps.note_uhd_result("BD-RE ASUS 3.10 SERIAL", None)
+    assert DriveCaps(path).uhd_ok("BD-RE ASUS 3.10 SERIAL") is True
 
     # A hand-edit gone wrong loses the knowledge, not the drives panel.
     path.write_text("[]")
-    assert DriveCaps(path).libredrive("BD-RE ASUS 3.10 SERIAL") is None
-    DriveCaps(tmp_path / "never-written.json").note_libredrive("x", None)  # no raise
+    assert DriveCaps(path).uhd_ok("BD-RE ASUS 3.10 SERIAL") is None
+    DriveCaps(tmp_path / "never-written.json").note_uhd_result("x", None)  # no raise

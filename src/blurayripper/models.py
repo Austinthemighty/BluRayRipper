@@ -75,11 +75,11 @@ class DiscInfo:
     # 3.10 KX1P71E4206"). The stable identity of a physical drive: disc:N and
     # /dev/srN both get reassigned across reboots, the serial never does.
     drive_name: str | None = None
-    # Whether MakeMKV announced LibreDrive on this drive. True/False only when
-    # the disc actually opened (no titles = we learned nothing, so None). It is
-    # announced for ANY disc, not just UHD, so a successful open with no
-    # announcement means the drive genuinely lacks it.
-    libredrive: bool | None = None
+    # Whether MakeMKV hit a SCSI/hardware read error on this scan. Unlike the
+    # "Using LibreDrive mode" announcement — which is emitted for whichever
+    # capable drive has a disc, not necessarily the one being opened, so it
+    # cannot be attributed — this is about the drive that was actually read.
+    read_error: bool = False
     titles: list[Title] = field(default_factory=list)
 
     def title(self, title_id: int) -> Title | None:

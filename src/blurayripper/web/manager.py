@@ -942,25 +942,47 @@ class JobManager:
             and self._rip_pending(wj)
         ]
 
+    def _note_uhd_outcome(self, wj: WebJob, disc) -> None:
+        """Record whether this drive managed a UHD-sized disc.
+
+        Only oversized discs say anything, and a failure is only counted when
+        MakeMKV actually hit a SCSI/hardware read error: a scan can come back
+        empty because the disc is filthy or the tray opened, and branding a
+        perfectly good drive off one of those would send every future UHD disc
+        to the wrong drive. A success needs no corroboration — titles came back,
+        so the drive plainly read it.
+        """
+        drive = self._drive_for_source((wj.source or "").strip())
+        if drive is None:
+            return
+        size = os_disc_capacity_bytes(drive.device)
+        if size is None or size < UHD_CAPACITY_FLOOR_BYTES:
+            return
+        if disc.titles:
+            self.drive_caps.note_uhd_result(disc.drive_name or drive.name, True)
+        elif getattr(disc, "read_error", False):
+            self.drive_caps.note_uhd_result(disc.drive_name or drive.name, False)
+
     def _unreadable_in_this_drive(self, wj: WebJob) -> str | None:
         """Why this disc cannot be read in the drive it is sitting in, or None.
 
-        One case so far, and it is the expensive one: a UHD disc in a drive with
-        no LibreDrive. MakeMKV cannot read those at all — it fails a few hundred
-        KB in with "HARDWARE ERROR:TIMEOUT ON LOGICAL UNIT" and keeps retrying,
-        and those retries block drive enumeration for EVERY drive on the box.
-        Two physically identical drives can differ here, because LibreDrive comes
-        from patched firmware, so this is not something an operator can see.
+        One case so far, and it is the expensive one: a UHD disc in a drive that
+        has already been seen failing to read one. MakeMKV cannot read those at
+        all without LibreDrive — it fails a few hundred KB in with "HARDWARE
+        ERROR:TIMEOUT ON LOGICAL UNIT" and keeps retrying, and those retries
+        block drive enumeration for EVERY drive on the box. Two physically
+        identical drives can differ here, because LibreDrive comes from patched
+        firmware, so this is not something an operator can see.
 
         Deliberately conservative: it needs the disc's capacity from the OS (we
-        have no opinion off Linux) AND a recorded observation that this specific
-        drive lacks LibreDrive. Anything unknown proceeds as before.
+        have no opinion off Linux) AND a recorded failure on this specific
+        drive. Anything unknown proceeds as before.
         """
         src = (wj.source or "").strip()
         if not src.startswith(("disc:", "dev:")):
             return None
         drive = self._drive_for_source(src)
-        if drive is None or self.drive_caps.libredrive(drive.name) is not False:
+        if drive is None or self.drive_caps.uhd_ok(drive.name) is not False:
             return None
         size = os_disc_capacity_bytes(drive.device)
         if size is None or size < UHD_CAPACITY_FLOOR_BYTES:
@@ -968,9 +990,10 @@ class JobManager:
         here = self.drive_names.get(drive.device) or drive.name
         return (
             f"This looks like a UHD disc ({size / 1_000_000_000:.0f} GB) and "
-            f"{here} has no LibreDrive, so MakeMKV cannot read it — it fails in "
-            f"the first megabyte and its retries block drive detection for every "
-            f"other drive on this machine. {self._uhd_drive_hint()}")
+            f"{here} has already failed to read one, so MakeMKV cannot read "
+            f"this either — it fails in the first megabyte and its retries "
+            f"block drive detection for every other drive on this machine. "
+            f"{self._uhd_drive_hint()}")
 
     def _uhd_drive_hint(self) -> str:
         """Where the disc should go instead, named the way the panel names it."""
@@ -981,7 +1004,7 @@ class JobManager:
             label = self.drive_names.get(drive.device)
             return (f"Move it to {label or name}"
                     + (f" ({name})" if label else "") + ", then Retry.")
-        return "Move it to a drive with LibreDrive, then Retry."
+        return "Move it to a drive that can read UHD, then Retry."
 
     def _drive_for_source(self, src: str) -> Drive | None:
         """The cached Drive a 'disc:N' / 'dev:/dev/srN' source points at."""
@@ -1990,10 +2013,9 @@ class JobManager:
             wj._pipeline_job = job
             wj.disc = job.disc
             wj.fingerprint = job.fingerprint
-            # What this scan taught us about the DRIVE, not the disc. Only a scan
-            # that opened a disc knows, and only it can teach the check above.
-            await asyncio.to_thread(
-                self.drive_caps.note_libredrive, job.disc.drive_name, job.disc.libredrive)
+            # What this scan taught us about the DRIVE, not the disc — it is the
+            # only way the check above can ever learn anything.
+            await asyncio.to_thread(self._note_uhd_outcome, wj, job.disc)
             dupe = self._active_duplicate(wj)
             if dupe is not None:
                 # Park instead of ripping. FAILED + a pending rip is what puts a

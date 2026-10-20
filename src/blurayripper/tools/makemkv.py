@@ -349,7 +349,7 @@ def parse_info(lines: list[str], source: str) -> DiscInfo:
     streams: dict[tuple[int, int], Stream] = {}
     drv_devices: dict[int, str] = {}
     drv_names: dict[int, str] = {}
-    libredrive_seen = False
+    read_error = False
 
     for line in lines:
         prefix, _, payload = line.partition(":")
@@ -387,8 +387,9 @@ def parse_info(lines: list[str], source: str) -> DiscInfo:
             _apply_title_attr(title, attr_id, value)
 
         elif prefix == "MSG" and len(fields) >= 4:
-            if "using libredrive" in fields[3].casefold():
-                libredrive_seen = True
+            text = fields[3].casefold()
+            if "scsi error" in text or "hardware error" in text:
+                read_error = True
 
         elif prefix == "SINFO" and len(fields) >= 5:
             title_id = _to_id(fields[0])
@@ -419,10 +420,7 @@ def parse_info(lines: list[str], source: str) -> DiscInfo:
             disc.drive_device = selector  # dev:/dev/sr0 -> "/dev/sr0"
             disc.drive_name = next(
                 (n for i, n in drv_names.items() if drv_devices.get(i) == selector), None)
-        # Only a real drive can tell us anything about a drive, and only an open
-        # that produced titles proves the announcement would have been made.
-        if disc.titles:
-            disc.libredrive = libredrive_seen
+        disc.read_error = read_error
     return disc
 
 

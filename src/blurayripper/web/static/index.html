@@ -480,20 +480,21 @@ function badgeClass(s){ if(s==='done')return'done'; if(s==='failed')return'faile
 //
 // Invisible otherwise, and not guessable: two physically identical drives
 // differ when only one has patched (LibreDrive) firmware, and on this rip box
-// the HIGHER firmware number was the capable one. A drive with no LibreDrive
-// cannot read a UHD disc at all — it fails inside the first megabyte and its
-// SCSI retries stop drive detection working for EVERY drive on the machine, so
-// the mismatch is worth saying out loud before the disc is queued.
+// the HIGHER firmware number was the capable one. A drive without it cannot
+// read a UHD disc at all — it fails inside the first megabyte and its SCSI
+// retries stop drive detection working for EVERY drive on the machine, so the
+// mismatch is worth saying out loud before the disc is queued.
 //
-// null means "no disc has been opened in this drive yet", which says nothing.
+// null means "no UHD-sized disc has been tried in this drive yet", which says
+// nothing either way.
 const UHD_FLOOR_BYTES = 51e9;
 function driveCapsHtml(d){
   const out = [];
-  if (d.libredrive === true)
-    out.push('<small class="muted" title="LibreDrive is active — this drive reads UHD (BD-66/BD-100) discs.">UHD \u2713</small>');
-  else if (d.libredrive === false)
-    out.push('<small class="muted" title="No LibreDrive, so MakeMKV cannot read a UHD disc in this drive. Standard Blu-ray and DVD are fine.">standard discs only</small>');
-  if (d.libredrive === false && d.disc_bytes > UHD_FLOOR_BYTES)
+  if (d.uhd_ok === true)
+    out.push('<small class="muted" title="This drive has read a UHD (BD-66/BD-100) disc.">UHD \u2713</small>');
+  else if (d.uhd_ok === false)
+    out.push('<small class="muted" title="This drive failed to read a UHD disc (no LibreDrive). Standard Blu-ray and DVD are fine.">standard discs only</small>');
+  if (d.uhd_ok === false && d.disc_bytes > UHD_FLOOR_BYTES)
     out.push('<small style="color:#f85149;">\u26a0 This looks like a UHD disc ('
       + Math.round(d.disc_bytes/1e9) + ' GB) and this drive cannot read it \u2014 '
       + 'move it to a drive with LibreDrive.</small>');
