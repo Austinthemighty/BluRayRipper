@@ -43,13 +43,92 @@ class Drive:
     makemkv_blind: bool = False  # OS sees a disc here but makemkvcon can't open the drive
 
 
+# --- Linux optical probing ---------------------------------------------------
+#
+# The three os_* helpers below answer "what does the OPERATING SYSTEM think is
+# in this drive", independently of makemkvcon. Every one of them was Windows
+# only, so on a Linux rip box makemkvcon's cached quick probe was the single
+# source of truth about a disc: when it reported nothing, the panel showed
+# nothing, with no recovery and no way to tell an empty drive from a drive that
+# had dropped off the bus. That is the half of "the newer drive doesn't find
+# discs" that is ours rather than the drive's.
+
+# CDROM_DRIVE_STATUS from <linux/cdrom.h>: the kernel's own media answer, and
+# the only one that needs neither root, nor a mount, nor a read of the disc.
+_CDROM_DRIVE_STATUS = 0x5326
+_CDS_DISC_OK = 4
+
+
+def _linux_optical_devices() -> list[str]:
+    """Every /dev/srN the kernel has created, in index order."""
+    import glob as _glob
+    import re as _re
+
+    def key(dev: str) -> int:
+        m = _re.search(r"(\d+)$", dev)
+        return int(m.group(1)) if m else 0
+
+    return sorted(_glob.glob("/dev/sr[0-9]*"), key=key)
+
+
+def _linux_media_present(device: str) -> bool:
+    """Whether ``device`` holds readable media, via CDROM_DRIVE_STATUS.
+
+    O_NONBLOCK is what makes this safe to poll: opening an optical device
+    normally waits for the disc to spin up and settle, which on a drive that has
+    stopped answering is exactly the unbounded wait we must not take."""
+    import fcntl
+    import os as _os
+
+    try:
+        fd = _os.open(device, _os.O_RDONLY | _os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        return fcntl.ioctl(fd, _CDROM_DRIVE_STATUS, 0) == _CDS_DISC_OK
+    except OSError:
+        return False
+    finally:
+        try:
+            _os.close(fd)
+        except OSError:
+            pass
+
+
+def _linux_disc_label(device: str) -> str | None:
+    """The volume label udev read when the disc was inserted, or None.
+
+    Asked of udev rather than parsed off the disc: commercial Blu-rays are UDF,
+    DVDs are ISO 9660, and udev's probe already knows both. Cold path only (a
+    full enumeration), never the media poll."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["udevadm", "info", "--query=property", f"--name={device}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.stdout.splitlines():
+        key, _, value = line.partition("=")
+        if key == "ID_FS_LABEL" and value.strip():
+            return value.strip()
+    return None
+
+
 def os_disc_label(device: str | None) -> str | None:
     """The OS's volume label for an optical drive letter (Windows only), or None.
 
     makemkvcon's quick drive enumeration sometimes reports NO disc for a disc the
-    OS has mounted (so it's visible in File Explorer). Reading the Windows volume
-    label recovers the disc name in that case. Best-effort; never raises."""
-    if not sys.platform.startswith("win") or not device:
+    OS has mounted (so it's visible in File Explorer, or `lsblk` on Linux shows
+    its label). Reading the OS's own volume label recovers the disc name in that
+    case. Best-effort; never raises."""
+    if not device:
+        return None
+    if not sys.platform.startswith("win"):
+        if sys.platform.startswith("linux") and _linux_media_present(device):
+            return _linux_disc_label(device)
         return None
     letter = device.strip().rstrip("\\/").rstrip(":")
     if len(letter) != 1 or not letter.isalpha():
@@ -75,11 +154,23 @@ def os_disc_label(device: str | None) -> str | None:
 def os_optical_drives() -> list[tuple[str, str | None]]:
     """(drive_letter, volume_label) for each Windows optical drive that has media.
 
+    On Linux the pair is (device, label) — "/dev/sr1" rather than "F:" — which is
+    the same form ``Drive.device`` takes there, so the caller's de-duplication
+    against the drives makemkvcon did enumerate lines up on both platforms.
+
     Lets the app show a disc the OS has mounted (visible in File Explorer) even
     when makemkvcon can't enumerate the drive at all — a wedged/half-offline
-    drive returns "no usable optical drives". Empty off Windows or on error."""
+    drive returns "no usable optical drives". Empty on an unsupported OS or on
+    error."""
     if not sys.platform.startswith("win"):
-        return []
+        if not sys.platform.startswith("linux"):
+            return []
+        try:
+            return [(dev, _linux_disc_label(dev))
+                    for dev in _linux_optical_devices()
+                    if _linux_media_present(dev)]
+        except Exception:
+            return []
     try:
         import ctypes
 
@@ -112,10 +203,21 @@ def os_media_snapshot() -> dict[str, str] | None:
     Cheap enough to poll every couple of seconds, and — unlike makemkvcon — it
     keeps answering while a rip has a drive busy. Used to spot a tray closing on a
     new disc right away instead of waiting for the next full enumeration. A None
-    return means "can't tell", so callers must keep doing their regular poll."""
-    if not sys.platform.startswith("win"):
+    return means "can't tell", so callers must keep doing their regular poll.
+
+    On Linux the value is a placeholder, not the label: this is polled, and only
+    the KEYS have to change when a tray does. Reading a label costs a subprocess
+    per drive, which belongs on the enumeration path (os_disc_label), not here.
+    """
+    if sys.platform.startswith("win"):
+        return dict(os_optical_drives())
+    if not sys.platform.startswith("linux"):
         return None
-    return dict(os_optical_drives())
+    try:
+        return {dev: "disc" for dev in _linux_optical_devices()
+                if _linux_media_present(dev)}
+    except Exception:
+        return None
 
 
 def parse_drives(lines: list[str]) -> list[Drive]:
