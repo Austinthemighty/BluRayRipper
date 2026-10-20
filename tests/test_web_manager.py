@@ -2190,3 +2190,45 @@ async def test_only_a_real_read_error_brands_a_drive_as_unable(manager, monkeypa
     manager.add_disc("disc:1")
     await _settle()
     assert manager.drive_caps.uhd_ok(_BAD) is None, "a standard disc said nothing"
+
+
+async def test_a_rip_retrying_a_failing_read_counts_as_stalled(manager):
+    """Job 367 ripped 20 GB of a 63 GB UHD title, then the drive stopped
+    answering a SCSI command. MakeMKV retried it every ~80 seconds, forever.
+
+    Every retry wrote a log line, and a log line counted as activity — so the
+    watchdog saw a busy job: frozen progress bar, no stall flag, and therefore
+    no Requeue button. The only way out was deleting the job. Activity is not
+    movement, and the difference is the entire point of the watchdog."""
+    from blurayripper.web.manager import _Reporter
+
+    reporter = _Reporter(manager, WebJob(id=367, source="disc:0"))
+    wj = reporter._wj
+    wj._pipeline_job = job = Job(source="disc:0")
+    job.state = wj.state = JobState.RIPPING
+    wj.selected_title_ids = job.selected_title_ids = [3]
+    job.checkpoints = {3: {}}                    # nothing ripped yet
+    wj._activity_at = wj._progress_at = time.monotonic()
+
+    reporter.on_progress("Rip t3: Decrypting · 1235.2 MB/s (274.5x)", 0.3256)
+    assert manager._is_stalled(wj, JobState.RIPPING) is False
+
+    # Age everything past the window, then let the retries keep logging.
+    window = manager.settings.rip_stall_after_seconds
+    wj._activity_at -= window + 5
+    wj._progress_at -= window + 5
+    for _ in range(3):
+        reporter.on_event("Error 'Scsi error - HARDWARE ERROR:TIMEOUT ON "
+                          "LOGICAL UNIT' occurred while issuing SCSI command")
+        # The SAME stage and fraction, re-reported: busy, but not advancing.
+        reporter.on_progress("Rip t3: Decrypting · 1235.2 MB/s (274.5x)", 0.3256)
+
+    assert manager._is_stalled(wj, JobState.RIPPING) is True, \
+        "a retry loop kept the job looking alive"
+    kind, detail = manager._stall_info(wj, JobState.RIPPING, True)
+    assert kind == "no_progress"
+    assert "not advancing" in detail and "same place" in detail
+
+    # Real movement clears it again, so a slow-but-working rip is never flagged.
+    reporter.on_progress("Rip t3: Decrypting · 1240.0 MB/s (275.0x)", 0.3301)
+    assert manager._is_stalled(wj, JobState.RIPPING) is False

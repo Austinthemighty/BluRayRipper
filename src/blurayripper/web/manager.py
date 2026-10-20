@@ -152,6 +152,11 @@ class WebJob:
     preview_on: object = None   # Path to grain-on still
     preview_off_clip: object = None  # Path to grain-off playable clip (mp4)
     preview_on_clip: object = None   # Path to grain-on playable clip
+    # The stall watchdog needs both: _activity_at is "something happened", which
+    # a retry loop keeps bumping forever, and _progress_at is "something moved".
+    _activity_at: float | None = None
+    _progress_at: float | None = None
+    _progress_key: tuple | None = None   # (stage, progress) last seen moving
     _pipeline_job: object = None  # the underlying pipeline.Job once scanned
     _grain_future: object = None  # asyncio.Future resolved when user picks grain
     _task: object = None          # the asyncio.Task running scan/process (for cancel)
@@ -171,10 +176,19 @@ class _Reporter:
         self._m.bus.publish()
 
     def on_progress(self, stage: str, fraction: float | None) -> None:
-        self._wj.stage = stage
+        wj = self._wj
+        wj.stage = stage
         if fraction is not None:
-            self._wj.progress = fraction
-        self._wj._activity_at = time.monotonic()
+            wj.progress = fraction
+        now = time.monotonic()
+        wj._activity_at = now
+        # Only a CHANGE is progress. A tool that re-reports the same stage and
+        # fraction while it retries a failing read is busy, not advancing, and
+        # the difference is the whole point of the watchdog.
+        key = (stage, round(wj.progress, 4))
+        if key != wj._progress_key:
+            wj._progress_key = key
+            wj._progress_at = now
         self._m.bus.publish()
 
     def checkpoint(self) -> None:
@@ -635,6 +649,20 @@ class JobManager:
             return None, None
         if live_state in self._ACTIVE_RIP_STATES:
             if self._rip_pending(wj):
+                # Distinguish "gone quiet" from "still shouting, still stuck":
+                # the second looks healthy at a glance, and the disc or drive is
+                # the thing to fix rather than the queue.
+                now, moved = time.monotonic(), getattr(wj, "_progress_at", None)
+                active = getattr(wj, "_activity_at", None)
+                window = self.settings.rip_stall_after_seconds
+                if (moved is not None and active is not None
+                        and (now - moved) > window >= (now - active)):
+                    return "no_progress", (
+                        "Still logging but not advancing — the drive is retrying "
+                        "a read it can't complete, so the progress bar is frozen "
+                        "where it stopped. Requeue cancels it and resumes from "
+                        "the last checkpoint; if it stops in the same place "
+                        "again, the disc or that drive is the problem.")
                 return "rip_unfinished", (
                     "The rip stopped before it finished — a bad disc, or a drive "
                     "that stopped answering. The disc is still needed: Requeue "
@@ -667,6 +695,17 @@ class JobManager:
             # first sight instead, so there is something to measure from.
             last = wj._activity_at = now
         if (now - last) > window:
+            return True
+        # Silence is not the only way to be stuck. A rip that hits a failing read
+        # retries it, and every retry writes a log line, which counts as
+        # activity — so a drive erroring on the same sector forever looked
+        # perfectly healthy: busy log, frozen progress bar, no stall flag and
+        # therefore no Requeue button, with nothing to do but delete the job.
+        # Measure movement too.
+        moved = getattr(wj, "_progress_at", None)
+        if moved is None:
+            moved = wj._progress_at = now
+        if (now - moved) > window:
             return True
         # A rip only ever runs as a LOCAL task on the rip box — workers encode,
         # they never rip. So no live task means nothing is moving this job, and
@@ -2228,7 +2267,7 @@ class JobManager:
 
     async def _run_job(self, wj: WebJob) -> None:
         reporter = _Reporter(self, wj)
-        wj._activity_at = time.monotonic()  # baseline for the rip-stall watchdog
+        wj._activity_at = wj._progress_at = time.monotonic()  # watchdog baseline
         wj._log_mark = len(wj.log)          # a failure hint reads only this run
         job = wj._pipeline_job
         job.selected_title_ids = wj.selected_title_ids
