@@ -207,3 +207,35 @@ def test_only_a_fully_wrapped_query_counts_as_quoted():
     assert clean_tmdb_query('He said "hi" loudly', "tv")[0] == 'He said "hi" loudly'
     # Unclosed quote -> normal cleaning still applies.
     assert clean_tmdb_query('"Breaking Bad Season 4', "tv")[2] == 4
+
+
+def test_a_spelled_out_season_in_brackets_still_finds_the_show():
+    """"Landman: Season Two (Disc 1)" is a real MakeMKV disc name, and TMDB
+    returned nothing for it until it was retyped as "Landman" by hand.
+
+    Two separate gaps, and the first one caused the second. The tail stripper
+    only peels from the END, so the ")" of "(Disc 1)" stopped it dead — and with
+    the disc descriptor still attached, nothing behind it could be peeled
+    either. Then "Season Two" would have survived anyway, because only digits
+    were accepted after "Season"."""
+    from blurayripper.services.naming import clean_tmdb_query
+
+    assert clean_tmdb_query("Landman: Season Two (Disc 1)", "tv") == ("Landman", None, 2)
+    assert clean_tmdb_query("Landman: Season Two", "tv") == ("Landman", None, 2)
+    assert clean_tmdb_query("Landman [Disc 1]", "tv") == ("Landman", None, None)
+
+    # The season comes back too, so the naming form stops needing it typed for
+    # every disc of the set.
+    assert clean_tmdb_query("House: The Complete Fifth Season Disc 2", "tv") \
+        == ("House", None, 5)
+    assert clean_tmdb_query("Fargo Season Three", "tv") == ("Fargo", None, 3)
+
+    # Still no false positives: a number word is only noise after a descriptor.
+    assert clean_tmdb_query("Ocean's Eleven", "movie") == ("Ocean's Eleven", None, None)
+    assert clean_tmdb_query("Mission: Impossible", "movie") \
+        == ("Mission: Impossible", None, None)
+    assert clean_tmdb_query("Kill Bill: Vol. 1", "movie") \
+        == ("Kill Bill: Vol. 1", None, None)
+    # Stripping everything leaves the original rather than an empty search.
+    assert clean_tmdb_query("The Complete Second Season", "tv")[0] \
+        == "The Complete Second Season"

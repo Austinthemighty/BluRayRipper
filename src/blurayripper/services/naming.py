@@ -71,6 +71,26 @@ def _normalize_separators(query: str) -> str:
     return re.sub(r"\s{2,}", " ", q).strip()
 
 
+# Disc labels spell numbers out at least as often as they use digits: "Landman:
+# Season Two (Disc 1)" is a real MakeMKV disc name, and TMDB matches nothing for
+# it while "Landman" matches at once. Twenty covers any real box set.
+_NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
+    "eighteen": 18, "nineteen": 19, "twenty": 20,
+}
+_ORDINAL_WORDS = {
+    "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6,
+    "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10, "eleventh": 11,
+    "twelfth": 12, "thirteenth": 13, "fourteenth": 14, "fifteenth": 15,
+    "sixteenth": 16, "seventeenth": 17, "eighteenth": 18, "nineteenth": 19,
+    "twentieth": 20,
+}
+_NUMBER_WORD_RE = "|".join(_NUMBER_WORDS)
+_ORDINAL_WORD_RE = "|".join(_ORDINAL_WORDS)
+
+
 # Disc/side descriptor: "Disc 2", "D2", "Disc2". The bare "d" form only counts
 # when it's a standalone token, so a title word can't be read as a disc number.
 _DISC_RE = re.compile(r"\b(?:disc|disk)\s*0*(\d{1,2})\b|\bd\s*0*(\d{1,2})\b", re.IGNORECASE)
@@ -156,6 +176,16 @@ def clean_tmdb_query(query: str, kind: str = "movie") -> tuple[str, int | None, 
         sm = re.search(r"\b(?:season|s)\s*0*(\d{1,2})\b", q, flags=re.IGNORECASE)
         if sm:
             season = int(sm.group(1))
+        else:
+            # "Season Two" and "The Complete Fifth Season" are as common on a
+            # box set's discs as "S02", and both left the season blank — so the
+            # naming form had to be filled in by hand for every disc of the set.
+            wm = re.search(rf"\bseasons?\s+({_NUMBER_WORD_RE})\b", q, re.IGNORECASE)
+            om = re.search(rf"\b({_ORDINAL_WORD_RE})\s+seasons?\b", q, re.IGNORECASE)
+            if wm:
+                season = _NUMBER_WORDS[wm.group(1).lower()]
+            elif om:
+                season = _ORDINAL_WORDS[om.group(1).lower()]
 
     # Peel trailing authoring descriptors: "Season 2", "Disc 1", "S01", "D2".
     # "Volume/Vol" and the Sxx/Dxx short forms are TV-only — real movie titles use
@@ -172,7 +202,22 @@ def clean_tmdb_query(query: str, kind: str = "movie") -> tuple[str, int | None, 
     words = r"season|seasons|disc|disk|ntsc|pal"
     if kind == "tv":
         words += r"|volume|vol\.?|s0*\d+|d0*\d+"
-    tail = re.compile(rf"[\s:_.\-]*\b(?:{words})\b\s*\d*\s*$", re.IGNORECASE)
+    if kind == "tv":
+        # Before the tail loop, and not anchored to the end: the loop peels
+        # "Disc 2" off first, which takes "Season" with it and leaves "House:
+        # The Complete Fifth" — a title TMDB likes no better than the original.
+        q = re.sub(rf"[\s:_.\-]*\b(?:the\s+)?complete\s+"
+                   rf"(?:{_ORDINAL_WORD_RE})\s+seasons?\b", " ", q,
+                   flags=re.IGNORECASE).strip()
+
+    # Brackets and number WORDS both used to defeat this. The loop only strips
+    # from the END, so the ")" of "(Disc 1)" stopped it dead — and with the disc
+    # descriptor left in place nothing further could be peeled either, which is
+    # how "Landman: Season Two (Disc 1)" reached TMDB intact and matched nothing.
+    tail = re.compile(
+        rf"[\s:_.\-]*[(\[]?\s*\b(?:{words})\b\s*(?:\d+|{_NUMBER_WORD_RE})?"
+        rf"\s*[)\]]?\s*$",
+        re.IGNORECASE)
     prev = None
     while prev != q:  # repeat for stacked descriptors ("Season 2 Disc 1")
         prev = q
