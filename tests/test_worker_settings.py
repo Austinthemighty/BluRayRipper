@@ -162,7 +162,9 @@ def test_boxset_plan_reports_bad_csv(tmp_path):
 
     c = TestClient(_boxset_app(tmp_path))
     r = c.post("/api/boxsets", json={"csv": "nope,nothing\nx,y\n"}).json()
-    assert r["errors"] and any("disc_label" in e for e in r["errors"])
+    # "show" is the one column every row must have — the label is optional now,
+    # because a box set prints the same one on all of its discs.
+    assert r["errors"] and any("show" in e for e in r["errors"])
     assert r["rows"] == []
     assert c.post("/api/boxsets", json={"csv": 5}).status_code == 400
 

@@ -1291,20 +1291,33 @@ function buildMapping(card, j){
         const s = +tv.querySelector('[data-season]').value;
         const note = tv.querySelector('[data-continues]');
         if (!state.chosen || !s) { note.textContent=''; return; }
+        const d = +tv.querySelector('[data-discno]').value || 0;
         let r;
         try {
           // .title, not .name: the TMDB route normalises a show's name into
           // "title", and this must be the SAME string the assignments store as
           // show_or_movie_title or the lookup counts a separate show.
-          r = await api('GET', `/api/next-episode?show=${encodeURIComponent(state.chosen.title||'')}&season=${s}`);
+          r = await api('GET', `/api/next-episode?show=${encodeURIComponent(state.chosen.title||'')}`
+            + `&season=${s}` + (d ? `&disc=${d}` : ''));
         } catch(e) { note.textContent=''; return; }
         if (!r || !r.basis || !r.basis.length) { note.textContent=''; return; }
-        const done = r.basis.reduce((n,b)=>n+b.count, 0);
-        const last = r.basis[r.basis.length-1];
-        const n = sel().length || 1;
-        note.innerHTML = `Season ${s} already has <b>${done} episode${done===1?'':'s'}</b> named `
-          + `(up to E${pad(last.last)}, job #${last.job}), so this disc continues at `
-          + `<b>E${pad(r.next)}</b>`+ (n>1 ? `–E${pad(r.next+n-1)}` : '') + `.`;
+        const b0 = r.basis[0];
+        if (b0.plan) {
+          // The plan was written from the cases, so it knows about discs you
+          // skipped or ripped on the other drive. Say where the answer came
+          // from — a number with no provenance is one nobody will question.
+          note.innerHTML = `From your box-set plan: <b>S${pad(b0.season)} D${pad(b0.disc)}</b>`
+            + (b0.collection ? ` (disc ${b0.collection} of the whole set)` : '')
+            + (b0.count ? ` holds <b>${b0.count} episode${b0.count===1?'':'s'}</b>,` : '')
+            + ` <b>E${pad(b0.first)}${b0.last&&b0.last!==b0.first?'–E'+pad(b0.last):''}</b>.`;
+        } else {
+          const done = r.basis.reduce((n,b)=>n+b.count, 0);
+          const last = r.basis[r.basis.length-1];
+          const n = sel().length || 1;
+          note.innerHTML = `Season ${s} already has <b>${done} episode${done===1?'':'s'}</b> named `
+            + `(up to E${pad(last.last)}, job #${last.job}), so this disc continues at `
+            + `<b>E${pad(r.next)}</b>`+ (n>1 ? `–E${pad(r.next+n-1)}` : '') + `.`;
+        }
         // Only move the field if it is still showing a guess the user hasn't touched.
         const fe = tv.querySelector('[data-firstep]');
         if (!fe.dataset.touched) fe.value = r.next;
@@ -1313,6 +1326,7 @@ function buildMapping(card, j){
         e.target.dataset.touched = '1';
       });
       tv.querySelector('[data-season]').addEventListener('change', continueFromPreviousDiscs);
+      tv.querySelector('[data-discno]').addEventListener('change', continueFromPreviousDiscs);
       continueFromPreviousDiscs();
       const epOptions = (num) => state.episodes.map(e=>
         `<option value="${e.episode}" ${e.episode===num?'selected':''}>E${pad(e.episode)} — ${e.name||'?'}${e.runtime?' · '+e.runtime+'m':''}</option>`).join('');

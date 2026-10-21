@@ -313,14 +313,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": True}
 
     @app.get("/api/next-episode")
-    async def next_episode(show: str, season: int):
+    async def next_episode(show: str, season: int, disc: int | None = None):
         """Where the next disc of a box set should start numbering.
 
         A box set's discs usually carry the same volume label and no disc
         number, so "which episodes are on this one" cannot be read off the disc.
         It can be read off the discs already named: continue after the highest
         episode this show and season has been given."""
-        nxt, basis = manager.next_episode_for(show, season)
+        nxt, basis = manager.next_episode_for(show, season, disc)
         return {"next": nxt, "basis": basis}
 
     @app.post("/api/jobs/{job_id}/mapping")

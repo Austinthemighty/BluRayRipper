@@ -3002,7 +3002,8 @@ class JobManager:
         # queued / scanning / selecting / ripping / confirming / identifying / awaiting_*
         return "rip"
 
-    def next_episode_for(self, show: str, season: int) -> tuple[int, list[dict]]:
+    def next_episode_for(self, show: str, season: int,
+                         disc: int | None = None) -> tuple[int, list[dict]]:
         """(the first unused episode number, what that was read from).
 
         A box set's discs rarely say which disc they are, and even when they do,
@@ -3017,6 +3018,17 @@ class JobManager:
         than renumbered. Returns the basis as well as the answer so the form can
         show its working instead of producing a number from nowhere.
         """
+        # A box-set plan, where there is one, is not a guess — it was written
+        # from the cases. It wins over counting what has been ripped so far,
+        # which cannot know about a disc you skipped or ripped elsewhere.
+        planned = self._planned_disc(show, season, disc)
+        if planned is not None and planned.first_episode:
+            return planned.first_episode, [{
+                "plan": True, "season": planned.season, "disc": planned.disc,
+                "collection": planned.collection, "year": planned.year,
+                "first": planned.first_episode, "last": planned.last_episode,
+                "count": planned.episodes,
+            }]
         want = (show or "").strip().casefold()
         highest, basis = 0, []
         for wj in self.jobs.values():
@@ -3031,6 +3043,17 @@ class JobManager:
                           "count": len(episodes)})
         basis.sort(key=lambda b: b["first"])
         return highest + 1, basis
+
+    def _planned_disc(self, show: str, season: int | None, disc: int | None):
+        """The box-set plan's row for this disc, or None. Never raises: a plan
+        that cannot be read must not stop a disc being named by hand."""
+        if disc is None and season is None:
+            return None
+        try:
+            rows = boxset_plan.load_rows(self.settings)
+        except Exception:
+            return None
+        return boxset_plan.find(rows, show, season, disc)
 
     def _label_hints(self, wj: WebJob) -> dict:
         """Season + disc-in-set read off the disc label, e.g.

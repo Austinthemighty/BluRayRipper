@@ -31,12 +31,38 @@ PLAN_FILENAME = "boxsets.local.csv"
 
 # Only the first two are required; the rest are inferred from the disc label when
 # blank (a label like HAWAII_FIVE_0_S1_D4 already states season and disc number).
-COLUMNS = ("disc_label", "show", "year", "season", "first_episode", "episodes")
+COLUMNS = ("disc_label", "show", "year", "season", "disc", "collection",
+           "first_episode", "episodes")
+
+# What people actually type in a spreadsheet, folded to the names above. Written
+# out rather than guessed at because a header this file does not recognise is
+# reported as unknown and its column silently ignored — and "Disk" vs "disc" is
+# not a mistake worth making someone hunt for.
+_HEADER_ALIASES = {
+    "disc label": "disc_label", "disk label": "disc_label",
+    "disc name": "disc_label", "disk name": "disc_label",
+    "label": "disc_label", "volume label": "disc_label",
+    "show": "show", "series": "show", "title": "show",
+    "year": "year",
+    "season": "season",
+    "disc": "disc", "disk": "disc",
+    "disc number": "disc", "disk number": "disc",
+    "disc in season": "disc", "disk in season": "disc",
+    "collection": "collection",
+    "collection number": "collection",
+    "disc collection number": "collection", "disk collection number": "collection",
+    "set number": "collection", "disc of set": "collection",
+    "first episode": "first_episode", "start episode": "first_episode",
+    "episodes": "episodes", "episode count": "episodes", "number of episodes": "episodes",
+}
 
 EXAMPLE_CSV = """\
-disc_label,show,year,season,first_episode,episodes
-HAWAII_FIVE_0_S1_*,Hawaii Five-0,2010,,,
-THE_OFFICE_S3_D2,The Office,2005,3,9,4
+disc_label,show,year,season,disc,collection,first_episode,episodes
+HAWAII_FIVE_0_S1_*,Hawaii Five-0,2010,,,,,
+,How I Met Your Mother,2005,1,1,1,,8
+,How I Met Your Mother,2005,1,2,2,,8
+,How I Met Your Mother,2005,1,3,3,,6
+,How I Met Your Mother,2005,2,1,4,,8
 """
 
 
@@ -44,20 +70,34 @@ THE_OFFICE_S3_D2,The Office,2005,3,9,4
 class PlanRow:
     """One CSV line: which discs it covers, and what they are."""
 
-    disc_label: str                    # match pattern; a trailing "*" is a wildcard
-    show: str
+    # Match pattern; a trailing "*" is a wildcard. OPTIONAL: a box set normally
+    # prints one label on all of its discs ("HIMYM" on every one of 28), so for
+    # most sets there is nothing here to write. Such a row cannot name a disc on
+    # insertion — nothing identifies it — but it still answers "season 2, disc 3:
+    # which episodes?" when the disc is named by hand.
+    disc_label: str = ""
+    show: str = ""
     year: int | None = None
     season: int | None = None          # blank -> read from the disc label
-    first_episode: int | None = None   # blank -> derived from the disc number
+    disc: int | None = None            # disc WITHIN the season (S2 D3)
+    collection: int | None = None      # disc within the whole set (disc 15 of 28)
+    first_episode: int | None = None   # blank -> summed from earlier discs
     episodes: int | None = None        # expected count; a mismatch parks the job
     line: int = 0                      # source line, for error messages
 
     def as_dict(self) -> dict:
         return {
             "disc_label": self.disc_label, "show": self.show, "year": self.year,
-            "season": self.season, "first_episode": self.first_episode,
+            "season": self.season, "disc": self.disc, "collection": self.collection,
+            "first_episode": self.first_episode,
             "episodes": self.episodes, "line": self.line,
         }
+
+    @property
+    def last_episode(self) -> int | None:
+        if self.first_episode is None or not self.episodes:
+            return None
+        return self.first_episode + self.episodes - 1
 
 
 @dataclass
@@ -131,15 +171,16 @@ def parse_csv(text: str) -> tuple[list[PlanRow], list[str]]:
         return rows, [f"The CSV could not be read: {exc}."]
     if not fieldnames:
         return rows, ["The CSV needs a header row: " + ",".join(COLUMNS)]
-    header = {(h or "").strip().lower() for h in fieldnames}
-    for required in ("disc_label", "show"):
-        if required not in header:
-            errors.append(f"Missing required column “{required}”.")
+    canon = {(h or ""): _canonical_header(h) for h in fieldnames}
+    header = {name for name in canon.values() if name}
+    if "show" not in header:
+        errors.append("Missing required column “show”.")
     if errors:
         return rows, errors
-    unknown = header - set(COLUMNS)
+    unknown = sorted(raw.strip() for raw, name in canon.items()
+                     if raw.strip() and name is None)
     if unknown:
-        errors.append("Ignoring unknown column(s): " + ", ".join(sorted(unknown)))
+        errors.append("Ignoring unknown column(s): " + ", ".join(unknown))
 
     seen: set[str] = set()
     rest = iter(reader)
@@ -159,27 +200,45 @@ def parse_csv(text: str) -> tuple[list[PlanRow], list[str]]:
             errors.append(f"line {line}: unreadable ({exc}); check for an unclosed "
                           'quote (") above this line. Nothing after it was read.')
             break
-        cell = {(k or "").strip().lower(): (v or "") for k, v in raw.items() if k}
+        cell = {}
+        for k, v in raw.items():
+            name = _canonical_header(k) if k else None
+            if name:
+                cell[name] = v or ""
         label = cell.get("disc_label", "").strip()
         show = cell.get("show", "").strip()
         if not label and not show:
             continue  # blank line
-        if not label:
-            errors.append(f"line {line}: disc_label is required.")
-            continue
         if not show:
             errors.append(f"line {line}: show is required.")
             continue
-        key = _norm(label)
+        season = _int(cell.get("season"), "season", line, errors)
+        disc = _int(cell.get("disc"), "disc", line, errors, minimum=1)
+        collection = _int(cell.get("collection"), "collection", line, errors, minimum=1)
+        # A row has to be findable by SOMETHING. With a label it names a disc on
+        # insertion; without one it is still a usable answer to "season 2, disc
+        # 3 — which episodes?", but only if it says which disc it describes.
+        if not label and disc is None and collection is None:
+            errors.append(
+                f"line {line}: needs a disc_label, or a season and disc number "
+                f"(or a collection number) — otherwise nothing identifies it.")
+            continue
+        key = (_norm(label) if label
+               else f"{_norm(show)}|s{season}|d{disc}|c{collection}")
         if key in seen:
-            errors.append(f"line {line}: duplicate disc_label “{label}” — the first one wins.")
+            errors.append(
+                f"line {line}: duplicate "
+                + (f"disc_label “{label}”" if label else f"row for “{show}”")
+                + " — the first one wins.")
             continue
         seen.add(key)
         rows.append(PlanRow(
             disc_label=label,
             show=show,
             year=_int(cell.get("year"), "year", line, errors),
-            season=_int(cell.get("season"), "season", line, errors),
+            season=season,
+            disc=disc,
+            collection=collection,
             # Episodes are numbered from 1 — Plex has no E00. Anything below it
             # is a typo, and unlike a wrong `episodes` count nothing downstream
             # catches it: the number goes straight into the filename.
@@ -188,7 +247,78 @@ def parse_csv(text: str) -> tuple[list[PlanRow], list[str]]:
             episodes=_int(cell.get("episodes"), "episodes", line, errors),
             line=line,
         ))
+    _derive_first_episodes(rows)
     return rows, errors
+
+
+def _canonical_header(name: str | None) -> str | None:
+    """The column a header means, or None if it means nothing to us.
+
+    Spreadsheets get typed by hand, so "Disk collection number", "disc_label"
+    and "Episodes" all have to land on the same three columns.
+    """
+    key = re.sub(r"[\s_]+", " ", (name or "").strip().casefold())
+    if key in COLUMNS:
+        return key
+    return _HEADER_ALIASES.get(key)
+
+
+def _derive_first_episodes(rows: list[PlanRow]) -> None:
+    """Fill in each disc's first episode by summing the discs before it.
+
+    A box-set spreadsheet lists how many episodes are on each disc, because that
+    is what you can see by looking at the case. Where each disc STARTS is then
+    arithmetic nobody should be doing by hand: season 1 disc 3 begins at episode
+    17 precisely because discs 1 and 2 held eight each.
+
+    Only within one show and season, only for rows that give a disc number and a
+    count, and never over a row that states its own first_episode — a stated
+    number is a correction, and a set with a double-length opener needs one.
+    Stops at the first gap: if disc 2's count is missing, disc 3 cannot be
+    placed, and a guess would silently misname a whole disc.
+    """
+    groups: dict[tuple, list[PlanRow]] = {}
+    for row in rows:
+        if row.disc is None or row.season is None:
+            continue
+        groups.setdefault((_norm(row.show), row.season), []).append(row)
+    for group in groups.values():
+        group.sort(key=lambda r: r.disc or 0)
+        nxt: int | None = 1
+        for row in group:
+            if row.first_episode is None and nxt is not None:
+                row.first_episode = nxt
+            if row.first_episode is not None and row.episodes:
+                nxt = row.first_episode + row.episodes
+            else:
+                nxt = None          # a gap: everything after it is unknowable
+
+
+def find(rows: list[PlanRow], show: str, season: int | None = None,
+         disc: int | None = None, collection: int | None = None) -> PlanRow | None:
+    """The row describing one disc of ``show``, looked up by its NUMBER.
+
+    The other direction from ``match``: that one answers "a disc with this label
+    just went in, what is it?", which needs a label the disc actually prints.
+    This answers "I am holding season 2 disc 3, what is on it?", which is the
+    question a box set leaves you with when all its discs are labelled alike.
+
+    A collection number identifies a disc on its own — it counts through the
+    whole set — so it is tried first; season+disc needs both to mean anything.
+    """
+    want = _norm(show)
+    if not want:
+        return None
+    candidates = [r for r in rows if _norm(r.show) == want]
+    if collection is not None:
+        for row in candidates:
+            if row.collection == collection:
+                return row
+    if season is not None and disc is not None:
+        for row in candidates:
+            if row.season == season and row.disc == disc:
+                return row
+    return None
 
 
 def match(rows: list[PlanRow], label: str | None) -> PlanRow | None:
