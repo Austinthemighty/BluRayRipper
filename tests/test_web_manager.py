@@ -2392,3 +2392,71 @@ async def test_waiting_for_a_grain_choice_does_not_hold_the_drive(manager):
 
     # Releasing twice must not blow up when the slot finally unwinds.
     assert manager._drive_locks["disc:0"].locked() is False
+
+
+async def test_merging_duplicates_keeps_the_rip_not_just_the_naming(manager, monkeypatch):
+    """Job 369 ripped the disc; job 370 was its duplicate and absorbed it. The
+    merge carried the naming across and then called remove() on 369 — which
+    deletes the staging directory. The finished rip went with it, and 370 was
+    left asking for a disc that had already been ripped half an hour earlier.
+
+    Naming is a minute of typing. A rip is half an hour of disc I/O, and the
+    merge exists to consolidate work, not to destroy it."""
+    from blurayripper.models import EpisodeAssignment, MediaKind
+    from blurayripper.pipeline import Job
+
+    wiped = []
+    monkeypatch.setattr("blurayripper.web.manager.library.cleanup",
+                        lambda p: wiped.append(str(p)))
+
+    def _dupe(jid, ripped):
+        wj = WebJob(id=jid, source="disc:1", state=JobState.QUEUED)
+        wj.fingerprint = "fp_landman_s2d3"
+        wj._pipeline_job = job = Job(source="disc:1")
+        job.checkpoints = {t: dict(ripped_path=f"job_{jid}/rip/t{t:03d}/title.mkv")
+                           for t in ripped}
+        manager.jobs[jid] = wj
+        return wj
+
+    donor = _dupe(369, [0, 1, 2])
+    donor.assignments = {0: EpisodeAssignment(
+        title_id=0, kind=MediaKind.TV, show_or_movie_title="Landman",
+        season=2, episode=8)}
+    donor.selected_title_ids = [0, 1, 2]
+    keeper = _dupe(370, [])            # scanned the same disc, ripped nothing
+    keeper.selected_title_ids = [0, 1, 2]
+
+    result = await manager.merge_duplicates(370)
+
+    assert result["merged"] == [369]
+    # The rip came across, pointing at the donor's directory...
+    cps = keeper._pipeline_job.checkpoints
+    assert [cps[t]["ripped_path"] for t in (0, 1, 2)] == [
+        "job_369/rip/t000/title.mkv", "job_369/rip/t001/title.mkv",
+        "job_369/rip/t002/title.mkv"]
+    # ...so that directory must NOT have been deleted.
+    assert wiped == [], f"the adopted rip was deleted: {wiped}"
+    assert manager._rip_pending(keeper) is False, "it should not need the disc now"
+    assert any("won't be ripped again" in line for line in keeper.log)
+    assert keeper.assignments                      # naming still carried too
+
+
+async def test_a_duplicate_with_nothing_ripped_is_still_cleaned_up(manager, monkeypatch):
+    """Sparing the staging directory is for work that was adopted. A duplicate
+    that ripped nothing has nothing worth keeping, and leaving its directory
+    behind would leak disk on the NAS on every merge."""
+    from blurayripper.pipeline import Job
+
+    wiped = []
+    monkeypatch.setattr("blurayripper.web.manager.library.cleanup",
+                        lambda p: wiped.append(str(p)))
+    for jid in (380, 381):
+        wj = WebJob(id=jid, source="disc:1", state=JobState.QUEUED)
+        wj.fingerprint = "fp_empty"
+        wj._pipeline_job = Job(source="disc:1")
+        wj._pipeline_job.checkpoints = {}
+        manager.jobs[jid] = wj
+
+    await manager.merge_duplicates(381)
+
+    assert wiped and wiped[0].endswith("job_380")

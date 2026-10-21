@@ -2011,10 +2011,16 @@ class JobManager:
             await self.remove(jid)
         return len(ids)
 
-    async def remove(self, job_id: int) -> None:
+    async def remove(self, job_id: int, keep_staging: bool = False) -> None:
         """Remove any job from the queue. If it's running (or parked at the grain
         gate), cancel its task — which kills the active rip/encode subprocess —
-        then clean up its staging dir and drop it from the store."""
+        then clean up its staging dir and drop it from the store.
+
+        ``keep_staging`` leaves the ripped files behind, for the one case where
+        another job has adopted them: checkpoint paths are stored relative to the
+        staging ROOT, so a job can carry on from another job's directory, and
+        deleting it would destroy work that is now owned by a job that remains.
+        """
         wj = self.jobs.get(job_id)
         if wj is None:
             return
@@ -2037,8 +2043,9 @@ class JobManager:
         # blocks the event loop — so every client's SSE stalls — and remove_many
         # loops this once per job, which is how a bulk "remove completed" froze the
         # UI. Unlike the store calls below there's no circuit breaker to bound it.
-        await asyncio.to_thread(
-            library.cleanup, self.settings.storage.staging_dir / f"job_{wj.id}")
+        if not keep_staging:
+            await asyncio.to_thread(
+                library.cleanup, self.settings.storage.staging_dir / f"job_{wj.id}")
         self.jobs.pop(job_id, None)
         try:
             self.store.delete(job_id)
@@ -2843,9 +2850,38 @@ class JobManager:
                     wj.log.append(stamp_log(
                         f"Took the naming from job #{o.id}."))
                     break
+        # Carry the RIP over too, and this is the half that matters most: naming
+        # is a minute of typing, a finished rip is half an hour of disc I/O —
+        # and remove() deletes the staging directory. So merging duplicates
+        # destroyed the very work it exists to consolidate, leaving the survivor
+        # asking for a disc that had already been ripped.
+        #
+        # Checkpoint paths are relative to the staging ROOT, so the keeper can
+        # read the other job's files where they lie; they just must not be
+        # deleted underneath it.
+        adopted: set[int] = set()
+        keeper = wj._pipeline_job
+        for o in dupes:
+            donor = o._pipeline_job
+            if keeper is None or donor is None:
+                continue
+            taken = 0
+            for title_id, cp in (getattr(donor, "checkpoints", None) or {}).items():
+                if not cp.get("ripped_path"):
+                    continue
+                mine = keeper.checkpoints.setdefault(title_id, {})
+                if mine.get("ripped_path"):
+                    continue        # this copy already has that title
+                mine.update(cp)
+                taken += 1
+            if taken:
+                adopted.add(o.id)
+                wj.log.append(stamp_log(
+                    f"Took {taken} finished rip(s) from job #{o.id} — "
+                    f"this disc won't be ripped again."))
         merged = [o.id for o in dupes]
         for o in dupes:
-            await self.remove(o.id)
+            await self.remove(o.id, keep_staging=o.id in adopted)
         wj.log.append(stamp_log(
             "Merged " + ", ".join(f"#{i}" for i in merged) +
             " into this job — same disc, so they were all one piece of work."))
