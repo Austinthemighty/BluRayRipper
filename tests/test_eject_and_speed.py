@@ -310,20 +310,20 @@ async def test_a_detached_thread_still_reports_what_happened(monkeypatch):
     """Detaching is about who waits at EXIT, not about losing the result: a
     normal eject must still report success, and a failing one must still raise
     so the job logs why the tray didn't open."""
-    import blurayripper.pipeline as pl
+    from blurayripper.tools.process import in_detached_thread
 
-    assert await pl._in_detached_thread(lambda a, b: a + b, 2, 3) == 5
+    assert await in_detached_thread(lambda a, b: a + b, 2, 3) == 5
 
     def boom():
         raise RuntimeError("device is busy")
     with __import__("pytest").raises(RuntimeError, match="device is busy"):
-        await pl._in_detached_thread(boom)
+        await in_detached_thread(boom)
 
     # A caller that gave up must not crash the thread when it finally finishes.
     import asyncio as _aio
     import threading as _th
     release = _th.Event()
     with __import__("pytest").raises((TimeoutError, _aio.TimeoutError)):
-        await _aio.wait_for(pl._in_detached_thread(lambda: release.wait(5)), 0.05)
+        await _aio.wait_for(in_detached_thread(lambda: release.wait(5)), 0.05)
     release.set()
     await _aio.sleep(0.1)      # the abandoned thread settles against a dead future

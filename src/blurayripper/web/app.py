@@ -36,7 +36,8 @@ from ..services import naming
 from ..services.metadata import MetadataError, TMDBClient
 from ..services.notify import notify as send_notify
 from ..services.opensubtitles import OpenSubtitlesError
-from ..tools.eject import close_tray, eject
+from ..tools.eject import TRAY_TIMEOUT, close_tray, eject
+from ..tools.process import in_detached_thread
 from .manager import JobManager
 
 _STATIC = Path(__file__).parent / "static"
@@ -229,8 +230,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/drives/eject")
     async def drive_eject(body: DriveDevice):
         """Open a drive's tray."""
+        # Detached and bounded. Ejecting talks to the drive, so a drive that has
+        # stopped answering blocks for as long as it likes — and to_thread
+        # borrows the default executor, whose threads the interpreter joins at
+        # exit. Three clicks of this button on an unresponsive drive left three
+        # stuck threads, and serve could then never shut down: `systemctl
+        # restart` hung in its stop phase until systemd SIGKILLed it.
         try:
-            await asyncio.to_thread(eject, body.device)  # off-thread: ctypes/MCI can block
+            await asyncio.wait_for(
+                in_detached_thread(eject, body.device), TRAY_TIMEOUT)
+        except (TimeoutError, asyncio.TimeoutError):
+            raise HTTPException(
+                status_code=504,
+                detail=f"The drive didn't respond to the eject within "
+                       f"{TRAY_TIMEOUT:.0f}s. It may still open; if it doesn't, "
+                       f"something is holding the drive.")
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Eject failed: {exc}")
         # Forget the disc that just came out, so the panel doesn't keep showing it
@@ -242,7 +256,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def drive_close(body: DriveDevice):
         """Close a drive's tray."""
         try:
-            await asyncio.to_thread(close_tray, body.device)
+            await asyncio.wait_for(
+                in_detached_thread(close_tray, body.device), TRAY_TIMEOUT)
+        except (TimeoutError, asyncio.TimeoutError):
+            raise HTTPException(
+                status_code=504,
+                detail=f"The drive didn't respond within {TRAY_TIMEOUT:.0f}s.")
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Close tray failed: {exc}")
         return {"ok": True}

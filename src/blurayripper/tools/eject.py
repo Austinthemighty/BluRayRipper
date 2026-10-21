@@ -49,6 +49,15 @@ def _run_or_raise(cmd: list[str], what: str, timeout: float = TRAY_TIMEOUT) -> N
     device and issues an ioctl, so on a drive that has stopped answering (SCSI
     timeouts) it blocks in the kernel rather than failing. Without a bound that
     turned "pop the tray" into a permanent stall of whoever called it.
+
+    That bound is NOT absolute, and callers must not treat it as one.
+    subprocess.run's timeout kills the child and then waits for it — and SIGKILL
+    is not delivered to a process stuck in uninterruptible I/O, which is exactly
+    where `eject` sits on a drive in this state. So this can still block for as
+    long as the kernel takes to give up on the transfer. Every caller therefore
+    runs it on a DETACHED thread (``process.in_detached_thread``) and bounds the
+    await itself: that way the worst case is a leaked thread and a leaked child
+    rather than a server that cannot shut down.
     """
     try:
         result = subprocess.run(cmd, check=False, capture_output=True, text=True,

@@ -1520,3 +1520,33 @@ def test_next_episode_endpoint_reports_where_a_season_left_off(client, manager):
     # A season nothing has touched starts at 1 with nothing to show its working.
     fresh = client.get("/api/next-episode", params={"show": "Landman", "season": 9})
     assert fresh.json() == {"next": 1, "basis": []}
+
+
+async def test_a_drive_that_will_not_eject_cannot_wedge_the_server(client, monkeypatch):
+    """Three clicks of the ⏏ button on an unresponsive drive left three stuck
+    threads on the default executor — whose threads the interpreter JOINS at
+    exit — so serve could never shut down and `systemctl restart` hung in its
+    stop phase until systemd SIGKILLed it. On the box this happened on, the
+    cgroup held three `eject /dev/sr0` processes and a python nothing could kill.
+
+    So: bounded, and on a thread nobody joins."""
+    import threading
+
+    from blurayripper.web import app as app_mod
+
+    started = threading.Event()
+
+    def never_opens(_device):
+        started.set()
+        threading.Event().wait(30)      # the drive never answers
+    monkeypatch.setattr(app_mod, "eject", never_opens)
+    monkeypatch.setattr(app_mod, "TRAY_TIMEOUT", 0.1)
+
+    r = client.post("/api/drives/eject", json={"device": "/dev/sr0"})
+
+    assert r.status_code == 504
+    assert "didn't respond" in r.json()["detail"]
+    assert started.is_set()             # it really did try
+    stuck = [t for t in threading.enumerate() if t.name.startswith("blurayripper-")]
+    assert stuck and all(t.daemon for t in stuck), \
+        f"a wedged eject must not hold the process open: {stuck}"
