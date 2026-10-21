@@ -1496,3 +1496,27 @@ def test_shutdown_closes_the_manager_so_the_process_can_exit(tmp_path):
     with TestClient(app):
         assert app.state.manager.closing is False
     assert app.state.manager.closing is True
+
+
+def test_next_episode_endpoint_reports_where_a_season_left_off(client, manager):
+    """What the naming form asks so "disc 2" can mean an episode range: a box
+    set's discs carry no disc number and the same label as each other, so the
+    only thing that knows where this one starts is the discs already named."""
+    from blurayripper.models import EpisodeAssignment, MediaKind
+    from blurayripper.web.manager import WebJob
+
+    wj = WebJob(id=600, source="disc:1")
+    wj.assignments = {i: EpisodeAssignment(
+        title_id=i, kind=MediaKind.TV, show_or_movie_title="Landman",
+        season=2, episode=e) for i, e in enumerate([1, 2, 3, 4])}
+    manager.jobs[600] = wj
+
+    r = client.get("/api/next-episode", params={"show": "Landman", "season": 2})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["next"] == 5
+    assert body["basis"] == [{"job": 600, "first": 1, "last": 4, "count": 4}]
+
+    # A season nothing has touched starts at 1 with nothing to show its working.
+    fresh = client.get("/api/next-episode", params={"show": "Landman", "season": 9})
+    assert fresh.json() == {"next": 1, "basis": []}

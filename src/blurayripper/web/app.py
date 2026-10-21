@@ -74,6 +74,12 @@ class SetMapping(BaseModel):
     assignments: list[AssignmentIn]
     grain_mode: str = "auto"      # "auto" | "on" | "off" | "preview"
     tune_grain: bool | None = None
+    # Which disc of the set this is. Optional: a movie has none, and a disc whose
+    # label states it ("HOUSE_S5_D2") never needed to be told.
+    disc_number: int | None = None
+    # "season" (S1D1, S1D2, S2D1 — restarts each season) or "set" (a complete
+    # series numbered straight through, disc 15 of 28).
+    disc_scope: str | None = None
 
 
 class SetGrain(BaseModel):
@@ -306,6 +312,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             manager.set_titles(job_id, body.title_ids)
         return {"ok": True}
 
+    @app.get("/api/next-episode")
+    async def next_episode(show: str, season: int):
+        """Where the next disc of a box set should start numbering.
+
+        A box set's discs usually carry the same volume label and no disc
+        number, so "which episodes are on this one" cannot be read off the disc.
+        It can be read off the discs already named: continue after the highest
+        episode this show and season has been given."""
+        nxt, basis = manager.next_episode_for(show, season)
+        return {"next": nxt, "basis": basis}
+
     @app.post("/api/jobs/{job_id}/mapping")
     async def submit_mapping(job_id: int, body: SetMapping):
         """Confirm what each title is. This is what names the output files."""
@@ -326,7 +343,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         with _job_errors():
-            manager.set_mapping(job_id, assignments, body.grain_mode, body.tune_grain)
+            manager.set_mapping(job_id, assignments, body.grain_mode,
+                                body.tune_grain, body.disc_number, body.disc_scope)
         return {"ok": True}
 
     @app.post("/api/jobs/{job_id}/grain")

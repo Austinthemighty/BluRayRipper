@@ -144,6 +144,17 @@ class WebJob:
     show_tmdb_id: int | None = None
     aacs_dump: str | None = None  # kept AACS dump, offered for download
     season: int | None = None
+    # Which disc of the set this is, as CONFIRMED when naming it. Separate from
+    # the one parsed off the label: a box set whose discs are all labelled
+    # "LANDMAN_SEASON2" states no disc number anywhere, and that is exactly when
+    # you need one — both to place the disc back on the shelf and to work out
+    # which episodes it holds.
+    disc_number: int | None = None
+    # How that number is counted. Box sets do it both ways: "S1D1, S1D2, S2D1"
+    # restarts every season, while a complete series is often numbered straight
+    # through ("disc 15 of 28"). The number alone cannot say which, and reading
+    # it the wrong way puts the disc on the wrong shelf.
+    disc_scope: str = "season"   # "season" | "set"
     candidate_episodes: list[int] = field(default_factory=list)
     show_title: str | None = None
     show_year: int | None = None
@@ -1605,6 +1616,7 @@ class JobManager:
     def set_mapping(
         self, job_id: int, assignments: list[EpisodeAssignment],
         grain_mode: str = "auto", tune_grain: bool | None = None,
+        disc_number: int | None = None, disc_scope: str | None = None,
     ) -> None:
         wj = self.jobs[job_id]
         if wj.state not in (JobState.AWAITING_MAPPING, JobState.AWAITING_TITLES):
@@ -1622,6 +1634,10 @@ class JobManager:
         self._refuse_colliding_assignments(assignments)
         wj.assignments = {a.title_id: a for a in assignments}
         wj.selected_title_ids = [a.title_id for a in assignments]
+        if disc_number:
+            wj.disc_number = disc_number
+        if disc_scope in ("season", "set"):
+            wj.disc_scope = disc_scope
         wj.grain_mode = grain_mode
         wj.tune_grain = tune_grain
         wj.state = JobState.READY
@@ -2850,7 +2866,17 @@ class JobManager:
         you reach for. Where the label doesn't say, the season you gave when
         naming the job stands in."""
         hints = self._label_hints(wj)
-        return hints.get("label_season"), hints.get("label_disc")
+        season = hints.get("label_season")
+        disc = hints.get("label_disc")
+        # A number you confirmed beats one guessed off a label — and is often the
+        # only one there is, since a box set commonly prints the same label on
+        # every disc.
+        if wj.disc_number:
+            disc = wj.disc_number
+        if season is None:
+            season = next((a.season for a in wj.assignments.values()
+                           if a is not None and a.season is not None), None)
+        return season, disc
 
     def _display_name(self, wj: WebJob) -> str:
         """A name that identifies the physical DISC, not just its label.
@@ -2911,6 +2937,14 @@ class JobManager:
             episode_part = f"E{episodes[0]:02d}–E{episodes[-1]:02d}"
         else:
             episode_part = ""
+        if disc is not None and wj.disc_scope == "set":
+            # Numbered straight through the whole set, so the disc is the address
+            # on its own and the season belongs with the episodes it describes.
+            # "S03 D15" would read as the fifteenth disc OF season 3, which for a
+            # 28-disc complete series is both wrong and unfindable. Same shape the
+            # multi-season case above uses, for the same reason.
+            return " ".join(p for p in (title, f"D{disc:02d}",
+                                        f"{season_part}{episode_part}") if p)
         if disc is not None:
             # "House S05 D02 E06–E10": season and disc are the shelf address,
             # spaced apart from the episodes so the two read as separate facts.
@@ -2968,6 +3002,36 @@ class JobManager:
         # queued / scanning / selecting / ripping / confirming / identifying / awaiting_*
         return "rip"
 
+    def next_episode_for(self, show: str, season: int) -> tuple[int, list[dict]]:
+        """(the first unused episode number, what that was read from).
+
+        A box set's discs rarely say which disc they are, and even when they do,
+        "disc 2" only becomes an episode range if you know how many episodes
+        disc 1 held. The app already knows: it named them. So rather than make
+        someone count, continue from the highest episode already assigned to this
+        show and season.
+
+        Deliberately includes jobs that have not finished — the disc after the
+        one currently ripping is the one being named — and failed ones, since a
+        failed rip still used up its episode numbers and will be retried rather
+        than renumbered. Returns the basis as well as the answer so the form can
+        show its working instead of producing a number from nowhere.
+        """
+        want = (show or "").strip().casefold()
+        highest, basis = 0, []
+        for wj in self.jobs.values():
+            episodes = sorted(
+                a.episode for a in wj.assignments.values()
+                if a is not None and a.episode is not None and a.season == season
+                and (a.show_or_movie_title or "").strip().casefold() == want)
+            if not episodes:
+                continue
+            highest = max(highest, episodes[-1])
+            basis.append({"job": wj.id, "first": episodes[0], "last": episodes[-1],
+                          "count": len(episodes)})
+        basis.sort(key=lambda b: b["first"])
+        return highest + 1, basis
+
     def _label_hints(self, wj: WebJob) -> dict:
         """Season + disc-in-set read off the disc label, e.g.
         ``HAWAII_FIVE_0_S1_D4`` -> season 1, disc 4. Both are hints for the mapping
@@ -3010,6 +3074,9 @@ class JobManager:
             # Season / disc-in-set parsed from the label ("HAWAII_FIVE_0_S1_D4"),
             # so the mapping form can pre-fill them instead of making you retype.
             **self._label_hints(wj),
+            # What you confirmed, which a box set's identical labels never state.
+            "disc_number": wj.disc_number,
+            "disc_scope": wj.disc_scope,
             "kind_guess": (discinfo.guess_kind(wj.disc).value if wj.disc else None),
             "titles": self._title_dict(wj) if wj.disc else [],
             "selected": wj.selected_title_ids,

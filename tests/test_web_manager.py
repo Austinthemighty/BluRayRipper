@@ -2232,3 +2232,73 @@ async def test_a_rip_retrying_a_failing_read_counts_as_stalled(manager):
     # Real movement clears it again, so a slow-but-working rip is never flagged.
     reporter.on_progress("Rip t3: Decrypting · 1240.0 MB/s (275.0x)", 0.3301)
     assert manager._is_stalled(wj, JobState.RIPPING) is False
+
+
+# --- box sets: which disc is this, and where do its episodes start -----------
+
+def _tv(manager, job_id, show, season, episodes, disc=None, scope=None):
+    from blurayripper.models import EpisodeAssignment, MediaKind
+    wj = WebJob(id=job_id, source=f"disc:{job_id%2}")
+    wj.assignments = {
+        i: EpisodeAssignment(title_id=i, kind=MediaKind.TV, show_or_movie_title=show,
+                             season=season, episode=e)
+        for i, e in enumerate(episodes)}
+    if disc:
+        wj.disc_number = disc
+    if scope:
+        wj.disc_scope = scope
+    manager.jobs[job_id] = wj
+    return wj
+
+
+def test_the_next_disc_continues_from_the_ones_already_named(manager):
+    """A box set prints the same volume label on every disc, so nothing on the
+    disc says which one it is or where its episodes start. The discs already
+    named do say: continue after the highest episode this show and season has.
+
+    That is what makes "disc 2" mean something without anyone counting."""
+    _tv(manager, 501, "Landman", 2, [1, 2, 3, 4])
+    nxt, basis = manager.next_episode_for("Landman", 2)
+    assert nxt == 5
+    assert [b["count"] for b in basis] == [4]
+
+    _tv(manager, 502, "Landman", 2, [5, 6, 7])
+    assert manager.next_episode_for("Landman", 2)[0] == 8
+
+    # Scoped to the show AND the season — a different season starts over, and
+    # another show ripping at the same time cannot bleed into it.
+    _tv(manager, 503, "Landman", 1, [1, 2])
+    _tv(manager, 504, "How I Met Your Mother", 2, [1, 2, 3])
+    assert manager.next_episode_for("Landman", 2)[0] == 8
+    assert manager.next_episode_for("Landman", 1)[0] == 3
+    assert manager.next_episode_for("Landman", 3) == (1, [])
+    assert manager.next_episode_for("Unseen Show", 1) == (1, [])
+
+    # Case and padding in the show name must not start a parallel count.
+    assert manager.next_episode_for("  landman  ", 2)[0] == 8
+
+
+def test_a_whole_set_disc_number_is_not_printed_as_a_season_disc(manager):
+    """Box sets number discs two ways, and the number alone cannot say which.
+    "S1D1, S1D2, S2D1" restarts every season; a complete series often runs
+    straight through, disc 15 of 28. Printing the second kind as "S03 D15"
+    claims it is the fifteenth disc OF season 3 — wrong, and unfindable on the
+    shelf, which is the one job this name has."""
+    per_season = _tv(manager, 505, "House", 5, [6, 7, 8, 9, 10], disc=2, scope="season")
+    assert manager._display_name(per_season) == "House S05 D02 E06–E10"
+
+    whole_set = _tv(manager, 506, "How I Met Your Mother", 3, [1, 2, 3, 4],
+                    disc=15, scope="set")
+    name = manager._display_name(whole_set)
+    assert name == "How I Met Your Mother D15 S03E01–E04"
+    assert "S03 D15" not in name
+
+    # Default is per-season, which is what a label like HOUSE_S5_D2 states.
+    assert _tv(manager, 507, "House", 5, [1], disc=2).disc_scope == "season"
+
+
+def test_a_confirmed_disc_number_beats_one_guessed_off_the_label(manager):
+    """The label is a guess and is often absent entirely; what you typed is not."""
+    wj = _tv(manager, 508, "Landman", 2, [5, 6, 7], disc=2)
+    assert manager._disc_hint(wj) == (2, 2)      # season from the assignments
+    assert "D02" in manager._display_name(wj)

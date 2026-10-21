@@ -1257,13 +1257,23 @@ function buildMapping(card, j){
       // disc 4 with 4 episode titles ≈ E13-E16. A guess — the user still confirms.
       const nSel = j.selected.length || 1;
       const guessSeason = j.label_season || 1;
-      const guessFirst = j.label_disc ? (j.label_disc - 1) * nSel + 1 : 1;
+      // Only a SEASON-scoped disc number implies an episode block: on a complete
+      // series numbered straight through, disc 15 is not episode 57 of anything.
+      const seasonScoped = (j.disc_scope || 'season') === 'season';
+      const guessFirst = (j.label_disc && seasonScoped) ? (j.label_disc - 1) * nSel + 1 : 1;
       const hint = j.label_disc
         ? `<div class="muted" style="font-size:12px;">Disc label says <b>season ${guessSeason}, disc ${j.label_disc}</b> — with ${nSel} episode${nSel===1?'':'s'} on this disc that's about <b>E${String(guessFirst).padStart(2,'0')}–E${String(guessFirst+nSel-1).padStart(2,'0')}</b>. Check it: disc 1 often carries extras and the last disc is usually short.</div>`
         : (j.label_season ? `<div class="muted" style="font-size:12px;">Disc label says <b>season ${guessSeason}</b>.</div>` : '');
       tv.innerHTML = `<div class="row">Season <input data-season type="number" value="${guessSeason}" min="0" style="width:64px;">
+          Disc # <input data-discno type="number" value="${j.disc_number || j.label_disc || ''}" min="1" placeholder="?" style="width:56px;"
+                  title="Which disc of the set this is. Box sets usually print the same label on every disc, so this is often the only way to know — it names the job so a bad rip can be found on the shelf.">
+          <select data-discscope style="width:118px;" title="How the set numbers its discs. 'of this season' restarts at 1 each season (S1D1, S1D2, S2D1). 'of whole set' runs straight through a complete series (disc 15 of 28) — printed as D15 on its own, because 'S03 D15' would read as the fifteenth disc of season 3.">
+            <option value="season"${(j.disc_scope||'season')==='season'?' selected':''}>of this season</option>
+            <option value="set"${j.disc_scope==='set'?' selected':''}>of whole set</option>
+          </select>
           First episode <input data-firstep type="number" value="${guessFirst}" min="0" style="width:64px;">
           <button class="sec" data-load>Load episodes</button></div>
+        <div data-continues class="muted" style="font-size:12px;"></div>
         ${hint}
         <div class="muted" style="font-size:12px;">DVD titles are usually in order; Blu-ray titles are often scrambled or reversed — pick each title's episode below (durations shown to help match), or use a fill button.</div>
         <div data-fill class="row" style="display:none;">
@@ -1273,6 +1283,37 @@ function buildMapping(card, j){
         <div data-eps></div>`;
       const sel = () => j.titles.filter(t=>j.selected.includes(t.id));
       const pad = n => String(n).padStart(2,'0');
+
+      // Where this show+season left off, so "disc 2" means an episode range
+      // without anyone counting. A box set prints the same label on every disc,
+      // so the discs already named are the only thing that knows.
+      async function continueFromPreviousDiscs(){
+        const s = +tv.querySelector('[data-season]').value;
+        const note = tv.querySelector('[data-continues]');
+        if (!state.chosen || !s) { note.textContent=''; return; }
+        let r;
+        try {
+          // .title, not .name: the TMDB route normalises a show's name into
+          // "title", and this must be the SAME string the assignments store as
+          // show_or_movie_title or the lookup counts a separate show.
+          r = await api('GET', `/api/next-episode?show=${encodeURIComponent(state.chosen.title||'')}&season=${s}`);
+        } catch(e) { note.textContent=''; return; }
+        if (!r || !r.basis || !r.basis.length) { note.textContent=''; return; }
+        const done = r.basis.reduce((n,b)=>n+b.count, 0);
+        const last = r.basis[r.basis.length-1];
+        const n = sel().length || 1;
+        note.innerHTML = `Season ${s} already has <b>${done} episode${done===1?'':'s'}</b> named `
+          + `(up to E${pad(last.last)}, job #${last.job}), so this disc continues at `
+          + `<b>E${pad(r.next)}</b>`+ (n>1 ? `–E${pad(r.next+n-1)}` : '') + `.`;
+        // Only move the field if it is still showing a guess the user hasn't touched.
+        const fe = tv.querySelector('[data-firstep]');
+        if (!fe.dataset.touched) fe.value = r.next;
+      }
+      tv.querySelector('[data-firstep]').addEventListener('input', e => {
+        e.target.dataset.touched = '1';
+      });
+      tv.querySelector('[data-season]').addEventListener('change', continueFromPreviousDiscs);
+      continueFromPreviousDiscs();
       const epOptions = (num) => state.episodes.map(e=>
         `<option value="${e.episode}" ${e.episode===num?'selected':''}>E${pad(e.episode)} — ${e.name||'?'}${e.runtime?' · '+e.runtime+'m':''}</option>`).join('');
       const render = (assign, flags) => {
@@ -1391,7 +1432,11 @@ function buildMapping(card, j){
     // the naming gate, producing "not awaiting a naming mapping".
     cbtn.disabled = true; cbtn.textContent = 'Confirming…';
     try {
-      await api('POST',`/api/jobs/${j.id}/mapping`,{assignments, grain_mode:gmode, tune_grain});
+      const dno = body.querySelector('[data-discno]');
+      const dsc = body.querySelector('[data-discscope]');
+      await api('POST',`/api/jobs/${j.id}/mapping`,{assignments, grain_mode:gmode, tune_grain,
+        disc_number: dno && dno.value ? +dno.value : null,
+        disc_scope: dsc ? dsc.value : null});
       // Reflect the committed transition now rather than waiting for the next
       // SSE frame, which lags when the queue is large or the box is busy — the
       // form remaining is what invited the second click.
