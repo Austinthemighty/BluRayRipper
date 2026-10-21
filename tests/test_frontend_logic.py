@@ -416,3 +416,14 @@ def test_a_drive_holding_an_unreadable_disc_does_not_read_as_empty():
     # The "(via OS)" note still rides along with an OS-recovered name.
     via_os = json.dumps({"disc_name": "LANDMAN", "os_detected": True, "disc_bytes": 1})
     assert "via OS" in js(f"discLabelHtml({via_os})")
+
+
+def test_the_boxset_editor_knows_every_column_the_plan_does():
+    """The table writes the saved CSV from its own column list, so a column it
+    doesn't know is deleted from the file the moment anyone switches from the
+    CSV view back to the table — silently, and after they have typed it in."""
+    src = INDEX.read_text()
+    cols = src.split("const BOXSET_COLS = [")[1].split("];")[0]
+    for key in ("disc_label", "show", "year", "season", "disc",
+                "collection", "first_episode", "episodes"):
+        assert f"key:'{key}'" in cols, f"the editor would drop “{key}” on save"
