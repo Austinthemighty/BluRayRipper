@@ -532,3 +532,45 @@ def test_the_label_lookup_does_not_rely_on_the_services_PATH(monkeypatch, tmp_pa
     # Nowhere at all: a missing tool is a missing label, not an exception.
     monkeypatch.setattr(mk.os.path, "exists", lambda p: False)
     assert mk._linux_disc_label("/dev/sr0") is None
+
+
+def test_one_drives_disc_is_never_grafted_onto_another():
+    """makemkvcon emits the DRV block more than once in a run and does not
+    always give a drive the same index — the serial-to-device pairing was
+    observed flipping between two reads seconds apart, with no reboot.
+
+    The dedup carried a disc name and device forward from whatever was
+    previously at that index, so when index 0 named drive A in the first block
+    and drive B in the second, B inherited A's disc. A Landman Blu-ray was
+    reported — and queued as a job — as a How I Met Your Mother DVD sitting in
+    the other drive. The index is not a drive's identity; its serial is."""
+    lines = [
+        # First enumeration: index 0 is the 3.01 drive, holding the Blu-ray.
+        'DRV:0,2,999,12,"BD-RE ASUS BW-16D1HT 3.01 KLUL75I4959","LANDMAN_S2_D3","/dev/sr0"',
+        'DRV:1,2,999,12,"BD-RE ASUS BW-16D1HT 3.10 KX1P71E4206","HIMYM_S9_D1","/dev/sr1"',
+        # Re-enumeration after LibreDrive init: index 0 is now the OTHER drive,
+        # and its line carries no disc name yet.
+        'DRV:0,2,999,12,"BD-RE ASUS BW-16D1HT 3.10 KX1P71E4206","","/dev/sr1"',
+        'DRV:1,2,999,12,"BD-RE ASUS BW-16D1HT 3.01 KLUL75I4959","LANDMAN_S2_D3","/dev/sr0"',
+    ]
+    by_serial = {d.name.split()[-1]: d for d in parse_drives(lines)}
+
+    assert by_serial["KX1P71E4206"].disc_name is None, \
+        "the 3.10 drive was given the other drive's disc"
+    assert by_serial["KX1P71E4206"].device == "/dev/sr1"
+    assert by_serial["KLUL75I4959"].disc_name == "LANDMAN_S2_D3"
+    assert by_serial["KLUL75I4959"].device == "/dev/sr0"
+
+
+def test_the_same_drive_still_keeps_what_an_earlier_line_knew():
+    """The carry-forward exists for a real case and must survive: one run's
+    later, more-initialised block can report an empty disc name for a drive the
+    earlier block named, and blanking it there would empty the panel."""
+    lines = [
+        'DRV:0,2,999,12,"ASUS BD 1.00 SERIAL","MINORITY_REPORT","/dev/sr0"',
+        'DRV:0,2,999,12,"ASUS BD 1.00 SERIAL","",""',
+    ]
+    drives = parse_drives(lines)
+    assert len(drives) == 1
+    assert drives[0].disc_name == "MINORITY_REPORT"
+    assert drives[0].device == "/dev/sr0"

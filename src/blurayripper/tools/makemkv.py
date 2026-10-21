@@ -310,7 +310,16 @@ def parse_drives(lines: list[str]) -> list[Drive]:
             disc_name=fields[5] or None,
         )
         prior = by_index.get(drive.index)
-        if prior is not None:
+        # Carry fields forward ONLY when the later line is the same physical
+        # drive. makemkvcon re-enumerates mid-run and does not always hand the
+        # same drive the same index, so an index can name drive A in the first
+        # block and drive B in the second — and this used to graft A's disc name
+        # and device onto B. The result was a job for one disc created against
+        # the other drive, named after a disc that was never in it: a Landman
+        # Blu-ray reported, and queued, as a How I Met Your Mother DVD.
+        #
+        # The drive's model+serial string is its identity; the index is not.
+        if prior is not None and prior.name == drive.name:
             drive.disc_name = drive.disc_name or prior.disc_name
             drive.device = drive.device or prior.device
         by_index[drive.index] = drive
