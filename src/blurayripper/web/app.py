@@ -227,6 +227,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         manager.set_drive_name(body.device, body.name)
         return {"ok": True}
 
+    # Devices with a tray command still outstanding. A stuck eject does not just
+    # fail: the first one wedges in the kernel's media-change polling
+    # (disk_block_events) and never releases the device, so every later eject
+    # blocks in bd_prepare_to_claim waiting for exclusive access it can never
+    # get. Three clicks of the button produced three processes in
+    # uninterruptible I/O, two of them purely queued behind the first, and
+    # nothing short of a reboot cleared them.
+    #
+    # The entry is cleared when the thread finally settles — so while one really
+    # is stuck, this stays closed, which is the point.
+    _tray_busy: set[str] = set()
+
+    async def _tray_command(fn, device: str | None, doing: str) -> None:
+        key = (device or "").strip() or "<default drive>"
+        if key in _tray_busy:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{key} is already {doing} and hasn't answered yet. "
+                       f"Asking again won't reach the drive — each attempt waits "
+                       f"on the one before it. If the tray stays shut, something "
+                       f"is holding the drive.")
+        _tray_busy.add(key)
+        task = asyncio.ensure_future(in_detached_thread(fn, device))
+        task.add_done_callback(lambda _t: _tray_busy.discard(key))
+        # shield: the point of giving up on the WAIT is to keep the slot held
+        # while the drive is still being asked. Cancelling the task would clear
+        # the flag and let the next click queue another stuck process.
+        await asyncio.wait_for(asyncio.shield(task), TRAY_TIMEOUT)
+
     @app.post("/api/drives/eject")
     async def drive_eject(body: DriveDevice):
         """Open a drive's tray."""
@@ -237,14 +266,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # stuck threads, and serve could then never shut down: `systemctl
         # restart` hung in its stop phase until systemd SIGKILLed it.
         try:
-            await asyncio.wait_for(
-                in_detached_thread(eject, body.device), TRAY_TIMEOUT)
+            await _tray_command(eject, body.device, "ejecting")
         except (TimeoutError, asyncio.TimeoutError):
             raise HTTPException(
                 status_code=504,
                 detail=f"The drive didn't respond to the eject within "
                        f"{TRAY_TIMEOUT:.0f}s. It may still open; if it doesn't, "
                        f"something is holding the drive.")
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Eject failed: {exc}")
         # Forget the disc that just came out, so the panel doesn't keep showing it
@@ -256,12 +286,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def drive_close(body: DriveDevice):
         """Close a drive's tray."""
         try:
-            await asyncio.wait_for(
-                in_detached_thread(close_tray, body.device), TRAY_TIMEOUT)
+            await _tray_command(close_tray, body.device, "closing")
         except (TimeoutError, asyncio.TimeoutError):
             raise HTTPException(
                 status_code=504,
                 detail=f"The drive didn't respond within {TRAY_TIMEOUT:.0f}s.")
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Close tray failed: {exc}")
         return {"ok": True}

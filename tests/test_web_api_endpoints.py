@@ -1550,3 +1550,60 @@ async def test_a_drive_that_will_not_eject_cannot_wedge_the_server(client, monke
     stuck = [t for t in threading.enumerate() if t.name.startswith("blurayripper-")]
     assert stuck and all(t.daemon for t in stuck), \
         f"a wedged eject must not hold the process open: {stuck}"
+
+
+async def test_a_second_eject_is_refused_while_the_first_is_still_stuck(app, monkeypatch):
+    """What three clicks of ⏏ on an unresponsive drive actually did, per the
+    kernel: the first wedged in disk_block_events and never released the
+    device; the second and third blocked in bd_prepare_to_claim waiting for
+    exclusive access to it. Two processes in uninterruptible I/O purely because
+    they queued behind one that would never finish, and nothing short of a
+    reboot cleared any of them.
+
+    So a repeat press must not reach the drive at all.
+
+    Driven through ASGI rather than TestClient because the guard only means
+    anything within ONE event loop: TestClient gives each request its own, and
+    tearing that loop down cancels the pending attempt and releases the slot —
+    which is exactly what must NOT happen on a live server.
+    """
+    import asyncio
+    import threading
+
+    import httpx
+
+    from blurayripper.web import app as app_mod
+
+    attempts = []
+    wedged = threading.Event()
+
+    def never_opens(device):
+        attempts.append(device)
+        wedged.wait(30)                 # the drive never answers
+    monkeypatch.setattr(app_mod, "eject", never_opens)
+    monkeypatch.setattr(app_mod, "TRAY_TIMEOUT", 0.1)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as ac:
+        first = await ac.post("/api/drives/eject", json={"device": "/dev/sr0"})
+        assert first.status_code == 504          # gave up waiting, still trying
+
+        second = await ac.post("/api/drives/eject", json={"device": "/dev/sr0"})
+        assert second.status_code == 409
+        assert "already ejecting" in second.json()["detail"]
+        assert attempts == ["/dev/sr0"], "the second press must not reach the drive"
+
+        # A different drive is unaffected — one bad drive must not lock the other.
+        other = await ac.post("/api/drives/eject", json={"device": "/dev/sr1"})
+        assert other.status_code == 504
+        assert attempts == ["/dev/sr0", "/dev/sr1"]
+
+        # Once the drive finally answers, the slot reopens.
+        wedged.set()
+        for _ in range(100):
+            await asyncio.sleep(0.02)
+            again = await ac.post("/api/drives/eject", json={"device": "/dev/sr0"})
+            if again.status_code != 409:
+                break
+        else:
+            raise AssertionError("the slot never reopened after the drive answered")
