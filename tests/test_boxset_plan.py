@@ -231,3 +231,46 @@ def test_a_disc_is_found_by_its_number_when_no_label_can_find_it():
     assert bp.find(rows, "how i met your mother", season=1, disc=1).collection == 1
     assert bp.find(rows, "Some Other Show", season=1, disc=1) is None
     assert bp.find(rows, "How I Met Your Mother", season=9, disc=1) is None
+
+
+def test_a_label_that_states_the_season_and_disc_needs_no_disc_label_column():
+    """"HOW_I_MET_YOUR_MOTHER_S9_D1" already says which row it wants: strip the
+    S9 and D1 and what remains is the show, which is the column the plan is
+    keyed on anyway. Requiring a disc_label as well means filling that column in
+    28 times — having first inserted each disc to find out what it says."""
+    import blurayripper.boxset_plan as bp
+
+    rows, errors = parse_csv(
+        "Disk name,Show,Season,Disk,Disk collection number,Episodes,Year\n"
+        ",How I Met Your Mother,9,1,25,8,2005\n"
+        ",How I Met Your Mother,9,2,26,8,2005\n")
+    assert errors == []
+
+    first = bp.match_label_parts(rows, "HOW_I_MET_YOUR_MOTHER_S9_D1")
+    assert (first.season, first.disc) == (9, 1)
+    assert (first.first_episode, first.last_episode) == (1, 8)
+
+    second = bp.match_label_parts(rows, "HOW_I_MET_YOUR_MOTHER_S9_D2")
+    assert (second.first_episode, second.last_episode) == (9, 16)
+
+    # Punctuation and case in the label must not lose the show.
+    assert bp.match_label_parts(rows, "how.i.met.your.mother.s9.d1") is first
+    assert bp.match_label_parts(rows, "How I Met Your Mother S9 D1") is first
+
+
+def test_a_label_missing_the_disc_number_is_not_guessed_at():
+    """A label that states only the season cannot pick between that season's
+    discs, and picking wrong names a whole disc's worth of episodes as the wrong
+    ones — silently, because every part of it looks plausible."""
+    import blurayripper.boxset_plan as bp
+
+    rows, _ = parse_csv(
+        "show,season,disc,episodes\n"
+        "How I Met Your Mother,9,1,8\n"
+        "How I Met Your Mother,9,2,8\n")
+
+    assert bp.match_label_parts(rows, "HOW_I_MET_YOUR_MOTHER_S9") is None
+    assert bp.match_label_parts(rows, "HOW_I_MET_YOUR_MOTHER") is None
+    assert bp.match_label_parts(rows, "") is None
+    # A show the plan has never heard of stays unmatched rather than guessing.
+    assert bp.match_label_parts(rows, "THE_WIRE_S1_D1") is None

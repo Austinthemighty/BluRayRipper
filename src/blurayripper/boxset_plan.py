@@ -294,6 +294,29 @@ def _derive_first_episodes(rows: list[PlanRow]) -> None:
                 nxt = None          # a gap: everything after it is unknowable
 
 
+def match_label_parts(rows: list[PlanRow], label: str | None) -> PlanRow | None:
+    """A row for this disc, read out of the LABEL rather than matched against it.
+
+    "HOW_I_MET_YOUR_MOTHER_S9_D1" already states everything needed to find the
+    right row: strip the S9/D1 and the rest is the show, which is the column the
+    plan is keyed on anyway. So a set whose discs are labelled this way needs no
+    disc_label column at all — the thing people have to fill in by hand, for 28
+    discs, having first read each label off a disc they have to insert to see.
+
+    Deliberately requires BOTH a season and a disc number from the label. A
+    label that only says the season cannot pick between that season's discs, and
+    guessing there names a disc's worth of episodes wrongly.
+    """
+    text = (label or "").strip()
+    if not text:
+        return None
+    show, _year, season = naming.clean_tmdb_query(text, "tv")
+    disc = naming.disc_number(text)
+    if season is None or disc is None or not show:
+        return None
+    return find(rows, show, season, disc)
+
+
 def find(rows: list[PlanRow], show: str, season: int | None = None,
          disc: int | None = None, collection: int | None = None) -> PlanRow | None:
     """The row describing one disc of ``show``, looked up by its NUMBER.

@@ -406,3 +406,56 @@ async def test_label_noise_is_stripped_from_a_tmdb_search_unless_the_title_is_qu
     assert [path for path, _ in sent] == ["/search/tv", "/search/tv"]
     assert sent[0][1]["query"] == "HAWAII FIVE 0"        # season/disc/NTSC peeled off
     assert sent[1][1]["query"] == "Hawaii Five-O S4 D5 NTSC"   # quoted = verbatim
+
+
+async def test_a_plan_with_no_labels_still_rips_a_set_that_labels_its_discs(box):
+    """A box set normally prints the same label on every disc, so the plan's
+    disc_label column is usually blank — that is why it was made optional. But
+    plenty of sets DO label each disc, and this one says everything the plan
+    needs: "HOW_I_MET_YOUR_MOTHER_S9_D1" is the show, the season and the disc.
+
+    Requiring disc_label as well would mean filling that column in once per
+    disc, having first inserted each disc to find out what it says — for a set
+    whose labels the plan could simply read."""
+    # Written straight through rather than via write_plan, which prepends the
+    # legacy header and so cannot express a disc number.
+    boxset_plan.save_plan(box.settings,
+                          "show,season,disc,episodes,year\n"
+                          "How I Met Your Mother,9,1,4,2005\n"
+                          "How I Met Your Mother,9,2,4,2005\n")
+
+    numbered = {}
+    for label in ("HOW_I_MET_YOUR_MOTHER_S9_D1", "HOW_I_MET_YOUR_MOTHER_S9_D2"):
+        wj = await box.insert(_disc(label, episodes=4))
+        assert wj.state is JobState.DONE, _log(wj)      # no naming gate at all
+        numbered[label] = _episodes(wj)
+
+    assert numbered == {
+        "HOW_I_MET_YOUR_MOTHER_S9_D1": [1, 2, 3, 4],
+        "HOW_I_MET_YOUR_MOTHER_S9_D2": [5, 6, 7, 8],
+    }
+    # The episode numbers came from the plan's per-disc counts, not from the
+    # disc's position guessed at: disc 2 starts at 5 because disc 1 held four.
+    assert [
+        sorted((a.show_or_movie_title, a.season, a.episode)
+               for a in job.assignments.values())
+        for job in box.encoded
+    ] == [
+        [("How I Met Your Mother", 9, ep) for ep in numbered[label]]
+        for label in numbered
+    ]
+
+
+async def test_a_label_without_a_disc_number_is_still_named_by_hand(box):
+    """The guard on the above: a label that states only the season cannot pick
+    between that season's discs. Guessing names a whole disc's worth of
+    episodes as the wrong ones, and every part of the result looks plausible."""
+    boxset_plan.save_plan(box.settings,
+                          "show,season,disc,episodes,year\n"
+                          "How I Met Your Mother,9,1,4,2005\n"
+                          "How I Met Your Mother,9,2,4,2005\n")
+
+    wj = await box.insert(_disc("HOW_I_MET_YOUR_MOTHER_S9", episodes=4))
+
+    assert wj.state is not JobState.DONE
+    assert "naming this one manually" in _log(wj)

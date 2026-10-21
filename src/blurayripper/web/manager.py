@@ -1182,12 +1182,29 @@ class JobManager:
                     f"{boxset_plan.plan_path(self.settings)} — naming this one manually.")
             return False
         row = boxset_plan.match(rows, label)
+        matched_by = "disc_label"
+        if row is None:
+            # Nothing matched the label as a PATTERN — but a label like
+            # "HOW_I_MET_YOUR_MOTHER_S9_D1" already states which row it wants:
+            # strip the S9/D1 and the rest is the show. A set labelled that way
+            # then needs no disc_label column at all, which is the column
+            # somebody would otherwise fill in 28 times, having first inserted
+            # each disc to find out what it says.
+            row = boxset_plan.match_label_parts(rows, label)
+            matched_by = "the show, season and disc read off the label"
         if row is None:
             reporter.on_event(
                 f"Box-set plan: {len(rows)} row(s) loaded but none match the disc "
-                f"label “{label}” — naming this one manually. "
-                "(Check the disc_label column; a trailing * covers a whole set.)")
+                f"label “{label}” — naming this one manually. (Either give the row "
+                "a disc_label — a trailing * covers a whole set — or, if the label "
+                "states the season and disc like SHOW_S9_D1, give the row that "
+                "show, season and disc number.)")
             return False
+        reporter.on_event(
+            f"Box-set plan: matched “{row.show}”"
+            + (f" season {row.season}" if row.season is not None else "")
+            + (f" disc {row.disc}" if row.disc is not None else "")
+            + f" by {matched_by}.")
         if row.year is not None and row.year <= 0:
             # A "0" in the year cell parses as the integer 0, which is falsy but not
             # None — so it silently skipped the year-matched TMDB lookup, reported
