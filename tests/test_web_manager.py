@@ -2460,3 +2460,51 @@ async def test_a_duplicate_with_nothing_ripped_is_still_cleaned_up(manager, monk
     await manager.merge_duplicates(381)
 
     assert wiped and wiped[0].endswith("job_380")
+
+
+async def test_merging_keeps_the_absorbed_jobs_log(manager, monkeypatch):
+    """remove() takes the duplicate's history with it, so the account of what
+    that job did went too — and the survivor's log showed a disc that had
+    apparently never been ripped, while its files had in fact been ripped and
+    then deleted. The data loss was recoverable in principle; without the log
+    there was nothing to even say it had happened."""
+    from blurayripper.pipeline import Job
+
+    monkeypatch.setattr("blurayripper.web.manager.library.cleanup", lambda p: None)
+    for jid in (390, 391):
+        wj = WebJob(id=jid, source="disc:1", state=JobState.QUEUED)
+        wj.fingerprint = "fp_same_disc"
+        wj._pipeline_job = Job(source="disc:1")
+        wj._pipeline_job.checkpoints = {}
+        manager.jobs[jid] = wj
+    manager.jobs[390].log = ["[12:00:00] Ripping title 0 ...",
+                             "[12:31:00] Rip verified: 2809s vs disc 2809s."]
+    manager.jobs[391].log = ["[15:31:52] Found 5 titles."]
+
+    await manager.merge_duplicates(391)
+
+    keeper = "\n".join(manager.jobs[391].log)
+    assert "Rip verified: 2809s" in keeper, "the absorbed job's history was lost"
+    assert "carried over from job #390" in keeper
+    assert "Found 5 titles." in keeper          # its own history survives too
+
+
+async def test_a_merged_log_stays_bounded(manager, monkeypatch):
+    """Absorbing several long histories must not let one job's log grow without
+    limit — it is persisted and shipped to every client on every tick."""
+    from blurayripper.pipeline import Job
+
+    monkeypatch.setattr("blurayripper.web.manager.library.cleanup", lambda p: None)
+    for jid in (395, 396, 397):
+        wj = WebJob(id=jid, source="disc:1", state=JobState.QUEUED)
+        wj.fingerprint = "fp_chatty"
+        wj._pipeline_job = Job(source="disc:1")
+        wj._pipeline_job.checkpoints = {}
+        wj.log = [f"line {i} of job {jid}" for i in range(900)]
+        manager.jobs[jid] = wj
+
+    await manager.merge_duplicates(397)
+
+    log = manager.jobs[397].log
+    assert len(log) == manager._MERGED_LOG_LINES
+    assert "line 899 of job 396" in "\n".join(log)   # the newest lines are kept

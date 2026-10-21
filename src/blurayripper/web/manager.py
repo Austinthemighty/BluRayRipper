@@ -2830,6 +2830,10 @@ class JobManager:
                        if o.id != wj.id and o.fingerprint == fp and not o.outputs),
                       key=lambda o: o.id)
 
+    # Cap for a job that has absorbed others' histories, above the 200 a single
+    # job keeps — a merge is exactly when the older lines still matter.
+    _MERGED_LOG_LINES = 600
+
     async def merge_duplicates(self, job_id: int) -> dict:
         """Fold this job's duplicates into it and drop them."""
         wj = self.jobs.get(job_id)
@@ -2879,12 +2883,25 @@ class JobManager:
                 wj.log.append(stamp_log(
                     f"Took {taken} finished rip(s) from job #{o.id} — "
                     f"this disc won't be ripped again."))
+        # And carry the LOG across. remove() takes the duplicate's history with
+        # it, so the account of what that job actually did — including the rip
+        # just adopted from it — disappeared, leaving the survivor's log showing
+        # a disc that was apparently never ripped. The merge says these were one
+        # piece of work; the record of that work should say so too.
+        for o in dupes:
+            if not o.log:
+                continue
+            wj.log.append(stamp_log(f"--- carried over from job #{o.id} ---"))
+            wj.log.extend(o.log)
         merged = [o.id for o in dupes]
         for o in dupes:
             await self.remove(o.id, keep_staging=o.id in adopted)
         wj.log.append(stamp_log(
             "Merged " + ", ".join(f"#{i}" for i in merged) +
             " into this job — same disc, so they were all one piece of work."))
+        # Capped last, so the bound is the bound and the summary always survives:
+        # it is the line that explains every carried-over line above it.
+        del wj.log[:-self._MERGED_LOG_LINES]
         self._persist(wj)
         self.bus.publish()
         return {"kept": job_id, "merged": merged}
