@@ -27,6 +27,7 @@ from .scheduler import EncodeScheduler
 from .services.metadata import TMDBClient
 from .tools import discinfo
 from .tools.makemkv import MakeMKV
+from .tools.process import in_detached_thread
 
 console = Console()
 
@@ -1370,6 +1371,18 @@ async def _cmd_db_init(args: argparse.Namespace) -> int:
     return 0
 
 
+# How long a storage root may take to answer before serve gives up on it. Longer
+# than the automount's own 30s so a share that is merely being mounted still
+# makes it, short enough that an unreachable one is reported rather than waited
+# on for the life of the machine.
+STORAGE_PREFLIGHT_TIMEOUT = 60.0
+
+
+def _make_storage_root(folder) -> None:
+    """mkdir -p, as its own function so the thread it runs on has a useful name."""
+    folder.mkdir(parents=True, exist_ok=True)
+
+
 def _storage_remedy(folder, *, windows: bool) -> str:
     """What to check when a staging/output root can't be reached.
 
@@ -1461,7 +1474,24 @@ async def _cmd_serve(args: argparse.Namespace) -> int:
     for label, folder in (("staging_dir", settings.storage.staging_dir),
                           ("output_dir", settings.storage.output_dir)):
         try:
-            folder.mkdir(parents=True, exist_ok=True)
+            # Bounded, and on a thread nothing joins. These roots are normally a
+            # network share mounted `hard`, where an unreachable server makes
+            # mkdir block in the kernel indefinitely — no error, no timeout, and
+            # no output, because this runs before the first thing serve prints.
+            # The symptom is a server that simply never starts, with a log that
+            # ends mid-restart and says nothing at all.
+            await asyncio.wait_for(
+                in_detached_thread(_make_storage_root, folder),
+                STORAGE_PREFLIGHT_TIMEOUT)
+        except (TimeoutError, asyncio.TimeoutError):
+            console.print(
+                f"[red]{label} at {folder} did not respond within "
+                f"{STORAGE_PREFLIGHT_TIMEOUT:.0f}s.[/red]\n"
+                f"[yellow]The share is mounted but the server behind it isn't "
+                f"answering — a `hard` mount waits forever rather than failing, "
+                f"so nothing here will time out on its own. Check the NAS is up "
+                f"and reachable, then start again.[/yellow]")
+            return 2
         except OSError as exc:
             drive = folder.drive or str(folder)
             how = _storage_remedy(folder, windows=sys.platform.startswith("win"))

@@ -1028,3 +1028,34 @@ def test_secrets_rejects_an_action_it_does_not_have(capsys):
     err = capsys.readouterr().err
     assert exc.value.code == 2
     assert "clear" in err and "push" in err
+
+
+def test_an_unreachable_storage_root_is_reported_not_waited_on(
+        tmp_path, monkeypatch, capsys):
+    """The roots are normally a network share mounted `hard`, where an
+    unreachable server makes mkdir block in the kernel forever — no error, no
+    timeout. This runs before serve prints anything, so the symptom is a server
+    that never starts and a log that ends mid-restart saying nothing at all.
+    That is exactly how a box looked after an update: pulled, re-exec'd, and
+    then silence for forty minutes."""
+    import threading
+
+    from blurayripper import cli as cli_mod
+
+    never = threading.Event()
+    monkeypatch.setattr(cli_mod, "_make_storage_root", lambda folder: never.wait(30))
+    monkeypatch.setattr(cli_mod, "STORAGE_PREFLIGHT_TIMEOUT", 0.1)
+    _use_settings(monkeypatch, _settings(tmp_path))
+    env = _serve_env(monkeypatch)
+
+    rc = _run_serve()
+
+    assert rc == 2
+    out = _prose(capsys.readouterr().out)
+    assert "did not respond within" in out
+    assert "hard" in out and "NAS" in out
+    assert env["create_app_calls"] == []       # never got as far as the app
+    # ...and the thread it gave up on must not hold the process open.
+    stuck = [t for t in threading.enumerate() if t.name.startswith("blurayripper-")]
+    assert all(t.daemon for t in stuck), f"a hung NAS must not block exit: {stuck}"
+    never.set()
