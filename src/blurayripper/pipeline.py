@@ -15,6 +15,7 @@ import json
 import re
 import shutil
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -44,6 +45,51 @@ from .tools.subtitleedit import SubtitleEdit
 # and moves on. Generous: a healthy drive takes a second or two, and a disc that
 # is still being flushed can take longer.
 _EJECT_TIMEOUT = 60.0
+
+
+def _settle(fut, exc, result) -> None:
+    """Deliver a detached thread's outcome, unless nobody is waiting any more."""
+    if fut.done():      # the caller already timed out and moved on
+        return
+    if exc is not None:
+        fut.set_exception(exc)
+    else:
+        fut.set_result(result)
+
+
+async def _in_detached_thread(fn, *args):
+    """Run a blocking call off the event loop on a thread we never join.
+
+    asyncio.to_thread looks right for this and is not: its threads come from the
+    default executor, which the interpreter JOINS at exit. So bounding the await
+    releases the job while the thread stays stuck on the unresponsive drive —
+    and the process can then never shut down. A `systemctl restart` hangs in its
+    stop phase until systemd gives up and SIGKILLs it.
+
+    A daemon thread is abandoned at exit instead. For a tray that will not open
+    that is the right trade twice over: the rip is already saved, and serve has
+    to be able to restart — which is the one thing you need from it when a drive
+    is misbehaving.
+    """
+    loop = asyncio.get_running_loop()
+    done = loop.create_future()
+
+    def runner() -> None:
+        try:
+            result = fn(*args)
+        except BaseException as exc:          # noqa: BLE001 — relayed to the caller
+            outcome = (exc, None)
+        else:
+            outcome = (None, result)
+        try:
+            loop.call_soon_threadsafe(_settle, done, *outcome)
+        except RuntimeError:
+            pass        # the loop is closed: serve shut down without us
+
+    threading.Thread(
+        target=runner, daemon=True,
+        name=f"blurayripper-{getattr(fn, '__name__', 'detached')}").start()
+    return await done
 
 
 class JobState(str, Enum):
@@ -935,7 +981,7 @@ class Pipeline:
                     # abandoned (it ends when the drive finally errors) and the
                     # job carries on to subtitles and the encode.
                     await asyncio.wait_for(
-                        asyncio.to_thread(eject, device), _EJECT_TIMEOUT)
+                        _in_detached_thread(eject, device), _EJECT_TIMEOUT)
                     ejected = True
                     _emit_ejected(report, device)  # drop the drive's cached disc name
                     report.on_event(

@@ -294,6 +294,36 @@ async def test_a_tray_that_never_opens_neither_freezes_serve_nor_strands_the_job
 
     assert ripped.exists()                               # the rip is kept
     assert ran_on and ran_on[0] != threading.get_ident()  # ejected off the loop
+    # ...and on a thread the interpreter will NOT wait for at exit. to_thread
+    # uses the default executor, whose threads are joined on shutdown, so a
+    # bounded await still left a stuck eject holding the process open — and
+    # `systemctl restart` hung in its stop phase until systemd SIGKILLed it.
+    stuck = [t for t in threading.enumerate() if t.name.startswith("blurayripper-")]
+    assert stuck and all(t.daemon for t in stuck), \
+        f"a wedged eject must not block interpreter exit: {stuck}"
     assert turns > 0                                     # ...which kept turning
     assert any("Auto-eject timed out" in m for m in r.events)
     assert not any("Ejected disc" in m for m in r.events)  # and never claimed success
+
+
+async def test_a_detached_thread_still_reports_what_happened(monkeypatch):
+    """Detaching is about who waits at EXIT, not about losing the result: a
+    normal eject must still report success, and a failing one must still raise
+    so the job logs why the tray didn't open."""
+    import blurayripper.pipeline as pl
+
+    assert await pl._in_detached_thread(lambda a, b: a + b, 2, 3) == 5
+
+    def boom():
+        raise RuntimeError("device is busy")
+    with __import__("pytest").raises(RuntimeError, match="device is busy"):
+        await pl._in_detached_thread(boom)
+
+    # A caller that gave up must not crash the thread when it finally finishes.
+    import asyncio as _aio
+    import threading as _th
+    release = _th.Event()
+    with __import__("pytest").raises((TimeoutError, _aio.TimeoutError)):
+        await _aio.wait_for(pl._in_detached_thread(lambda: release.wait(5)), 0.05)
+    release.set()
+    await _aio.sleep(0.1)      # the abandoned thread settles against a dead future
