@@ -2302,3 +2302,50 @@ def test_a_confirmed_disc_number_beats_one_guessed_off_the_label(manager):
     wj = _tv(manager, 508, "Landman", 2, [5, 6, 7], disc=2)
     assert manager._disc_hint(wj) == (2, 2)      # season from the assignments
     assert "D02" in manager._display_name(wj)
+
+
+def test_a_drive_label_follows_the_drive_not_the_device_path(manager):
+    """Power-cycling one drive renumbered both on a live box: /dev/sr0 and
+    /dev/sr1 swapped drives. Labels were keyed on the path, so "Silver Drive"
+    stayed on /dev/sr0 and started naming the black one — and the eject button
+    under that label opened the wrong tray. On a machine that is ripping, that
+    is a disc pulled mid-rip."""
+    from blurayripper.tools.makemkv import Drive
+
+    silver = Drive(index=0, name="BD-RE ASUS BW-16D1HT 3.01 KLUL75I4959",
+                   device="/dev/sr0", disc_name=None)
+    black = Drive(index=1, name="BD-RE ASUS BW-16D1HT 3.10 KX1P71E4206",
+                  device="/dev/sr1", disc_name=None)
+    manager._drives_cache = [silver, black]
+    manager.set_drive_name("/dev/sr0", "Silver Drive")
+    manager.set_drive_name("/dev/sr1", "Black Drive")
+    assert manager.drive_label(silver) == "Silver Drive"
+
+    # The power cycle: same two drives, paths exchanged.
+    silver.device, black.device = "/dev/sr1", "/dev/sr0"
+    assert manager.drive_label(silver) == "Silver Drive"
+    assert manager.drive_label(black) == "Black Drive"
+
+
+def test_a_label_saved_by_an_older_version_is_not_lost(manager, tmp_path):
+    """Those labels are on disk keyed by device. Reading them has to keep
+    working, or everyone's drives silently go unnamed on upgrade."""
+    import json
+
+    from blurayripper.tools.makemkv import Drive
+
+    path = manager.drive_names._path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"/dev/sr0": "Silver Drive"}))
+    manager.drive_names = type(manager.drive_names)(path)
+
+    drive = Drive(index=0, name="BD-RE ASUS 3.01 SERIAL", device="/dev/sr0",
+                  disc_name=None)
+    manager._drives_cache = [drive]
+    assert manager.drive_label(drive) == "Silver Drive"
+
+    # Renaming moves it to the stable key and drops the path-keyed entry, so the
+    # old label cannot re-attach to whatever drive lands on that path next.
+    manager.set_drive_name("/dev/sr0", "Left Bay")
+    saved = json.loads(path.read_text())
+    assert saved == {"BD-RE ASUS 3.01 SERIAL": "Left Bay"}

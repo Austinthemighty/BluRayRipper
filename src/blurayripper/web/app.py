@@ -209,7 +209,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return [
             {
                 "index": d.index, "name": d.name, "device": d.device,
-                "disc_name": d.disc_name, "label": manager.drive_names.get(d.device),
+                "disc_name": d.disc_name, "label": manager.drive_label(d),
                 "os_detected": getattr(d, "os_detected", False),
                 "makemkv_blind": getattr(d, "makemkv_blind", False),
                 # Two identical-looking drives can differ here (LibreDrive comes

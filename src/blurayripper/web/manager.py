@@ -317,8 +317,18 @@ class JobManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
+    def drive_label(self, drive) -> str | None:
+        """The name you gave this DRIVE, found by its model+serial rather than
+        by where it happens to be plugged in today."""
+        return self.drive_names.get(getattr(drive, "name", None),
+                                    getattr(drive, "device", None))
+
     def set_drive_name(self, device: str, name: str | None) -> None:
-        self.drive_names.set(device, name)
+        drive = next((d for d in self._drives_cache if d.device == device), None)
+        # Falls back to the path only for a drive we cannot currently see; a
+        # label is better attached loosely than not at all.
+        self.drive_names.set(getattr(drive, "name", None) or device, name,
+                             legacy=device)
 
     # --- persistence / recovery ----------------------------------------
 
@@ -943,7 +953,7 @@ class JobManager:
                 # with the original for the same drive, and the review the job is
                 # parked for never happens.
                 self._last_disc[d.index] = name
-                where = self.drive_names.get(d.device)
+                where = self.drive_label(d)
                 for wj in waiting:
                     wj.source = source   # point it at the drive it is actually in
                     wj.log.append(stamp_log(
@@ -1037,7 +1047,7 @@ class JobManager:
         size = os_disc_capacity_bytes(drive.device)
         if size is None or size < UHD_CAPACITY_FLOOR_BYTES:
             return None
-        here = self.drive_names.get(drive.device) or drive.name
+        here = self.drive_label(drive) or drive.name
         return (
             f"This looks like a UHD disc ({size / 1_000_000_000:.0f} GB) and "
             f"{here} has already failed to read one, so MakeMKV cannot read "
@@ -1051,7 +1061,7 @@ class JobManager:
             drive = next((d for d in self._drives_cache if d.name == name), None)
             if drive is None:
                 continue
-            label = self.drive_names.get(drive.device)
+            label = self.drive_label(drive)
             return (f"Move it to {label or name}"
                     + (f" ({name})" if label else "") + ", then Retry.")
         return "Move it to a drive that can read UHD, then Retry."
