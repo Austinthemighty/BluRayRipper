@@ -168,6 +168,7 @@ class WebJob:
     _activity_at: float | None = None
     _progress_at: float | None = None
     _progress_key: tuple | None = None   # (stage, progress) last seen moving
+    _release_drive: object = None  # hands this job's drive back before a human gate
     _pipeline_job: object = None  # the underlying pipeline.Job once scanned
     _grain_future: object = None  # asyncio.Future resolved when user picks grain
     _task: object = None          # the asyncio.Task running scan/process (for cancel)
@@ -223,6 +224,14 @@ class _Reporter:
         wj.preview_off_clip = preview.off_clip
         wj.preview_on_clip = preview.on_clip
         wj.state = JobState.AWAITING_GRAIN
+        # The rip finished before the preview was rendered, so the disc is done
+        # with. Give the drive back before waiting on a person — this gate can
+        # stay open for hours, and the next disc should not be behind it.
+        release = getattr(wj, "_release_drive", None)
+        if release is not None:
+            release()
+            wj.log.append(stamp_log(
+                "Rip finished — drive released while this waits for a grain choice."))
         # get_running_loop, not get_event_loop: this is inside a coroutine, so the
         # loop is unambiguous, and get_event_loop's implicit-loop behaviour is
         # deprecated (and increasingly noisy) on 3.12+.
@@ -2706,9 +2715,27 @@ class JobManager:
             wj.log.append(stamp_log(
                 f"Waiting for {key} — another job is using that drive."))
             self.bus.publish()
-        async with lock:
+        await lock.acquire()
+        # Acquired by hand rather than with `async with`, so the job can hand the
+        # drive back EARLY. Everything after the rip — the grain gate above all —
+        # works from the ripped file and has no use for the disc, and the grain
+        # gate waits for a person. Holding the drive across that meant one job
+        # awaiting a click blocked every other disc in that drive indefinitely.
+        released = False
+
+        def release_drive() -> None:
+            nonlocal released
+            if not released:
+                released = True
+                lock.release()
+
+        wj._release_drive = release_drive
+        try:
             async with self._prep_sem:
                 yield
+        finally:
+            wj._release_drive = None
+            release_drive()
 
     def _fire_due_maintenance(self) -> None:
         """Raise the drain once the maintenance deadline passes, then clear it.

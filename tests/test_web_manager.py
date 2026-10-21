@@ -2349,3 +2349,46 @@ def test_a_label_saved_by_an_older_version_is_not_lost(manager, tmp_path):
     manager.set_drive_name("/dev/sr0", "Left Bay")
     saved = json.loads(path.read_text())
     assert saved == {"BD-RE ASUS 3.01 SERIAL": "Left Bay"}
+
+
+async def test_waiting_for_a_grain_choice_does_not_hold_the_drive(manager):
+    """The grain gate is the last step of prep, and it waits for a person — so
+    it can stay open for hours. It sits inside the per-drive lock, which is held
+    for the whole of prep_phase, so a job parked there blocked every other disc
+    in that drive. The rip has already finished by then and the preview is
+    rendered from the ripped file, so the disc is not needed at all.
+
+    A disc put in that drive overnight would simply never start."""
+    from blurayripper.web.manager import _Reporter
+
+    parked = WebJob(id=600, source="disc:0", state=JobState.RIPPING)
+    manager.jobs[600] = parked
+    other = WebJob(id=601, source="disc:0", state=JobState.QUEUED)
+    manager.jobs[601] = other
+
+    held = asyncio.Event()
+    second_got_in = asyncio.Event()
+
+    async def hold_the_drive():
+        async with manager._prep_slot(parked):
+            held.set()
+            # The gate: exactly what _Reporter.resolve_grain does before waiting.
+            reporter = _Reporter(manager, parked)
+            parked.preview_off = parked.preview_on = None
+            parked.state = JobState.AWAITING_GRAIN
+            release = getattr(parked, "_release_drive", None)
+            assert release is not None, "the slot must expose a way to hand it back"
+            release()
+            await second_got_in.wait()      # stand at the gate like a real one
+
+    async def want_the_same_drive():
+        await held.wait()
+        async with manager._prep_slot(other):
+            second_got_in.set()
+
+    await asyncio.wait_for(
+        asyncio.gather(hold_the_drive(), want_the_same_drive()), 5)
+    assert second_got_in.is_set()
+
+    # Releasing twice must not blow up when the slot finally unwinds.
+    assert manager._drive_locks["disc:0"].locked() is False
