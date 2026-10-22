@@ -534,3 +534,13 @@ def test_a_season_that_disagrees_with_the_disc_label_is_called_out():
     assert js("seasonMismatch(9, '9')") == ""
     assert js("seasonMismatch(null, '8')") == ""          # the label states none
     assert js("seasonMismatch(9, '')") == ""              # nothing chosen yet
+
+
+def test_auto_identify_searches_every_episode_a_two_parter_adds():
+    """Job 399: seven titles holding E09–E16. Counting titles searched E09–E15
+    and left the last episode out."""
+    titles = _lengths(1296, 1298, 2595, 1221, 1297, 1297, 1296)
+    assert js(f"identifyEpisodes({titles}, 9)") == list(range(9, 17))
+    assert js(f"identifyEpisodes({_lengths(1296, 1298, 1300)}, 1)") == [1, 2, 3]
+    # The two-parter last on the disc, as a season finale often is.
+    assert js(f"identifyEpisodes({_lengths(1296, 1298, 2595)}, 22)") == [22, 23, 24, 25]

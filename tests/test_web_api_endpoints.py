@@ -467,6 +467,15 @@ def test_auto_identify_without_an_opensubtitles_key_is_400(client, manager):
     assert r.status_code == 400 and "OpenSubtitles" in r.json()["detail"]
 
 
+def test_confirm_match_carries_a_two_parters_second_episode(client, manager):
+    wj = _scanned_job(manager, 11, JobState.AWAITING_MATCH)
+    wj.show_title, wj.season = "HIMYM", 8
+    r = client.post("/api/jobs/11/confirm-match",
+                    json={"mapping": {"2": 11, "3": 13}, "ends": {"2": 12}})
+    assert r.json() == {"ok": True}
+    assert wj.assignments[2].episodes == [11, 12] and wj.assignments[3].episodes == [13]
+
+
 def test_confirm_match_turns_json_string_keys_back_into_title_ids(client, manager):
     """JSON object keys are always strings; the confirmed title->episode map has
     to come back as ints or every assignment lands on the wrong title."""

@@ -669,6 +669,17 @@ function doubleLengthIds(titles){
   return titles.filter(t => (t.seconds || 0) >= DOUBLE_MIN * usual
                          && (t.seconds || 0) <= DOUBLE_MAX * usual).map(t => t.id);
 }
+// The episodes auto-identify should search for: one per title, two for a
+// double-length one. Counting titles alone left the last episode out (job 399:
+// seven titles holding E09–E16).
+function identifyEpisodes(titles, first){
+  const {assign, ends} = fillInOrder(titles, first);
+  const last = Math.max(first - 1, ...titles.map(t => ends[t.id] || assign[t.id]));
+  const out = [];
+  for (let e = first; e <= last; e++) out.push(e);
+  return out;
+}
+
 // Number titles in disc order from `start`. A double-length title takes two
 // episodes, so the titles after it stay in step instead of each being one short.
 function fillInOrder(titles, start){
@@ -1540,7 +1551,7 @@ function buildMapping(card, j){
         const season=+tv.querySelector('[data-season]').value;
         const first=+tv.querySelector('[data-firstep]').value||1;
         const ids=sel().map(t=>t.id);
-        const episodes=ids.map((_,i)=>first+i);  // the episodes on this disc
+        const episodes=identifyEpisodes(sel(), first);  // the episodes on this disc
         const gmode = body.querySelector(`input[name=g${j.id}]:checked`).value;
         const tune_grain = gmode==='on'?true:(gmode==='off'?false:null);
         const off = seasonMismatch(j.label_season, season);
@@ -1817,6 +1828,7 @@ function buildMatch(card, j){
   body.innerHTML = `<div class="muted" style="font-size:12px;">Subtitle match for <b>${m.show}</b> S${pad(m.season)} — confirm each title's episode. ⚠ = runtime/subs couldn't decide confidently.</div>`
     + m.candidates.map(c=>`<div class="row">Title ${c.title_id} →
         <select data-mep="${c.title_id}">${opts(c.episode)}</select>
+        <label class="muted" style="font-size:12px;" title="This title holds two episodes — a two-parter put on the disc as one."><input type="checkbox" data-mepdouble="${c.title_id}" ${c.episode_end?'checked':''}> + next episode</label>
         <span class="muted">score ${c.score}${c.runner_up!=null?` · next E${pad(c.runner_up)} ${c.runner_up_score}`:''}</span>
         ${c.confident?'<span style="color:#3fb950;">✓</span>':'<span style="color:#d29922;">⚠</span>'}</div>`).join('')
     + `<div class="row"><button data-confirmmatch>Confirm episodes</button>`
@@ -1831,13 +1843,17 @@ function buildMatch(card, j){
   body.querySelector('[data-confirmmatch]').onclick = async (ev) => {
     const mbtn = ev.currentTarget;
     if (mbtn.disabled) return;          // a click is already in flight
-    const mapping={};
-    body.querySelectorAll('select[data-mep]').forEach(s=>mapping[+s.dataset.mep]=+s.value);
-    const eps=Object.values(mapping);
+    const mapping={}, ends={};
+    body.querySelectorAll('select[data-mep]').forEach(s=>{
+      mapping[+s.dataset.mep]=+s.value;
+      const dbl = body.querySelector(`[data-mepdouble="${s.dataset.mep}"]`);
+      if (dbl && dbl.checked) ends[+s.dataset.mep] = +s.value + 1;
+    });
+    const eps=[...Object.values(mapping), ...Object.values(ends)];
     if(new Set(eps).size!==eps.length && !confirm('Two titles map to the same episode — continue anyway?')) return;
     body.querySelector('[data-msg]').textContent='Saving…';
     mbtn.disabled = true;
-    try { await api('POST',`/api/jobs/${j.id}/confirm-match`,{mapping}); }
+    try { await api('POST',`/api/jobs/${j.id}/confirm-match`,{mapping, ends}); }
     catch(e){
       mbtn.disabled = false;            // a real failure must stay retryable
       body.querySelector('[data-msg]').textContent='⚠ '+e.message;

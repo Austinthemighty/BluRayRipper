@@ -100,3 +100,50 @@ async def test_ambiguous_match_parks_then_confirm_resumes(tmp_path, monkeypatch)
 
     assert wj.state is JobState.DONE
     assert executed["assignments"] == {0: 10, 1: 12, 2: 11}
+
+
+async def test_a_two_parter_on_the_disc_is_named_for_both_episodes(tmp_path, monkeypatch):
+    """Job 399's disc, in miniature: one title twice the usual length holding
+    E11 and E12, the rest one episode each. It used to park every time, with
+    the two-parter unsure and the episode after it unsearched."""
+    monkeypatch.setitem(EP, 13, [f"the old lighthouse keeper sang at night {i}"
+                                 for i in range(40)])
+    rips = {0: _srt(EP[10]), 1: _srt(EP[11] + EP[12]), 2: _srt(EP[13])}
+    m, wj, executed = _make_manager(tmp_path, monkeypatch, rips)
+    wj.disc.titles[1].duration_seconds = 2600           # the long one
+    named = {}
+
+    async def fake_execute(job, scheduler, report, job_name=None):
+        named.update({t: a.episodes for t, a in job.assignments.items()})
+        job.results = []
+        return job
+    monkeypatch.setattr(m.pipeline, "execute", fake_execute)
+
+    m.set_auto_identify(1, "Show", 2020, 999, 1, [10, 11, 12, 13], [0, 1, 2])
+    await _settle()
+
+    assert wj.state is JobState.DONE
+    assert named == {0: [10], 1: [11, 12], 2: [13]}
+    assert any("title 1 -> E11–E12" in line for line in wj.log)
+
+
+async def test_a_confirmed_two_parter_keeps_both_episodes(tmp_path, monkeypatch):
+    m, wj, executed = _make_manager(tmp_path, monkeypatch, {})
+    wj.state = JobState.AWAITING_MATCH
+    wj.show_title, wj.season = "Show", 1
+
+    m.confirm_match(1, {0: 10, 1: 11, 2: 13}, ends={1: 12})
+
+    assert wj.assignments[1].episodes == [11, 12]
+    assert wj.assignments[2].episodes == [13]
+
+
+def test_confirming_a_two_parter_over_its_neighbour_is_refused(tmp_path, monkeypatch):
+    import pytest as _pytest
+    m, wj, executed = _make_manager(tmp_path, monkeypatch, {})
+    wj.state = JobState.AWAITING_MATCH
+    wj.show_title, wj.season = "Show", 1
+
+    with _pytest.raises(ValueError, match="both include S01E12"):
+        m.confirm_match(1, {0: 10, 1: 11, 2: 12}, ends={1: 12})
+    assert wj.state is JobState.AWAITING_MATCH

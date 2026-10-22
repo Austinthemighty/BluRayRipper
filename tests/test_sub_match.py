@@ -71,3 +71,34 @@ def test_indistinguishable_episodes_flagged_low_confidence():
     rips = {0: _srt(["the same line repeated"] * 40), 1: _srt(["the same line repeated"] * 40)}
     matches = identify(rips, refs)
     assert all(not m.confident for m in matches)
+
+
+# --- a two-parter mastered as one title --------------------------------------------
+
+from blurayripper.services.sub_match import identify_two_parts  # noqa: E402
+
+EP_LINES[13] = [f"The old lighthouse keeper sang at night {i}" for i in range(40)]
+REFS[13] = _srt(EP_LINES[13])
+
+
+def test_a_title_holding_two_episodes_matches_the_pair():
+    """HIMYM S8 D2's "The Final Page" is E11+E12 in one title. Against either
+    reference alone it scores about half, so one-episode matching never trusted
+    it. On the real captions: 0.825 for the pair against 0.496 for E11 alone."""
+    rips = {5: _srt(_ocr_noise(EP_LINES[11] + EP_LINES[12]))}
+
+    (m,) = identify_two_parts(rips, REFS, {5})
+
+    assert (m.title_id, m.episode, m.episode_end, m.confident) == (5, 11, 12, True)
+    assert m.score - m.runner_up_score >= 0.04
+
+
+def test_a_long_single_episode_is_not_mistaken_for_a_pair():
+    """Twice the usual length is only a hint. A long episode scores best on its
+    own, and must be left to the ordinary matching."""
+    rips = {5: _srt(EP_LINES[12])}
+    assert identify_two_parts(rips, REFS, {5}) == []
+    # At the end of the range only one pair can contain it, so no other pair
+    # competes — the title's own single-episode score is what says no.
+    assert identify_two_parts({5: _srt(EP_LINES[13])}, REFS, {5}) == []
+    assert identify_two_parts({5: _srt(EP_LINES[11] + EP_LINES[12])}, REFS, set()) == []

@@ -102,6 +102,7 @@ class AutoIdentify(BaseModel):
 
 class ConfirmMatch(BaseModel):
     mapping: dict[int, int]        # title_id -> episode
+    ends: dict[int, int] | None = None   # title_id -> last episode, for a two-parter
 
 
 class EditJob(BaseModel):
@@ -444,7 +445,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def confirm_match(job_id: int, body: ConfirmMatch):
         """Accept, or correct, the episode match auto-identify proposed."""
         with _job_errors():
-            manager.confirm_match(job_id, {int(k): v for k, v in body.mapping.items()})
+            manager.confirm_match(job_id, {int(k): v for k, v in body.mapping.items()},
+                                  {int(k): v for k, v in (body.ends or {}).items()})
         return {"ok": True}
 
     @app.post("/api/jobs/{job_id}/retry")

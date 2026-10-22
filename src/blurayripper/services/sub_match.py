@@ -70,6 +70,44 @@ class Match:
     runner_up: int | None      # title's next-best episode
     runner_up_score: float
     confident: bool
+    # The last episode when the title holds two (a two-parter mastered as one).
+    episode_end: int | None = None
+
+
+def identify_two_parts(
+    rips: dict[int, str],
+    refs: dict[int, str],
+    candidates: set[int],
+    *,
+    n: int = 3,
+    min_score: float = 0.10,
+    min_margin: float = 0.04,
+) -> list[Match]:
+    """Titles in ``candidates`` that hold two consecutive episodes.
+
+    A two-parter mastered as one title (HIMYM S8's "The Final Page", E11+E12)
+    carries both halves' dialogue, so against either reference alone it scores
+    about half — and one-episode matching left it forever unsure. Scored here
+    against each consecutive pair merged into one reference, it matches like any
+    episode does. Taken only when a pair clearly beats every single episode and
+    every other pair: a long single episode scores best on its own.
+    """
+    ref_sh = {ep: shingles(normalize_dialogue(t), n) for ep, t in refs.items()}
+    found: list[Match] = []
+    for tid in candidates:
+        if tid not in rips:
+            continue
+        rs = shingles(normalize_dialogue(rips[tid]), n)
+        pairs = sorted(((_jaccard(rs, ref_sh[e] | ref_sh[e + 1]), e)
+                        for e in ref_sh if e + 1 in ref_sh), reverse=True)
+        if not pairs:
+            continue
+        best, ep = pairs[0]
+        singles = [_jaccard(rs, sh) for sh in ref_sh.values()]
+        rival = max(([pairs[1][0]] if len(pairs) > 1 else []) + singles, default=0.0)
+        if best >= min_score and best - rival >= min_margin:
+            found.append(Match(tid, ep, best, None, rival, True, episode_end=ep + 1))
+    return found
 
 
 def identify(

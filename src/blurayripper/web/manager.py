@@ -52,7 +52,7 @@ from ..services.drive_caps import DriveCaps
 from ..services.drive_names import DriveNames
 from ..services.notify import notify
 from ..services.opensubtitles import OpenSubtitlesClient, gather_references
-from ..services.sub_match import identify
+from ..services.sub_match import identify, identify_two_parts
 from ..tools import discinfo
 from ..tools.makemkv import (
     UHD_CAPACITY_FLOOR_BYTES,
@@ -2025,19 +2025,24 @@ class JobManager:
         wj.state = JobState.READY
         self._start_job(wj)
 
-    def confirm_match(self, job_id: int, mapping: dict[int, int]) -> None:
+    def confirm_match(self, job_id: int, mapping: dict[int, int],
+                      ends: dict[int, int] | None = None) -> None:
         """Resolve an AWAITING_MATCH job: ``mapping`` is title_id -> episode for
-        every selected title. Builds assignments and resumes to encode/place."""
+        every selected title, and ``ends`` the last episode of any title that
+        holds two. Builds assignments and resumes to encode/place."""
         wj = self.jobs[job_id]
         if wj.state is not JobState.AWAITING_MATCH:
             raise ValueError(f"Job {job_id} is not awaiting match confirmation.")
-        wj.assignments = {
+        ends = ends or {}
+        assignments = {
             tid: EpisodeAssignment(
                 title_id=tid, kind=MediaKind.TV, show_or_movie_title=wj.show_title or "",
-                year=wj.show_year, season=wj.season, episode=ep,
+                year=wj.show_year, season=wj.season, episode=ep, episode_end=ends.get(tid),
             )
             for tid, ep in mapping.items()
         }
+        self._refuse_colliding_assignments(list(assignments.values()))
+        wj.assignments = assignments
         wj.selected_title_ids = list(mapping.keys())
         wj.match_candidates = []
         wj.state = JobState.READY
@@ -2080,7 +2085,18 @@ class JobManager:
                 f"(show {wj.show_title!r} S{wj.season} E{wj.candidate_episodes}). "
                 "The show/season may be mismatched, or these episodes aren't on "
                 "OpenSubtitles — fix the show or map episodes manually.")
-        matches = identify(rips, refs)
+        # A title about twice the usual length may be a two-parter mastered as
+        # one, holding two episodes. Those are matched against consecutive
+        # pairs first, and everything else against the episodes left over.
+        lengths = [t for t in (wj.disc.title(tid) for tid in rips) if t is not None] \
+            if wj.disc else []
+        doubles = discinfo.double_length_titles(lengths)
+        two_parts = identify_two_parts(rips, refs, doubles) if doubles else []
+        paired = {m.title_id for m in two_parts}
+        taken = {n for m in two_parts for n in (m.episode, m.episode_end)}
+        matches = two_parts + identify(
+            {t: text for t, text in rips.items() if t not in paired},
+            {e: text for e, text in refs.items() if e not in taken})
         # Every title asked about gets a row, matched or not. A title with no
         # subtitles never reaches identify(), and dropping it here would drop it
         # from the job too — unnamed, unencoded, and with nothing said.
@@ -2098,9 +2114,10 @@ class JobManager:
             wj.match_candidates.append(
                 {"title_id": m.title_id, "episode": m.episode, "score": round(m.score, 3),
                  "runner_up": m.runner_up, "runner_up_score": round(m.runner_up_score, 3),
-                 "confident": m.confident})
+                 "confident": m.confident, "episode_end": m.episode_end})
+            span = f"E{m.episode}" + (f"–E{m.episode_end}" if m.episode_end else "")
             reporter.on_event(
-                f"title {m.title_id} -> E{m.episode} (score {m.score:.2f}"
+                f"title {m.title_id} -> {span} (score {m.score:.2f}"
                 + (f", runner-up E{m.runner_up} {m.runner_up_score:.2f}" if m.runner_up else "")
                 + (")" if m.confident else ") — needs confirmation"))
         sure = [by_title.get(tid) for tid in wanted]
@@ -2110,7 +2127,7 @@ class JobManager:
                 m.title_id: EpisodeAssignment(
                     title_id=m.title_id, kind=MediaKind.TV,
                     show_or_movie_title=wj.show_title or "", year=wj.show_year,
-                    season=wj.season, episode=m.episode,
+                    season=wj.season, episode=m.episode, episode_end=m.episode_end,
                 )
                 for m in sure
             }
