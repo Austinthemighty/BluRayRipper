@@ -25,6 +25,42 @@ from . import process
 ProgressHandler = Callable[["EncodeProgress"], None] | Callable[["EncodeProgress"], Awaitable[None]]
 
 
+# What HandBrake may copy untouched, and what it encodes to otherwise, when the
+# preset does not say. Every lossless and surround format is here: the point of
+# copying is to keep the disc's own audio.
+_DEFAULT_COPY_MASK = ("aac", "ac3", "eac3", "truehd", "dts", "dtshd", "flac")
+_DEFAULT_FALLBACK = "av_aac"
+
+
+def preset_audio(preset_file: Path, name: str) -> tuple[list[str], str]:
+    """The named preset's audio copy mask, spelled as HandBrakeCLI takes it
+    ("ac3", not the preset file's "copy:ac3"), and its fallback encoder.
+
+    Read from the preset so it stays the one place these are set; the lossless
+    defaults apply when the file or the preset cannot be read."""
+    try:
+        data = json.loads(Path(preset_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+
+    def find(items):
+        for p in items or []:
+            if not isinstance(p, dict):
+                continue
+            if p.get("PresetName") == name:
+                return p
+            hit = find(p.get("ChildrenArray"))
+            if hit is not None:
+                return hit
+        return None
+
+    preset = find(data.get("PresetList") if isinstance(data, dict) else None) or {}
+    mask = [m.split(":", 1)[1] if m.startswith("copy:") else m
+            for m in preset.get("AudioCopyMask") or [] if isinstance(m, str)]
+    return (mask or list(_DEFAULT_COPY_MASK),
+            preset.get("AudioEncoderFallback") or _DEFAULT_FALLBACK)
+
+
 @dataclass
 class EncodeProgress:
     state: str
@@ -146,6 +182,7 @@ class HandBrake:
         langs = self._settings.languages
         # Put the default language first so HandBrake flags it as default.
         ordered = [langs.default] + [l for l in langs.keep if l != langs.default]
+        copy_mask, fallback = preset_audio(enc.preset_file, enc.preset_name)
         cmd = [
             self._settings.tools.require("handbrakecli"),
             "--preset-import-file",
@@ -162,6 +199,15 @@ class HandBrake:
             # "main": only the first (primary) track per language; "all": every
             # kept-language track including commentaries.
             "--first-audio" if self._settings.audio.main_only else "--all-audio",
+            # Name the audio encoder. With the tracks chosen here and no encoder
+            # named, HandBrakeCLI did not apply the preset's "copy": every track
+            # of every 1080p and DVD encode came out MP3 stereo at 160 kbps, the
+            # disc's TrueHD, DTS-HD and AC-3 5.1 thrown away. On the rip box the
+            # same command gave mp3 2ch 160k without these three, ac3 6ch 448k
+            # with them.
+            "--aencoder", "copy",
+            "--audio-copy-mask", ",".join(copy_mask),
+            "--audio-fallback", fallback,
             # Override any subtitle handling in the preset. We extract PGS from
             # the ripped MKV and OCR to .srt sidecars separately, so HandBrake
             # must not select, embed, or burn-in subtitles (a preset with

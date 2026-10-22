@@ -81,3 +81,33 @@ def test_deinterlace_flag_adds_comb_detect_decomb():
     on = hb.build_command(Path("i.mkv"), Path("o.mkv"), deinterlace=True)
     assert "--decomb" not in off and "--comb-detect" not in off
     assert "--comb-detect" in on and "--decomb" in on
+
+
+def test_the_discs_own_audio_is_copied_not_re_encoded(tmp_path):
+    """Every 1080p and DVD encode in the library came out with each audio track
+    as MP3 stereo at 160 kbps: Inside Out's seven tracks, House S08's AC-3 5.1.
+    The preset says copy, but with tracks picked on the command line and no
+    encoder named, HandBrakeCLI did not apply it. Run on the rip box: without
+    these flags mp3 2ch 160k, with them ac3 6ch 448k."""
+    cmd = HandBrake(_settings()).build_command(Path("in.mkv"), Path("out.mkv"))
+
+    assert cmd[cmd.index("--aencoder") + 1] == "copy"
+    mask = cmd[cmd.index("--audio-copy-mask") + 1].split(",")
+    assert {"ac3", "eac3", "truehd", "dts", "dtshd"} <= set(mask)   # surround + lossless
+    assert not any(m.startswith("copy:") for m in mask)             # the CLI's spelling
+    assert cmd[cmd.index("--audio-fallback") + 1] == "av_aac"
+
+
+def test_the_copy_list_and_fallback_come_from_the_preset(tmp_path):
+    import json
+    from blurayripper.tools.handbrake import preset_audio
+    p = tmp_path / "presets.json"
+    p.write_text(json.dumps({"PresetList": [{"PresetName": "Folder", "ChildrenArray": [
+        {"PresetName": "Mine", "AudioCopyMask": ["copy:ac3", "copy:truehd"],
+         "AudioEncoderFallback": "ac3"}]}]}))
+
+    assert preset_audio(p, "Mine") == (["ac3", "truehd"], "ac3")
+    # Unreadable or unknown: keep everything lossless rather than guess smaller.
+    mask, fallback = preset_audio(tmp_path / "missing.json", "Mine")
+    assert {"truehd", "dtshd", "flac"} <= set(mask) and fallback == "av_aac"
+    assert preset_audio(p, "Not There")[1] == "av_aac"
