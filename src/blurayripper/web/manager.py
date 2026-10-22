@@ -1927,6 +1927,23 @@ class JobManager:
         job = wj._pipeline_job
         staging_root = self.settings.storage.staging_dir / f"job_{wj.id}"
         rips = await self.pipeline.identify_phase(job, staging_root, reporter)
+        if not rips:
+            # Nothing to match with. Only Blu-ray (PGS) subtitles are OCR'd, so
+            # every DVD lands here. Fetching references would only spend quota,
+            # and matching nothing must not pass for matching everything: job
+            # 397 queued for encode with no titles at all. Hand the naming back
+            # — the rip is kept, so confirming resumes rather than re-rips.
+            wj.auto_identify = False
+            wj.state = JobState.AWAITING_MAPPING
+            job.state = JobState.AWAITING_MAPPING
+            reporter.on_event(
+                "None of these titles has subtitles that can be read to identify "
+                "episodes (DVD subtitles can't be) — set the episodes by hand. "
+                "The rip is kept.")
+            self._notify(f"🟡 Needs your input: {self._name_of(wj)}",
+                         f"Job #{wj.id} — couldn't identify the episodes by "
+                         "subtitles; set them by hand.")
+            return False
         reporter.on_event(
             f"Fetching reference subtitles for episodes {wj.candidate_episodes} …")
         refs = await gather_references(
@@ -1940,27 +1957,39 @@ class JobManager:
                 "The show/season may be mismatched, or these episodes aren't on "
                 "OpenSubtitles — fix the show or map episodes manually.")
         matches = identify(rips, refs)
-        wj.match_candidates = [
-            {"title_id": m.title_id, "episode": m.episode, "score": round(m.score, 3),
-             "runner_up": m.runner_up, "runner_up_score": round(m.runner_up_score, 3),
-             "confident": m.confident}
-            for m in matches
-        ]
-        for m in matches:
+        # Every title asked about gets a row, matched or not. A title with no
+        # subtitles never reaches identify(), and dropping it here would drop it
+        # from the job too — unnamed, unencoded, and with nothing said.
+        by_title = {m.title_id: m for m in matches}
+        wanted = list(wj.selected_title_ids)
+        wj.match_candidates = []
+        for tid in wanted:
+            m = by_title.get(tid)
+            if m is None:
+                wj.match_candidates.append(
+                    {"title_id": tid, "episode": None, "score": 0.0, "runner_up": None,
+                     "runner_up_score": 0.0, "confident": False})
+                reporter.on_event(f"title {tid} -> no subtitles to match — needs confirmation")
+                continue
+            wj.match_candidates.append(
+                {"title_id": m.title_id, "episode": m.episode, "score": round(m.score, 3),
+                 "runner_up": m.runner_up, "runner_up_score": round(m.runner_up_score, 3),
+                 "confident": m.confident})
             reporter.on_event(
                 f"title {m.title_id} -> E{m.episode} (score {m.score:.2f}"
                 + (f", runner-up E{m.runner_up} {m.runner_up_score:.2f}" if m.runner_up else "")
                 + (")" if m.confident else ") — needs confirmation"))
-        if all(m.confident and m.episode is not None for m in matches):
+        sure = [by_title.get(tid) for tid in wanted]
+        if wanted and all(m is not None and m.confident and m.episode is not None
+                          for m in sure):
             wj.assignments = {
                 m.title_id: EpisodeAssignment(
                     title_id=m.title_id, kind=MediaKind.TV,
                     show_or_movie_title=wj.show_title or "", year=wj.show_year,
                     season=wj.season, episode=m.episode,
                 )
-                for m in matches
+                for m in sure
             }
-            wj.selected_title_ids = [m.title_id for m in matches]
             return True
         wj.state = JobState.AWAITING_MATCH
         reporter.on_event("Subtitle match needs confirmation — review in the UI.")

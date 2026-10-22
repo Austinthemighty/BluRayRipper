@@ -1071,7 +1071,8 @@ async def test_an_unsure_subtitle_match_parks_for_confirmation_rather_than_namin
         Match(title_id=1, episode=10, score=0.80, runner_up=9,
               runner_up_score=0.10, confident=True),
     ])
-    wj = _job(manager, 110, state=JobState.READY, disc=_tv_disc(label="HOUSE_S1_D3"))
+    wj = _job(manager, 110, state=JobState.READY, disc=_tv_disc(label="HOUSE_S1_D3"),
+             selected=(0, 1))
     wj.auto_identify = True
     wj.show_title, wj.season, wj.candidate_episodes = "House", 1, [9, 10]
 
@@ -1088,6 +1089,64 @@ async def test_an_unsure_subtitle_match_parks_for_confirmation_rather_than_namin
     assert pushes[0][0].startswith("📺 Confirm episodes")
 
 
+async def test_a_disc_with_no_readable_subtitles_goes_back_for_naming_not_to_encode(
+        manager, monkeypatch):
+    """Job 397, a DVD: only Blu-ray subtitles are OCR'd, so no title had any
+    text, identify() returned no matches, and all() of nothing is True — the job
+    queued for encode with its selection replaced by the empty match list. It
+    must come back to the naming form instead, without spending quota on
+    references it has nothing to compare with."""
+    pushes = _pushes(manager, monkeypatch)
+    fetched = []
+
+    async def phase(job, root, report):
+        return {}
+
+    async def refs(*a, **kw):
+        fetched.append(a)
+        return {9: "reference 9"}
+
+    monkeypatch.setattr(manager.pipeline, "identify_phase", phase)
+    monkeypatch.setattr(mgr, "gather_references", refs)
+    wj = _job(manager, 112, state=JobState.READY, disc=_tv_disc(label="HIMYM_S9"),
+              selected=(0, 1, 2))
+    wj.auto_identify = True
+    wj.show_title, wj.season, wj.candidate_episodes = "HIMYM", 9, [17, 18, 19]
+
+    ok = await manager._auto_identify(wj, _Reporter(manager, wj))
+
+    assert ok is False
+    assert wj.state is JobState.AWAITING_MAPPING
+    assert wj.auto_identify is False          # re-running it would find nothing again
+    assert wj.selected_title_ids == [0, 1, 2]
+    assert wj.assignments == {}
+    assert fetched == []
+    assert "set the episodes by hand" in _log(wj)
+    assert pushes and pushes[0][0].startswith("🟡 Needs your input")
+
+
+async def test_a_title_with_no_subtitles_is_kept_and_asked_about(manager, monkeypatch):
+    """The other half of the same hole: one title matched, one had nothing to
+    match with. Naming the one and quietly dropping the other loses an episode."""
+    _identify_rig(manager, monkeypatch, [
+        Match(title_id=0, episode=9, score=0.91, runner_up=10,
+              runner_up_score=0.10, confident=True),
+    ])
+    wj = _job(manager, 113, state=JobState.READY, disc=_tv_disc(label="HOUSE_S1_D3"),
+              selected=(0, 1))
+    wj.auto_identify = True
+    wj.show_title, wj.season, wj.candidate_episodes = "House", 1, [9, 10]
+
+    ok = await manager._auto_identify(wj, _Reporter(manager, wj))
+
+    assert ok is False
+    assert wj.state is JobState.AWAITING_MATCH
+    assert wj.assignments == {}
+    assert [(c["title_id"], c["episode"], c["confident"]) for c in wj.match_candidates] \
+        == [(0, 9, True), (1, None, False)]
+    assert "title 1 -> no subtitles to match — needs confirmation" in _log(wj)
+
+
 async def test_a_confident_subtitle_match_names_every_title_and_carries_on(
         manager, monkeypatch):
     """The gate is for doubt only — a clean match must not add a click to every
@@ -1099,7 +1158,8 @@ async def test_a_confident_subtitle_match_names_every_title_and_carries_on(
         Match(title_id=1, episode=10, score=0.88, runner_up=9,
               runner_up_score=0.09, confident=True),
     ])
-    wj = _job(manager, 111, state=JobState.READY, disc=_tv_disc(label="HOUSE_S1_D3"))
+    wj = _job(manager, 111, state=JobState.READY, disc=_tv_disc(label="HOUSE_S1_D3"),
+             selected=(0, 1))
     wj.auto_identify = True
     wj.show_title, wj.show_year = "House", 2004
     wj.season, wj.candidate_episodes = 1, [9, 10]
