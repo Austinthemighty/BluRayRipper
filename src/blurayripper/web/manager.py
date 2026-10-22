@@ -3478,6 +3478,37 @@ class JobManager:
     def _title_dict(self, wj: WebJob) -> list[dict]:
         assert wj.disc is not None
         suggested = self._suggested_titles(wj.disc)
+        # Per title, after the picker: was it picked, what is it named as, and
+        # how far has it got. Job 388 looked as if one of its three titles had
+        # gone missing; nothing on the card said which were ripped.
+        picked = set(wj.selected_title_ids or [])
+        job = wj._pipeline_job
+        cps = getattr(job, "checkpoints", None) or {}
+        now = re.match(r"Rip t(\d+):", wj.stage or "")
+        ripping = int(now.group(1)) if now and self.reading_drive(wj) else None
+
+        def status(tid: int) -> str:
+            if tid not in picked:
+                return "not_picked"
+            cp = cps.get(tid) or {}
+            if cp.get("placed"):
+                return "placed"
+            if cp.get("encoded_path"):
+                return "encoded"
+            if cp.get("ripped_path"):
+                return "ripped"
+            return "ripping" if tid == ripping else "waiting"
+
+        def named(tid: int) -> str | None:
+            a = wj.assignments.get(tid)
+            if a is None:
+                return None
+            if a.kind is MediaKind.TV and a.season is not None and a.episode is not None:
+                code = naming.episode_code(a.season, a.episode, a.episode_end)
+                return f"{code} · {a.episode_title}" if a.episode_title else code
+            text = f"{a.show_or_movie_title} ({a.year})" if a.year else a.show_or_movie_title
+            return f"{text} — {a.edition}" if a.edition else text
+
         return [
             {
                 "id": t.title_id,
@@ -3489,6 +3520,9 @@ class JobManager:
                 "audio": t.audio_languages,
                 "subs": t.subtitle_languages,
                 "suggested": t.title_id in suggested,
+                "picked": t.title_id in picked,
+                "named": named(t.title_id),
+                "status": status(t.title_id),
             }
             for t in discinfo.ordered_titles(wj.disc)
         ]

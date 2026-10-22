@@ -1146,7 +1146,40 @@ function cardHtml(j){
     <div class="bar"><div data-bar></div></div>
     <div class="stage" data-stage></div>
     <div data-body></div>
+    <details class="titles" data-titles style="display:none;margin-top:6px;font-size:12px;">
+      <summary class="muted" data-tsum style="cursor:pointer;"></summary>
+      <div data-tbody></div>
+    </details>
     <div class="log" data-log></div>`;
+}
+
+// The disc's titles on every card once they've been picked: length, size,
+// playlist, whether picked, what each is named as, and how far it has got.
+// Job 388 looked as if a title had gone missing; nothing said which were ripped.
+const TITLE_STATUS = {
+  not_picked: ['not picked', '#6e7681'], waiting: ['waiting', '#8b949e'],
+  ripping: ['ripping…', '#58a6ff'], ripped: ['ripped', '#3fb950'],
+  encoded: ['encoded', '#3fb950'], placed: ['in library', '#3fb950'],
+};
+function titlesSection(j){
+  const ts = j.titles || [];
+  if (!ts.length || j.state === 'awaiting_titles') return null;   // the picker shows them
+  const picked = ts.filter(t => t.picked);
+  const count = s => picked.filter(t => t.status === s).length;
+  const done = count('ripped') + count('encoded') + count('placed');
+  const summary = `Titles — ${picked.length} of ${ts.length} picked · ${done} ripped`
+    + (count('ripping') ? ' · 1 ripping' : '');
+  const body = ts.map(t => {
+    const [label, color] = TITLE_STATUS[t.status] || [t.status || '', '#8b949e'];
+    return `<div class="row" style="gap:10px;${t.picked ? '' : 'opacity:.55;'}">`
+      + `<span style="min-width:28px;">t${t.id}</span>`
+      + `<span style="min-width:62px;">${esc(t.duration || '')}</span>`
+      + `<span class="muted" style="min-width:52px;">${t.size_gb != null ? t.size_gb + ' GB' : ''}</span>`
+      + (t.playlist ? `<span class="muted">${esc(t.playlist)}</span>` : '')
+      + (t.named ? `<span>${esc(t.named)}</span>` : '')
+      + `<span style="color:${color};margin-left:auto;">${label}</span></div>`;
+  }).join('');
+  return {summary, body};
 }
 
 function removeJob(j){
@@ -1210,6 +1243,17 @@ function liveUpdate(card, j){
     logEl.scrollTop = atBottom ? logEl.scrollHeight : prevTop;  // pin to newest, else keep place
   }
   wireFullLog(card, j);
+  const td = card.querySelector('[data-titles]');
+  if (td) {
+    const sec = titlesSection(j);
+    td.style.display = sec ? '' : 'none';
+    if (sec) {
+      // Only the contents change, so an open list stays open through each tick.
+      const sum = td.querySelector('[data-tsum]'), tb = td.querySelector('[data-tbody]');
+      if (sum.textContent !== sec.summary) sum.textContent = sec.summary;
+      if (tb._html !== sec.body) { tb.innerHTML = sec.body; tb._html = sec.body; }
+    }
+  }
   if (j.state==='done' && j.outputs && j.outputs.length && !card.querySelector('[data-out]')) {
     const o=document.createElement('div'); o.className='muted'; o.dataset.out='1';
     o.style.fontSize='12px'; o.textContent = j.outputs.join('\n');

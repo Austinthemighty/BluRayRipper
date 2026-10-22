@@ -487,3 +487,38 @@ def test_going_to_a_job_finds_the_page_it_is_on():
     assert js(f"jobPageOf({jobs}, 120, '50')") == 2
     assert js(f"jobPageOf({jobs}, 120, 'all')") == 0
     assert js(f"jobPageOf({jobs}, 999, '50')") == -1
+
+
+# --- a job's titles on its card ------------------------------------------------------
+
+def _titled_job(state):
+    return json.dumps({"id": 388, "state": state, "titles": [
+        {"id": 0, "duration": "0:50:28", "size_gb": 11.8, "playlist": "00800.mpls",
+         "picked": True, "status": "ripped", "named": "S02E08"},
+        {"id": 1, "duration": "0:56:34", "size_gb": 13.2, "playlist": "00801.mpls",
+         "picked": True, "status": "ripping", "named": "S02E09"},
+        {"id": 3, "duration": "0:28:18", "size_gb": 4.1, "playlist": "01085.m2ts",
+         "picked": False, "status": "not_picked", "named": None}]})
+
+
+def test_the_card_lists_the_titles_and_how_many_are_ripped():
+    sec = js(f"titlesSection({_titled_job('ripping')})")
+    assert sec["summary"] == "Titles — 2 of 3 picked · 1 ripped · 1 ripping"
+    assert "S02E08" in sec["body"] and "ripped" in sec["body"]
+    assert "ripping…" in sec["body"] and "not picked" in sec["body"]
+    assert "00800.mpls" in sec["body"] and "11.8 GB" in sec["body"]
+
+
+def test_the_title_list_stays_out_of_the_way_while_you_pick_titles():
+    assert js(f"titlesSection({_titled_job('awaiting_titles')})") is None
+    assert js('titlesSection({id: 1, state: "ready", titles: []})') is None
+
+
+def test_titles_already_encoded_or_in_the_library_count_as_ripped():
+    job = json.dumps({"id": 1, "state": "encoding", "titles": [
+        {"id": 0, "picked": True, "status": "placed"},
+        {"id": 1, "picked": True, "status": "encoded"},
+        {"id": 2, "picked": True, "status": "ripped"}]})
+    sec = js(f"titlesSection({job})")
+    assert sec["summary"] == "Titles — 3 of 3 picked · 3 ripped"
+    assert "in library" in sec["body"]

@@ -2776,3 +2776,28 @@ def test_the_job_reading_a_drive_is_the_one_shown_for_it(manager):
     ripping = job(9, JobState.RIPPING)
 
     assert manager.drive_holders()[0] is ripping
+
+
+async def test_each_title_says_whether_it_was_picked_what_it_is_and_how_far_it_got(
+        manager, monkeypatch):
+    """Job 388 looked as if one of its three titles had gone missing. The card
+    now says, per title, which were picked, ripped, and what each is named."""
+    gate = asyncio.Event()
+    _rip_rig(manager, monkeypatch, gate=gate)
+    wj = await _at_naming(manager, titles=(0, 1))
+    wj._pipeline_job.checkpoints = {0: {"ripped_path": "job_1/rip/t000/a.mkv"}}
+    wj.stage = "Rip t1: Saving to MKV file"            # the early rip is on title 1
+    wj.assignments = {0: EpisodeAssignment(0, MediaKind.TV, "HIMYM", 2005, season=8,
+                                           episode=11, episode_end=12,
+                                           episode_title="The Final Page (1) & (2)")}
+
+    t = {x["id"]: x for x in manager._title_dict(wj)}
+
+    assert (t[0]["picked"], t[0]["status"]) == (True, "ripped")
+    assert t[0]["named"] == "S08E11-E12 · The Final Page (1) & (2)"
+    assert (t[1]["picked"], t[1]["status"], t[1]["named"]) == (True, "ripping", None)
+    assert (t[2]["picked"], t[2]["status"]) == (False, "not_picked")
+
+    gate.set()
+    await _settle()
+    assert manager._title_dict(wj)[1]["status"] == "ripped"
