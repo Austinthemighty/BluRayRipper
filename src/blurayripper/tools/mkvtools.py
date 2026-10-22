@@ -31,6 +31,9 @@ class SubtitleTrack:
     sdh: bool = False  # hearing-impaired / SDH / closed-caption
     name: str | None = None
     default: bool = False
+    # Already text (SubRip), so readable without OCR. On a DVD this is the
+    # closed captions, which MakeMKV converts to an SRT track.
+    is_text: bool = False
 
 
 def parse_video_height(stdout: str) -> int | None:
@@ -116,6 +119,8 @@ def parse_identify(stdout: str) -> list[SubtitleTrack]:
                 codec=codec,
                 language=lang.lower() if lang else None,
                 is_pgs="PGS" in codec.upper(),
+                is_text=(props.get("codec_id") == "S_TEXT/UTF8"
+                         or "SUBRIP" in codec.upper()),
                 forced=forced,
                 sdh=sdh,
                 name=name,

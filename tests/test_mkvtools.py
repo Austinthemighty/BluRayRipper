@@ -24,6 +24,22 @@ def test_parse_identify_filters_to_subtitles():
     assert [t.track_id for t in tracks] == [2, 3, 4]
 
 
+def test_a_dvds_caption_track_is_recognised_as_text():
+    """Job 397's DVD: four VobSub picture tracks and MakeMKV's SRT conversion
+    of the closed captions. Only the SRT one can be read without OCR."""
+    stdout = json.dumps({"tracks": [
+        {"id": 2, "type": "subtitles", "codec": "VobSub",
+         "properties": {"language": "eng", "codec_id": "S_VOBSUB"}},
+        {"id": 6, "type": "subtitles", "codec": "SubRip/SRT",
+         "properties": {"language": "eng", "codec_id": "S_TEXT/UTF8"}},
+    ]})
+
+    t = {x.track_id: x for x in parse_identify(stdout)}
+
+    assert t[6].is_text and not t[6].is_pgs
+    assert not t[2].is_text and not t[2].is_pgs
+
+
 def test_pgs_detection_and_language():
     tracks = {t.track_id: t for t in parse_identify(SAMPLE)}
     assert tracks[2].is_pgs and tracks[2].language == "eng"

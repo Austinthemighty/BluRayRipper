@@ -90,6 +90,25 @@ async def test_titles_named_as_the_wrong_episodes_are_caught(tmp_path, monkeypat
     assert "Nothing was placed" in str(exc.value)
 
 
+async def test_a_dvd_is_checked_from_its_captions(tmp_path, monkeypatch):
+    """A DVD has nothing OCR'd — its subtitles are pictures — so the check had
+    nothing to compare and never ran on the discs it was written for. Its
+    closed captions are text, and they catch the same swap."""
+    pipe = _pipe(tmp_path, monkeypatch)
+    job = _job({0: 1, 1: 2, 2: 3})
+    captions = {0: SCRIPTS[1], 1: SCRIPTS[3], 2: SCRIPTS[2]}
+
+    async def caption_text(ripped, sub_dir, report):
+        return _srt(captions[int(ripped.stem[1:])])
+    monkeypatch.setattr(pipe, "_caption_text", caption_text)
+    sources = {tid: (tmp_path / f"t{tid}.mkv", tmp_path / "sub") for tid in captions}
+
+    with pytest.raises(RuntimeError) as exc:
+        await pipe._verify_episode_order(job, {}, _Report(), sources=sources)
+
+    assert "title 1 was named E02 but matches E03" in str(exc.value)
+
+
 async def test_correctly_named_titles_pass_and_say_their_scores(tmp_path, monkeypatch):
     """A clean disc must sail through — and still report what it found, so a
     marginal one is visible rather than merely silent."""

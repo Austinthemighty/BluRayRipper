@@ -1928,18 +1928,19 @@ class JobManager:
         staging_root = self.settings.storage.staging_dir / f"job_{wj.id}"
         rips = await self.pipeline.identify_phase(job, staging_root, reporter)
         if not rips:
-            # Nothing to match with. Only Blu-ray (PGS) subtitles are OCR'd, so
-            # every DVD lands here. Fetching references would only spend quota,
-            # and matching nothing must not pass for matching everything: job
-            # 397 queued for encode with no titles at all. Hand the naming back
-            # — the rip is kept, so confirming resumes rather than re-rips.
+            # Nothing to match with: no Blu-ray (PGS) subtitles to OCR and no
+            # closed captions — a DVD from outside the US, say. Fetching
+            # references would only spend quota, and matching nothing must not
+            # pass for matching everything: job 397 queued for encode with no
+            # titles at all. Hand the naming back — the rip is kept, so
+            # confirming resumes rather than re-rips.
             wj.auto_identify = False
             wj.state = JobState.AWAITING_MAPPING
             job.state = JobState.AWAITING_MAPPING
             reporter.on_event(
                 "None of these titles has subtitles that can be read to identify "
-                "episodes (DVD subtitles can't be) — set the episodes by hand. "
-                "The rip is kept.")
+                "episodes — no Blu-ray subtitles and no closed captions — set the "
+                "episodes by hand. The rip is kept.")
             self._notify(f"🟡 Needs your input: {self._name_of(wj)}",
                          f"Job #{wj.id} — couldn't identify the episodes by "
                          "subtitles; set them by hand.")

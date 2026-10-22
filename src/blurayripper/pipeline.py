@@ -407,7 +407,9 @@ class Pipeline:
             job, [(tid, a, r, sd, extracted[tid]) for tid, a, r, sd in pending], report)
         # The OCR text exists now and will not again — check the episode order
         # before any of it is placed under a name.
-        await self._verify_episode_order(job, ocr, report)
+        await self._verify_episode_order(
+            job, ocr, report,
+            sources={tid: (ripped, sd) for tid, _a, ripped, sd in pending})
         for title_id, assignment, ripped, _sub_dir in pending:
             result = TitleResult(title_id=title_id)
             video_dest = self._video_path_for(assignment)
@@ -743,7 +745,10 @@ class Pipeline:
         Ripping is done for ALL titles up front, back-to-back, so the optical
         drive never idles mid-job (some drives spin down between reads and
         misbehave on resume). The OCR reads only the ripped files, so the disc is
-        already ejected by the time it runs."""
+        already ejected by the time it runs.
+
+        A title with no Blu-ray subtitles to OCR — every DVD — falls back to the
+        disc's closed captions, which need no OCR at all."""
         assert job.disc is not None
         default_lang = self.settings.languages.default.lower()
 
@@ -779,7 +784,14 @@ class Pipeline:
             choice = choice or next(((s, t) for s, t in sub_jobs if not t.forced), None)
             choice = choice or (sub_jobs[0] if sub_jobs else None)
             if choice is None:
-                report.on_event(f"Title {title_id}: no subtitles to identify with.")
+                text = await self._caption_text(ripped_paths[title_id], sub_dir, report)
+                if text:
+                    rips[title_id] = text
+                    report.on_event(
+                        f"Title {title_id}: identifying from the disc's closed "
+                        f"captions (already text, no OCR).")
+                else:
+                    report.on_event(f"Title {title_id}: no subtitles to identify with.")
                 continue
             sup, track = choice
             try:
@@ -1016,7 +1028,10 @@ class Pipeline:
         job._ripped_this_run = True
         await self._eject_and_notify(job, report)
 
-    async def _verify_episode_order(self, job: Job, ocr: dict, report) -> None:
+    async def _verify_episode_order(
+        self, job: Job, ocr: dict, report,
+        sources: dict[int, tuple[Path, Path]] | None = None,
+    ) -> None:
         """Check that each ripped title really is the episode it was named as.
 
         Runtime cannot do this. A disc's episodes run within seconds of each
@@ -1027,7 +1042,9 @@ class Pipeline:
 
         The subtitles have already been OCR'd by this point for the sidecars, so
         this costs a comparison and, the first time for a season, a reference
-        fetch that is then cached.
+        fetch that is then cached. A title with nothing OCR'd — a DVD — is read
+        from its closed captions instead, when ``sources`` says where its rip
+        is: ``{title_id: (ripped_mkv, sub_dir)}``.
 
         Deliberately quiet unless it is sure. It objects only when the matcher is
         CONFIDENT that some other episode on this disc fits a title better than
@@ -1052,6 +1069,11 @@ class Pipeline:
                 if text.strip():
                     rips[tid] = text
                     break
+        for tid in pairs:
+            if tid not in rips and sources and tid in sources:
+                text = await self._caption_text(*sources[tid], report)
+                if text:
+                    rips[tid] = text
         if len(rips) < 2:
             return
         first = pairs[next(iter(rips))]
@@ -1087,6 +1109,40 @@ class Pipeline:
                 "named as: " + "; ".join(wrong) + ". Runtime cannot tell these "
                 "apart — they are all the same length — so the naming is what "
                 "needs fixing, not the rip. Nothing was placed.")
+
+    async def _caption_text(self, ripped_mkv: Path, sub_dir: Path, report) -> str | None:
+        """A title's own text subtitles, or None.
+
+        DVD subtitles are pictures, and only Blu-ray's are OCR'd. But MakeMKV
+        turns a US DVD's closed captions into a text (SRT) track — a full
+        transcript that needs no OCR. On the HIMYM S9 D2 rips (job 396) every
+        title matched its episode at 0.71-0.91, against a runner-up of 0.02 at
+        most. Never raises: this only feeds identification and a check.
+        """
+        try:
+            tracks = await self.mkvtools.identify_subtitles(ripped_mkv)
+        except Exception as exc:
+            report.on_event(f"Could not list subtitle tracks for captions "
+                            f"({_first_line(exc)}).")
+            return None
+        text_tracks = [t for t in tracks if t.is_text and not t.forced]
+        if not text_tracks:
+            return None
+        default_lang = self.settings.languages.default.lower()
+        track = next((t for t in text_tracks
+                      if (t.language or "").lower() == default_lang), text_tracks[0])
+        out = sub_dir / f"{ripped_mkv.stem}.t{track.track_id}.{track.language or 'und'}.captions.srt"
+        if not (out.is_file() and out.stat().st_size):
+            try:
+                await self.mkvtools.extract_tracks(ripped_mkv, [(track.track_id, out)])
+            except Exception as exc:
+                report.on_event(f"Could not extract the captions ({_first_line(exc)}).")
+                return None
+        try:
+            text = out.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return None
+        return text if text.strip() else None
 
     async def _show_tmdb_id(self, assignment) -> int | None:
         """The TMDB id for an assignment's show, or None. Never raises: this
