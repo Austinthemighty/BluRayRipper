@@ -103,6 +103,70 @@ def commit_count(version: str | None) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def commit_of(version: str | None) -> str | None:
+    """The commit hash out of a version like ``0.1.0+242.bc2d392`` or
+    ``0.1.0+gbc2d392``, or None."""
+    m = re.match(r"^\d+\.\d+\.\d+\+(?:\d+\.|g)([0-9a-f]{7,40})", version or "")
+    return m.group(1) if m else None
+
+
+def _git_in(repo: Path, *args: str) -> subprocess.CompletedProcess | None:
+    exe = _git_exe()
+    if not exe:
+        return None
+    try:
+        return subprocess.run([exe, "-C", str(repo), *args],
+                              capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def code_relation(version: str | None, head_version: str | None = None,
+                  repo: Path = _REPO) -> tuple[str, int | None]:
+    """Where another box's build sits against this checkout.
+
+    One of ("current", 0), ("behind", n), ("ahead", n), ("off_main", None) or
+    ("unknown", None). "off_main" is the one that matters: a commit that is not
+    in this checkout's history, so a fast-forward on that box can never reach
+    main. After main was rewritten, handbreak01 and handbreak02 sat on one for
+    six weeks while the workers panel showed them as healthy.
+    """
+    theirs = commit_of(version)
+    ours = commit_of(head_version if head_version is not None else get_version())
+    if not theirs or not ours:
+        return ("unknown", None)
+    return _relation(theirs, ours, str(repo))
+
+
+@lru_cache(maxsize=128)
+def _relation(theirs: str, ours: str, repo: str) -> tuple[str, int | None]:
+    def full(rev: str) -> str | None:
+        r = _git_in(Path(repo), "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}")
+        return r.stdout.strip() if r is not None and r.returncode == 0 else None
+
+    def ancestor(a: str, b: str) -> bool:
+        r = _git_in(Path(repo), "merge-base", "--is-ancestor", a, b)
+        return r is not None and r.returncode == 0
+
+    def count(a: str, b: str) -> int | None:
+        r = _git_in(Path(repo), "rev-list", "--count", f"{a}..{b}")
+        out = r.stdout.strip() if r is not None and r.returncode == 0 else ""
+        return int(out) if out.isdigit() else None
+
+    head, other = full(ours), full(theirs)
+    if head is None:
+        return ("unknown", None)
+    if other is None:
+        return ("off_main", None)      # a commit this history has never had
+    if other == head:
+        return ("current", 0)
+    if ancestor(other, head):
+        return ("behind", count(other, head))
+    if ancestor(head, other):
+        return ("ahead", count(head, other))
+    return ("off_main", None)          # diverged: same story, a rewritten main
+
+
 @lru_cache(maxsize=1)
 def get_version() -> str:
     count = _git("rev-list", "--count", "HEAD")

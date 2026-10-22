@@ -223,6 +223,22 @@ def test_snapshot_includes_workers(manager):
     assert w["worker-A"]["uptime"] == 7200 and w["worker-B"]["uptime"] == 42
 
 
+def test_the_snapshot_says_when_a_workers_code_is_not_on_main(manager, monkeypatch):
+    """handbreak01/02 looked healthy for six weeks on code they could not
+    update from. The panel needs the verdict, not just the version string."""
+    from blurayripper.persistence import WorkerInfo
+    import blurayripper.web.manager as mgr
+    monkeypatch.setattr(mgr, "code_relation",
+                        lambda v: ("off_main", None) if v.endswith("8ecc42f") else ("behind", 3))
+    manager._workers_cache = [
+        WorkerInfo("handbreak01", "0.1.0+316.8ecc42f", 143, "Encode", 3.0, 44421.0),
+        WorkerInfo("SteamMachine", "0.1.0+358.7cff1d2", None, "idle", 3.0, 100.0),
+    ]
+    w = {x["id"]: x for x in manager.snapshot()["workers"]}
+    assert w["handbreak01"]["code"] == "off_main"
+    assert (w["SteamMachine"]["code"], w["SteamMachine"]["code_commits"]) == ("behind", 3)
+
+
 def test_snapshot_reports_server_uptime(manager):
     snap = manager.snapshot()
     assert "uptime" in snap and isinstance(snap["uptime"], int) and snap["uptime"] >= 0

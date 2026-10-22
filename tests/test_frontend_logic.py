@@ -459,3 +459,11 @@ def test_the_form_and_the_server_spot_the_same_two_parters():
         server = double_length_titles([Title(title_id=i, duration_seconds=s)
                                        for i, s in enumerate(lengths)])
         assert set(js(f"doubleLengthIds({_lengths(*lengths)})")) == server, lengths
+
+
+def test_a_worker_that_cannot_update_is_marked_and_told_how_to_fix_it():
+    stuck = js('workerCodeBadge({code: "off_main"})')
+    assert "Can't update itself" in stuck and "git reset --hard origin/main" in stuck
+    assert "3 commits behind" in js('workerCodeBadge({code: "behind", code_commits: 3})')
+    assert js('workerCodeBadge({code: "current", code_commits: 0})') == ""
+    assert js('workerCodeBadge({})') == ""            # an older server sends no verdict

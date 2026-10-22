@@ -60,7 +60,7 @@ from ..tools.makemkv import (
     os_disc_capacity_bytes,
     os_media_snapshot,
 )
-from ..version import get_version
+from ..version import code_relation, get_version
 
 
 _STATUS_CONTROL_C_EXIT = 3221225786  # 0xC000013A — Windows process terminated
@@ -1365,13 +1365,20 @@ class JobManager:
         stale = self.settings.cluster.stale_after_seconds
         # The rip box heartbeats into the same table (so workers can see IT drop);
         # it isn't an encode worker, so keep it out of the Workers panel.
-        workers = [
-            {"id": w.worker_id, "version": w.version, "job_id": w.job_id,
-             "stage": w.stage, "age": round(w.seconds_since_seen),
-             "stale": w.seconds_since_seen > stale,
-             "uptime": round(w.uptime_seconds), "address": w.address}
-            for w in self._workers_cache if not presence.is_serve(w.worker_id)
-        ]
+        workers = []
+        for w in self._workers_cache:
+            if presence.is_serve(w.worker_id):
+                continue
+            # Against the rip box's own checkout: a worker whose commit is not
+            # in main's history cannot update itself, however many times it
+            # tries, and it must not look healthy while that is true.
+            code, commits = code_relation(w.version)
+            workers.append(
+                {"id": w.worker_id, "version": w.version, "job_id": w.job_id,
+                 "stage": w.stage, "age": round(w.seconds_since_seen),
+                 "stale": w.seconds_since_seen > stale,
+                 "uptime": round(w.uptime_seconds), "address": w.address,
+                 "code": code, "code_commits": commits})
         return {
             "jobs": jobs,
             "version": get_version(),

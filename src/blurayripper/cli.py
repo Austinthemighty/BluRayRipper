@@ -1060,14 +1060,71 @@ def _install_stop_handlers(handler) -> list[str]:
     return installed
 
 
+def _sync_checkout(git: str, repo) -> tuple[bool, str]:
+    """``git pull --ff-only``, plus the one recovery that is safe to make alone.
+
+    Returns (updated, what happened). When the pull cannot fast-forward, the
+    usual reason on this cluster is that main was rewritten upstream: the same
+    changes under new commit ids. The author-email rewrite left handbreak01 and
+    handbreak02 on 8ecc42f for six weeks, retrying and failing at every restart.
+    Following a rewrite loses nothing, so it is done here. Local edits, a local
+    commit whose change is not upstream, or an untracked file that upstream now
+    tracks would be lost, so those are left for a person.
+    """
+    import subprocess
+
+    def run(*args: str, timeout: float = 180):
+        return subprocess.run([git, "-C", str(repo), *args],
+                              capture_output=True, text=True, timeout=timeout)
+
+    pulled = run("pull", "--ff-only")
+    if pulled.returncode == 0:
+        return True, pulled.stdout.strip()
+    why = (pulled.stderr or pulled.stdout).strip().splitlines()
+    why = why[-1] if why else f"exit {pulled.returncode}"
+
+    upstream = run("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}", timeout=30)
+    up = upstream.stdout.strip()
+    if upstream.returncode != 0 or not up:
+        return False, f"git pull failed ({why}), and this branch tracks no upstream."
+    if run("merge-base", "--is-ancestor", "HEAD", up, timeout=30).returncode == 0:
+        # A plain fast-forward was possible, so the pull failed for another
+        # reason — the network, most likely. Nothing to recover from.
+        return False, f"git pull failed: {why}"
+    if run("status", "--porcelain", "--untracked-files=no", timeout=30).stdout.strip():
+        return False, (f"git pull failed ({why}), and this checkout has local "
+                       f"changes — not overwriting them.")
+    cherry = run("cherry", up, "HEAD", timeout=120)
+    if cherry.returncode != 0:
+        return False, f"git pull failed ({why}); could not compare with {up}."
+    unique = [ln for ln in cherry.stdout.splitlines() if ln.startswith("+")]
+    if unique:
+        return False, (f"git pull failed ({why}): {len(unique)} local commit(s) "
+                       f"have no equivalent on {up} — not overwriting them.")
+    untracked = set(run("ls-files", "--others", "--exclude-standard",
+                        timeout=30).stdout.split("\n")) - {""}
+    clash = untracked & set(run("ls-tree", "-r", "--name-only", up,
+                                timeout=30).stdout.split("\n"))
+    if clash:
+        return False, (f"git pull failed ({why}): untracked file(s) "
+                       f"{', '.join(sorted(clash)[:3])} would be overwritten by {up}.")
+    reset = run("reset", "--hard", up, timeout=60)
+    if reset.returncode != 0:
+        return False, f"git reset to {up} failed: {(reset.stderr or reset.stdout).strip()}"
+    return True, (f"{up} was rewritten upstream (the same changes under new commit "
+                  f"ids), so this checkout could not fast-forward. Every local commit "
+                  f"has an equivalent there, so it was moved to {up}: "
+                  f"{reset.stdout.strip()}")
+
+
 def _pull_and_restart(console, pull: bool = True) -> None:
-    """Re-exec with the same args, optionally `git pull --ff-only` first.
+    """Re-exec with the same args, optionally updating the checkout first
+    (``_sync_checkout``: a fast-forward, or following a rewritten main).
 
     ``pull=False`` is a plain restart on the current code — what the server's
     per-worker Restart asks for, as distinct from Update. Restarts even if the
     pull fails, so the worker never stays down over a network hiccup."""
     import os
-    import subprocess
 
     from .config import REPO_ROOT
 
@@ -1083,17 +1140,12 @@ def _pull_and_restart(console, pull: bool = True) -> None:
         console.print(f"[bold cyan]Pulling latest code…[/bold cyan] [dim]({git})[/dim]")
         sys.stdout.flush()
         try:
-            r = subprocess.run(
-                [git, "-C", str(REPO_ROOT), "pull", "--ff-only"],
-                capture_output=True, text=True, timeout=180)
-            if r.stdout.strip():
-                console.print(r.stdout.strip())
-            if r.returncode != 0:
-                console.print(
-                    f"[yellow]git pull did not succeed (exit {r.returncode}) — "
-                    "restarting on the current code.[/yellow]")
-                if r.stderr.strip():
-                    console.print(f"[yellow]{r.stderr.strip()}[/yellow]")
+            ok, said = _sync_checkout(git, REPO_ROOT)
+            if ok:
+                if said:
+                    console.print(said)
+            else:
+                console.print(f"[yellow]{said} Restarting on the current code.[/yellow]")
         except Exception as exc:  # network/git error must not leave the worker dead
             console.print(f"[yellow]git pull failed ({type(exc).__name__}: {exc}) — "
                           "restarting on the current code.[/yellow]")

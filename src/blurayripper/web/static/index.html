@@ -876,6 +876,19 @@ async function refreshMaintenance(){
   try { renderMaintBanner(await api('GET','/api/maintenance')); } catch(e){}
 }
 
+// How a worker's code compares with the rip box's. "off_main" means its commit
+// is not in main's history (main was rewritten), so its Update can never reach
+// main — handbreak01/02 sat like that for six weeks looking perfectly healthy.
+function workerCodeBadge(w){
+  if (w.code === 'off_main')
+    return `<div style="font-size:11px;color:#f85149;" title="This worker's commit is not in main's history — main was rewritten (same changes, new commit ids), so its git pull can never fast-forward. Current code heals this by itself; a box on older code needs it done once by hand.">`
+      + `⚠ Can't update itself: its code isn't on main. Once, on that box: `
+      + `<code>git fetch origin &amp;&amp; git reset --hard origin/main</code>, then Restart.</div>`;
+  if (w.code === 'behind' && w.code_commits)
+    return `<div style="font-size:11px;color:#d29922;">⬆ ${w.code_commits} commit${w.code_commits===1?'':'s'} behind the rip box</div>`;
+  return '';
+}
+
 function renderWorkers(workers){
   const panel = document.getElementById('workers-panel');
   const host = document.getElementById('workers');
@@ -891,6 +904,7 @@ function renderWorkers(workers){
         <div class="wname"><b>${w.id}</b></div>
         <div class="muted wsub">${state}${busy && w.stage ? ' · '+w.stage : ''}</div>
         <div class="muted" style="font-size:11px;">v${w.version||'?'}${w.address ? ' · <span title="The address this worker reaches the cluster on — use it to ssh in.">'+esc(w.address)+'</span>' : ''} · seen ${w.age}s ago${w.uptime != null ? ' · up '+fmtUptime(w.uptime) : ''}</div>
+        ${workerCodeBadge(w)}
         <div class="row" style="gap:4px;margin-top:4px;">
           <button class="sec" data-wact="drain"   data-w="${esc(w.id)}" title="Finish the current encode and place it, then exit. Stays down until you start it again." style="padding:1px 7px;font-size:11px;">Drain</button>
           <button class="sec" data-wact="restart" data-w="${esc(w.id)}" title="Finish the current encode, then restart on the code already on this worker." style="padding:1px 7px;font-size:11px;">Restart</button>
