@@ -29,6 +29,8 @@ from .scheduler import EncodeScheduler, encode_weight
 from .services import coverart, library, naming, nfo, os_upload, pathmap
 from .services.mapping_store import MappingStore
 from .services.metadata import TMDBClient
+from .services.opensubtitles import OpenSubtitlesClient, gather_references
+from .services.sub_match import identify as identify_episodes
 from .services.subtitles import looks_like_sdh
 from .version import get_version
 from .tools import discinfo
@@ -149,6 +151,15 @@ class Pipeline:
         self.ffmpeg = FFmpeg(settings)
         self.dovitool = DoviTool(settings)
         self.tmdb = TMDBClient(settings.tmdb_api_key, settings.metadata_language)
+        # Reference subtitles, for checking that a ripped title really is the
+        # episode it was named as. Same cache directory the identify path uses,
+        # so a season fetched once serves both.
+        self.osub = OpenSubtitlesClient(
+            settings.opensubtitles_api_key,
+            settings.opensubtitles_username,
+            settings.opensubtitles_password,
+            cache_dir=settings.storage.staging_dir / "os_ref_cache",
+        )
         configure_path_map(settings.storage.path_map)
         self.mapping_store = MappingStore(settings.storage.output_dir / ".blurayripper" / "mappings.db")
         # Throttle concurrent subtitle extraction so a big batch (or a recovery
@@ -390,6 +401,9 @@ class Pipeline:
             extracted[title_id] = await self._extract_title_subs(job, title_id, ripped, sub_dir, report)
         ocr = await self._ocr_all(
             job, [(tid, a, r, sd, extracted[tid]) for tid, a, r, sd in pending], report)
+        # The OCR text exists now and will not again — check the episode order
+        # before any of it is placed under a name.
+        await self._verify_episode_order(job, ocr, report)
         for title_id, assignment, ripped, _sub_dir in pending:
             result = TitleResult(title_id=title_id)
             video_dest = self._video_path_for(assignment)
@@ -997,6 +1011,94 @@ class Pipeline:
         # the point of doing this at all.
         job._ripped_this_run = True
         await self._eject_and_notify(job, report)
+
+    async def _verify_episode_order(self, job: Job, ocr: dict, report) -> None:
+        """Check that each ripped title really is the episode it was named as.
+
+        Runtime cannot do this. A disc's episodes run within seconds of each
+        other — 1292, 1293, 1294, 1296 on the set that prompted it — so a title
+        ripped under the wrong number passes every length check there is, and
+        the files are all real playable episodes. The only thing that can tell
+        them apart is what the people in them say.
+
+        The subtitles have already been OCR'd by this point for the sidecars, so
+        this costs a comparison and, the first time for a season, a reference
+        fetch that is then cached.
+
+        Deliberately quiet unless it is sure. It objects only when the matcher is
+        CONFIDENT that some other episode on this disc fits a title better than
+        the one it was given — which is the swap this exists to catch. A merely
+        poor score means bad OCR, a bad reference, or a show whose subtitles
+        nobody uploaded, and failing a good rip over that would be worse than
+        the bug.
+        """
+        pairs = {tid: a for tid, a in job.assignments.items()
+                 if a is not None and a.kind is MediaKind.TV
+                 and a.season is not None and a.episode is not None}
+        if len(pairs) < 2 or not self.osub.configured:
+            return  # one title cannot be swapped with anything; no key, no refs
+        rips: dict[int, str] = {}
+        for tid in pairs:
+            srts = [srt for srt, _track in (ocr.get(tid) or []) if srt]
+            for srt in srts:
+                try:
+                    text = Path(srt).read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                if text.strip():
+                    rips[tid] = text
+                    break
+        if len(rips) < 2:
+            return
+        first = pairs[next(iter(rips))]
+        show_id = await self._show_tmdb_id(first)
+        if show_id is None:
+            return
+        try:
+            refs = await gather_references(
+                self.osub, show_id, first.season,
+                sorted({pairs[t].episode for t in rips}),
+                self.settings.languages.default)
+        except Exception as exc:
+            report.on_event(
+                f"Could not check the episode order against reference subtitles "
+                f"({type(exc).__name__}: {exc}) — the rips are kept as named.")
+            return
+        if len(refs) < 2:
+            return
+        wrong = []
+        for m in identify_episodes(rips, refs):
+            expected = pairs[m.title_id].episode
+            report.on_event(
+                f"Subtitle check, title {m.title_id}: named E{expected:02d}, "
+                f"best match E{m.episode:02d} (score {m.score:.2f})."
+                if m.episode is not None else
+                f"Subtitle check, title {m.title_id}: no reference matched.")
+            if m.episode is not None and m.episode != expected and m.confident:
+                wrong.append(f"title {m.title_id} was named E{expected:02d} but "
+                             f"matches E{m.episode:02d} ({m.score:.2f})")
+        if wrong:
+            raise RuntimeError(
+                "The subtitles say these titles are not the episodes they were "
+                "named as: " + "; ".join(wrong) + ". Runtime cannot tell these "
+                "apart — they are all the same length — so the naming is what "
+                "needs fixing, not the rip. Nothing was placed.")
+
+    async def _show_tmdb_id(self, assignment) -> int | None:
+        """The TMDB id for an assignment's show, or None. Never raises: this
+        only feeds a check, and a search that fails must not fail a rip."""
+        title = (assignment.show_or_movie_title or "").strip()
+        if not title:
+            return None
+        try:
+            found = await self.tmdb.search_tv(title)
+        except Exception:
+            return None
+        for c in found:
+            if assignment.year and c.year and c.year != assignment.year:
+                continue
+            return c.tmdb_id
+        return found[0].tmdb_id if found else None
 
     def _release_disc_copy(self, job: Job, staging_root: Path, report) -> None:
         """Delete the whole-disc copy once every title has been made from it.
