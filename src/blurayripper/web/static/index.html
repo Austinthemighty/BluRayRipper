@@ -1649,7 +1649,15 @@ function buildMatch(card, j){
         <select data-mep="${c.title_id}">${opts(c.episode)}</select>
         <span class="muted">score ${c.score}${c.runner_up!=null?` · next E${pad(c.runner_up)} ${c.runner_up_score}`:''}</span>
         ${c.confident?'<span style="color:#3fb950;">✓</span>':'<span style="color:#d29922;">⚠</span>'}</div>`).join('')
-    + `<div class="row"><button data-confirmmatch>Confirm episodes</button><span data-msg class="muted"></span></div>`;
+    + `<div class="row"><button data-confirmmatch>Confirm episodes</button>`
+    + `<button class="sec" data-rematch title="Searched the wrong show, season or episodes? Go back to the naming form — the rip is kept.">✎ Change show/season</button>`
+    + `<span data-msg class="muted"></span></div>`;
+  body.querySelector('[data-rematch]').onclick = async () => {
+    const msg = body.querySelector('[data-msg]');
+    msg.textContent = 'Re-opening the naming form…';
+    try { await api('POST','/api/jobs/'+j.id+'/remap'); }
+    catch(e){ msg.textContent = '⚠ '+e.message; }
+  };
   body.querySelector('[data-confirmmatch]').onclick = async (ev) => {
     const mbtn = ev.currentTarget;
     if (mbtn.disabled) return;          // a click is already in flight

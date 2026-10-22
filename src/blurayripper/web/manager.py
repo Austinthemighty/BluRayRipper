@@ -1809,7 +1809,11 @@ class JobManager:
         # READY too: a ripped job waiting for an encode worker is the common case
         # for an auto-identify disc that never matched. Moving it off READY also
         # makes it unclaimable, so it can't start encoding under the old naming.
-        if live not in (JobState.DONE, JobState.FAILED, JobState.READY):
+        # AWAITING_MATCH too: its confirm screen offers only the episodes that
+        # were searched, so a match run against the wrong season (397: S8
+        # instead of S9) had no way out at all.
+        if live not in (JobState.DONE, JobState.FAILED, JobState.READY,
+                        JobState.AWAITING_MATCH):
             raise ValueError("This job is being worked on right now — wait for it to "
                              "finish or stop, then set the naming.")
         if wj._pipeline_job is None or wj.disc is None:
@@ -1825,6 +1829,7 @@ class JobManager:
         # Auto-identify already ran (and didn't produce a mapping); re-running it
         # would just park at the same match gate, so hand naming back to the user.
         wj.auto_identify = False
+        wj.match_candidates = []
         wj.error = None
         wj.progress = 0.0
         target = (JobState.AWAITING_MAPPING if wj.selected_title_ids

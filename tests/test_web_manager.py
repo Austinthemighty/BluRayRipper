@@ -1556,6 +1556,30 @@ def test_remap_works_on_a_ready_job_waiting_for_a_worker(manager):
     assert wj.auto_identify is False
 
 
+def test_remap_lets_a_match_run_against_the_wrong_season_start_over(manager):
+    """Job 397 (HIMYM S9 D3) was matched against S8 E9-E16. Every score was
+    about 0.01, so nothing was named, but the confirm screen only offers the
+    episodes that were searched. Without this the job could not be finished."""
+    from blurayripper.pipeline import Job
+
+    wj = WebJob(id=397, source="disc:0", state=JobState.AWAITING_MATCH)
+    wj.disc = _fake_disc()
+    wj._pipeline_job = Job(source="disc:0")
+    wj._pipeline_job.state = JobState.AWAITING_MATCH
+    wj.selected_title_ids = [0, 1]
+    wj.auto_identify = True
+    wj.match_candidates = [{"title_id": 0, "episode": 16, "score": 0.011,
+                            "runner_up": 11, "runner_up_score": 0.009, "confident": False}]
+    manager.jobs[397] = wj
+
+    manager.remap(397)
+
+    assert wj.state is JobState.AWAITING_MAPPING
+    assert wj._pipeline_job.state is JobState.AWAITING_MAPPING
+    assert wj.match_candidates == []
+    assert wj.auto_identify is False
+
+
 def test_has_naming_flag_drives_the_right_button(manager):
     """The UI picks Rename vs 'Set naming' from this flag — if it were wrong, the
     dead Rename button comes back."""
