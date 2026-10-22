@@ -1184,8 +1184,8 @@ class Pipeline:
                     on_message=report.on_event)
             except Exception as exc:
                 report.on_event(
-                    f"Reading the disc in one pass failed ({type(exc).__name__}: "
-                    f"{exc}) — ripping title by title from the disc instead.")
+                    f"Reading the disc in one pass failed ({_first_line(exc)}) — "
+                    f"ripping title by title from the disc instead.")
                 library.cleanup(backup_dir)
                 return None
 
@@ -1194,8 +1194,8 @@ class Pipeline:
             copied = await self.makemkv.scan(source)
         except Exception as exc:
             report.on_event(
-                f"The disc copy could not be read back ({type(exc).__name__}: "
-                f"{exc}) — ripping title by title from the disc instead.")
+                f"The disc copy could not be read back ({_first_line(exc)}) — "
+                f"ripping title by title from the disc instead.")
             library.cleanup(backup_dir)
             return None
 
@@ -2300,6 +2300,13 @@ _PATH_RULES: list = []
 def configure_path_map(entries) -> None:
     global _PATH_RULES
     _PATH_RULES = pathmap.parse_rules(entries)
+
+
+def _first_line(exc: BaseException) -> str:
+    """An exception as one log line. A failed makemkvcon carries its stdout
+    tail — a page of DRV lines nobody can act on (job 397)."""
+    text = str(exc).strip()
+    return f"{type(exc).__name__}: {text.splitlines()[0]}" if text else type(exc).__name__
 
 
 def _backup_supported(disc: DiscInfo) -> bool:

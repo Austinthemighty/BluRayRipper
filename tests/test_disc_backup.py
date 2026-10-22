@@ -193,6 +193,27 @@ async def test_a_backup_that_fails_just_means_ripping_from_the_disc(
     assert seen["rips"] == [("disc:0", 0)]
 
 
+async def test_a_failure_is_logged_as_one_line_not_a_page_of_drive_output(
+        tmp_path, monkeypatch):
+    """A failed makemkvcon carries its stdout tail; job 397 logged a column of
+    DRV lines as the reason the copy could not be read back."""
+    pipe = _pipe(tmp_path, monkeypatch)
+    job = _job(_titles(*DISC))
+    _wire(pipe, monkeypatch, copy_titles=_titles(*DISC))
+
+    async def scan(source, on_message=None):
+        raise RuntimeError("Command failed (10): /usr/bin/makemkvcon\n"
+                           "stdout tail:\nDRV:1,256,999,0,\"\",\"\",\"\"")
+    monkeypatch.setattr(pipe.makemkv, "scan", scan)
+    r = _Report()
+
+    await pipe._prepare_disc_once(job, tmp_path / "job_1", r)
+
+    line = next(e for e in r.events if "could not be read back" in e)
+    assert "Command failed (10)" in line
+    assert "DRV:" not in line and "\n" not in line
+
+
 async def test_a_disc_too_big_for_the_space_left_is_ripped_the_old_way(
         tmp_path, monkeypatch):
     """A copy needs room for the whole disc AND the titles beside it. Filling

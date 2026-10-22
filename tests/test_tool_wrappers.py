@@ -1361,7 +1361,43 @@ async def test_the_backup_command_decrypts_and_names_the_destination(
     assert "--decrypt" in fake.cmd
     assert "-r" in fake.cmd
     assert all(isinstance(a, str) for a in fake.cmd), fake.cmd
-    assert dest.is_dir(), "the destination must exist before makemkvcon is spawned"
+
+
+async def test_the_backup_folder_is_left_for_makemkv_to_create(tmp_path, monkeypatch):
+    """Job 397: MakeMKV refuses a destination that already exists, even an
+    empty one — "already contains a backup, please choose another folder". A
+    rip wants its folder made first; a backup must not have one. An empty one
+    left by an earlier attempt is cleared."""
+    dest = tmp_path / "job_1" / "disc"
+    dest.mkdir(parents=True)                     # an earlier attempt's leftover
+    seen_at_spawn = {}
+
+    def lines(cmd):
+        seen_at_spawn["exists"] = dest.exists()
+        seen_at_spawn["parent"] = dest.parent.is_dir()
+        return []
+
+    _install(monkeypatch, FakeProcess(lines))
+    await _mk(tmp_path).backup_disc("disc:0", dest)
+
+    assert seen_at_spawn == {"exists": False, "parent": True}
+
+
+async def test_a_backup_makemkv_calls_failed_raises_with_its_reason(
+        tmp_path, monkeypatch):
+    """MakeMKV exits 0 after "Backup failed". Taking that as success sent job
+    397 on to read back an empty folder, and the reason it logged was a page of
+    drive listings instead of the one line that said what went wrong."""
+    lines = [
+        'MSG:5014,0,1,"Backing up disc into folder x","%1","x"',
+        'MSG:5070,0,1,"Folder x already contains a backup, please choose '
+        'another folder","%1","x"',
+        'MSG:5080,0,0,"Backup failed","%1","x"',
+    ]
+    _install(monkeypatch, FakeProcess(lambda cmd: list(lines)))
+
+    with pytest.raises(RuntimeError, match="already contains a backup"):
+        await _mk(tmp_path).backup_disc("disc:0", tmp_path / "b")
 
 
 async def test_a_backup_reports_progress_and_messages_like_a_rip(

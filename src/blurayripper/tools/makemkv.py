@@ -652,8 +652,15 @@ class MakeMKV:
 
         ``--decrypt`` is not optional: without it the copy keeps the disc's
         encryption and cannot be opened again as a source.
+
+        Raises if MakeMKV says the backup failed — it exits 0 regardless.
         """
-        dest_dir.mkdir(parents=True, exist_ok=True)
+        # Unlike a rip, the destination must NOT exist: MakeMKV refuses any
+        # folder that does, even an empty one ("already contains a backup,
+        # please choose another folder" — job 397). Only its parent is made.
+        dest_dir.parent.mkdir(parents=True, exist_ok=True)
+        if dest_dir.is_dir() and not any(dest_dir.iterdir()):
+            dest_dir.rmdir()  # left behind by an earlier attempt
         cmd = [
             self._bin,
             "-r",
@@ -664,6 +671,7 @@ class MakeMKV:
             str(dest_dir),
         ]
         current_label = {"text": ""}
+        messages: list[str] = []
 
         async def handle(line: str) -> None:
             prefix, _, payload = line.partition(":")
@@ -682,7 +690,15 @@ class MakeMKV:
                         await res
             elif prefix == "MSG":
                 fields = _split_robot_line(payload)
-                if len(fields) >= 4 and on_message is not None:
-                    on_message(fields[3])
+                if len(fields) >= 4:
+                    messages.append(fields[3])
+                    if on_message is not None:
+                        on_message(fields[3])
 
         await process.run(cmd, on_line=handle)
+        # MakeMKV exits 0 after "Backup failed", so its messages are the only
+        # signal — and the one just before it is the one that says why.
+        for i, msg in enumerate(messages):
+            if "backup failed" in msg.lower():
+                why = messages[i - 1] if i else msg
+                raise RuntimeError(f"MakeMKV could not copy the disc: {why}")
