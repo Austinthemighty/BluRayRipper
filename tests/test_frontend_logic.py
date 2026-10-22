@@ -467,3 +467,23 @@ def test_a_worker_that_cannot_update_is_marked_and_told_how_to_fix_it():
     assert "3 commits behind" in js('workerCodeBadge({code: "behind", code_commits: 3})')
     assert js('workerCodeBadge({code: "current", code_commits: 0})') == ""
     assert js('workerCodeBadge({})') == ""            # an older server sends no verdict
+
+
+# --- the drive panel says whose disc it is, and takes you there ---------------
+
+def test_the_drive_row_names_the_job_and_whether_it_is_reading():
+    ripping = js('driveJobHtml({job: {id: 398, name: "How I Met Your Mother S08 D01", reading: true}})')
+    assert "Ripping: #398 How I Met Your Mother S08 D01" in ripping and 'data-gojob="398"' in ripping
+    assert "Waiting: #399" in js('driveJobHtml({job: {id: 399, name: "x", reading: false}})')
+    assert js('driveJobHtml({job: null})') == ""
+
+
+def test_going_to_a_job_finds_the_page_it_is_on():
+    """With 150+ jobs paged 50 at a time, the job a drive points at is usually
+    not on the page you are looking at."""
+    jobs = json.dumps([{"id": i, "state": "done", "lane": None} for i in range(1, 121)])
+    assert js(f"jobPageOf({jobs}, 1, '50')") == 0
+    assert js(f"jobPageOf({jobs}, 51, '50')") == 1
+    assert js(f"jobPageOf({jobs}, 120, '50')") == 2
+    assert js(f"jobPageOf({jobs}, 120, 'all')") == 0
+    assert js(f"jobPageOf({jobs}, 999, '50')") == -1

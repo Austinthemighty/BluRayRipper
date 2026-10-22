@@ -597,7 +597,20 @@ class JobManager:
         """Map ``drive index -> disc name`` for jobs currently holding an optical
         drive, so the panel reflects the disc being worked on, not a stale probe."""
         out: dict[int, str] = {}
-        for wj in self.jobs.values():
+        for idx, wj in self.drive_holders().items():
+            name = (wj.disc.disc_name if wj.disc else None) or ""
+            if name.strip():
+                out[idx] = name.strip()
+        return out
+
+    def drive_holders(self) -> dict[int, WebJob]:
+        """The job each drive's disc belongs to right now, by drive index.
+
+        Shown on the drive panel, because a job you cannot find is how job 398
+        came to be ejected mid-rip: the disc looked idle and the job was not in
+        sight. Where two jobs claim one drive, the one reading it wins."""
+        out: dict[int, WebJob] = {}
+        for wj in sorted(self.jobs.values(), key=lambda j: j.id):
             if wj.state not in self._DRIVE_HELD_STATES:
                 continue
             # READY spans both "queued to rip" (disc still loaded) and "ripped,
@@ -614,10 +627,24 @@ class JobManager:
             idx = _drive_index(wj.source)
             if idx is None:
                 continue
-            name = (wj.disc.disc_name if wj.disc else None) or ""
-            if name.strip():
-                out[idx] = name.strip()
+            held = out.get(idx)
+            if held is None or (self.reading_drive(wj) and not self.reading_drive(held)):
+                out[idx] = wj
         return out
+
+    def reading_drive(self, wj: WebJob) -> bool:
+        """Whether this job is reading its disc this moment, not just holding it."""
+        if self._live_state(wj) in (JobState.SCANNING, JobState.RIPPING):
+            return True
+        return wj._early_rip is not None and not wj._early_rip.done()
+
+    def job_reading_device(self, device: str | None) -> WebJob | None:
+        """The job reading the disc in this OS device right now, if any."""
+        if not device:
+            return None
+        idx = next((d.index for d in self._drives_cache if d.device == device), None)
+        wj = self.drive_holders().get(idx) if idx is not None else None
+        return wj if wj is not None and self.reading_drive(wj) else None
 
     def _load_drives_cache(self) -> list[Drive]:
         try:

@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from blurayripper.config import load_settings
-from blurayripper.models import EpisodeAssignment, MediaKind
+from blurayripper.models import DiscInfo, EpisodeAssignment, MediaKind
 from blurayripper.persistence import MemoryStore, WorkerInfo, signal_key
 from blurayripper.pipeline import Job, JobState
 from blurayripper.tools.makemkv import Drive
@@ -142,7 +142,7 @@ def test_drives_serves_the_watcher_cache_without_rescanning(client, manager):
 
     r = client.get("/api/drives")
     assert r.status_code == 200
-    assert r.json() == [{"index": 0, "name": "BD-RE", "device": "F:",
+    assert r.json() == [{"index": 0, "name": "BD-RE", "device": "F:", "job": None,
                          "disc_name": "WARGAMES", "label": None,
                          "os_detected": False, "makemkv_blind": False,
                          # Unknown until a disc has been opened in that drive,
@@ -220,6 +220,56 @@ def test_eject_forgets_the_disc_that_came_out(client, manager, monkeypatch):
 
     assert client.post("/api/drives/eject", json={"device": "F:"}).json() == {"ok": True}
     assert client.get("/api/drives").json()[0]["disc_name"] is None
+
+
+def _ripping(manager, job_id=398, state=JobState.RIPPING):
+    wj = _job(manager, job_id, state=state, source="disc:0")
+    wj.disc = DiscInfo(source="disc:0", disc_name="HOW_I_MET_YOUR_MOTHER_S8_D1", titles=[])
+    return wj
+
+
+def test_the_drive_panel_names_the_job_using_the_drive(client, manager):
+    """Job 398's disc looked idle and the job could not be found, so it was
+    ejected mid-rip. The panel says whose disc it is."""
+    manager._drives_cache = [Drive(index=0, name="BD-RE", device="/dev/sr1", disc_name="X")]
+    _ripping(manager)
+
+    (drive,) = client.get("/api/drives").json()
+
+    assert drive["job"]["id"] == 398 and drive["job"]["reading"] is True
+    assert "HOW_I_MET_YOUR_MOTHER_S8_D1" in drive["job"]["name"]
+
+
+def test_eject_asks_before_stopping_a_rip_and_goes_ahead_when_told(
+        client, manager, monkeypatch):
+    import blurayripper.web.app as app_mod
+    opened = []
+    monkeypatch.setattr(app_mod, "eject", lambda device: opened.append(device))
+    manager._drives_cache = [Drive(index=0, name="BD-RE", device="/dev/sr1", disc_name="X")]
+    _ripping(manager)
+
+    r = client.post("/api/drives/eject", json={"device": "/dev/sr1"})
+    assert r.status_code == 409
+    assert r.json()["detail"]["job"] == 398
+    assert "ripping from this drive" in r.json()["detail"]["message"]
+    assert opened == []                                   # the tray stayed shut
+
+    r = client.post("/api/drives/eject", json={"device": "/dev/sr1", "force": True})
+    assert r.status_code == 200 and opened == ["/dev/sr1"]
+
+
+def test_eject_does_not_ask_when_the_drive_is_only_being_waited_on(
+        client, manager, monkeypatch):
+    """A job parked at the naming form with its disc not yet ripped holds the
+    drive but is not reading it; opening the tray there interrupts nothing."""
+    import blurayripper.web.app as app_mod
+    monkeypatch.setattr(app_mod, "eject", lambda device: None)
+    manager._drives_cache = [Drive(index=0, name="BD-RE", device="/dev/sr1", disc_name="X")]
+    wj = _ripping(manager, state=JobState.AWAITING_MAPPING)
+    wj.selected_title_ids = [0]
+
+    assert client.get("/api/drives").json()[0]["job"]["reading"] is False
+    assert client.post("/api/drives/eject", json={"device": "/dev/sr1"}).status_code == 200
 
 
 def test_failed_eject_is_a_400_and_leaves_the_disc_on_record(client, manager, monkeypatch):

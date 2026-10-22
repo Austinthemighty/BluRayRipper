@@ -121,6 +121,9 @@ class NameDrive(BaseModel):
 
 class DriveDevice(BaseModel):
     device: str | None = None  # e.g. "F:" or "\\.\CdRom0"; null = default drive
+    # Eject even though a job is reading the disc. Without it the eject is
+    # refused with a 409 that names the job, so the UI can ask first.
+    force: bool = False
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -208,9 +211,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     status_code=503,
                     detail="Drive scan timed out — the system is busy, or a drive "
                            "isn't responding (check/unplug a failing drive). Will retry.")
+        holders = manager.drive_holders()
         return [
             {
                 "index": d.index, "name": d.name, "device": d.device,
+                # The job this drive's disc belongs to, so the panel can say who
+                # is using it and take you to that job.
+                "job": ({"id": h.id, "name": manager._display_name(h),
+                         "reading": manager.reading_drive(h)}
+                        if (h := holders.get(d.index)) is not None else None),
                 "disc_name": d.disc_name, "label": manager.drive_label(d),
                 "os_detected": getattr(d, "os_detected", False),
                 "makemkv_blind": getattr(d, "makemkv_blind", False),
@@ -267,6 +276,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # exit. Three clicks of this button on an unresponsive drive left three
         # stuck threads, and serve could then never shut down: `systemctl
         # restart` hung in its stop phase until systemd SIGKILLed it.
+        busy = None if body.force else manager.job_reading_device(body.device)
+        if busy is not None:
+            # Job 398 was ejected mid-rip from this button: the disc looked idle
+            # and its job could not be found. Opening the tray mid-read fails
+            # that title, so say whose rip it is and let the person decide.
+            raise HTTPException(status_code=409, detail={
+                "message": f"Job #{busy.id} ({manager._display_name(busy)}) is "
+                           f"ripping from this drive right now. Ejecting stops that "
+                           f"rip — titles already ripped are kept, and the rest "
+                           f"need the disc back.",
+                "job": busy.id,
+            })
         try:
             await _tray_command(eject, body.device, "ejecting")
         except (TimeoutError, asyncio.TimeoutError):

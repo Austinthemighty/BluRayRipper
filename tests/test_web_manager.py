@@ -2739,3 +2739,40 @@ def test_a_ripped_job_does_not_stop_the_next_disc_of_a_set_being_noticed(manager
 
     job(389, JobState.AWAITING_MAPPING, ripped=False)   # D4, in the drive, not ripped
     assert manager._disc_has_active_job("LANDMAN_SEASON2") is True
+
+
+async def test_a_disc_ripping_while_its_naming_waits_counts_as_being_read(
+        manager, monkeypatch):
+    """The form is still up, so the job looks parked — but its disc is being
+    read, which is exactly when an eject would fail a title."""
+    from blurayripper.tools.makemkv import Drive
+    gate = asyncio.Event()
+    _rip_rig(manager, monkeypatch, gate=gate)
+    manager._drives_cache = [Drive(index=0, name="BD-RE", device="/dev/sr1", disc_name="X")]
+    wj = await _at_naming(manager)
+
+    assert wj.state is JobState.AWAITING_MAPPING
+    assert manager.reading_drive(wj) is True
+    assert manager.job_reading_device("/dev/sr1") is wj
+
+    gate.set()
+    await _settle()
+    assert manager.job_reading_device("/dev/sr1") is None     # ripped; nothing to interrupt
+
+
+def test_the_job_reading_a_drive_is_the_one_shown_for_it(manager):
+    """A parked job and a ripping one can both point at disc:0 (the disc was
+    swapped). The panel must name the one actually using the drive."""
+    def job(jid, state):
+        wj = WebJob(id=jid, source="disc:0", state=state)
+        wj.disc = _fake_disc()
+        wj.selected_title_ids = [0]
+        wj._pipeline_job = Job(source="disc:0")
+        wj._pipeline_job.state = state
+        manager.jobs[jid] = wj
+        return wj
+
+    job(5, JobState.AWAITING_MAPPING)          # older, waiting, not reading
+    ripping = job(9, JobState.RIPPING)
+
+    assert manager.drive_holders()[0] is ripping

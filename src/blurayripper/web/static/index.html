@@ -366,7 +366,13 @@ async function api(method, url, body) {
   const text = await r.text();
   let data = null;
   if (text) { try { data = JSON.parse(text); } catch (e) { data = null; } }
-  if (!r.ok) { throw new Error((data && data.detail) || r.statusText || ('HTTP ' + r.status)); }
+  if (!r.ok) {
+    const detail = data && data.detail;
+    const err = new Error((detail && (typeof detail === 'string' ? detail : detail.message))
+                          || r.statusText || ('HTTP ' + r.status));
+    err.status = r.status; err.detail = detail;
+    throw err;
+  }
   return data;
 }
 
@@ -412,7 +418,10 @@ async function loadDrives() {
       }
       const disc = discLabelHtml(d);
       div.innerHTML =
-        `<div class="drive-info"><b>${title}</b><small class="disc-name" title="${d.disc_name||''}">${disc}</small><small>disc:${d.index} ${d.device||''}</small>${driveCapsHtml(d)}</div>`;
+        `<div class="drive-info"><b>${title}</b><small class="disc-name" title="${d.disc_name||''}">${disc}</small>${driveJobHtml(d)}<small>disc:${d.index} ${d.device||''}</small>${driveCapsHtml(d)}</div>`;
+      div.querySelectorAll('[data-gojob]').forEach(a => {
+        a.onclick = (e) => { e.preventDefault(); goToJob(+a.dataset.gojob); };
+      });
       const btns = document.createElement('div');
       btns.className = 'drive-btns';
       const add = document.createElement('button');
@@ -441,6 +450,44 @@ async function loadDrives() {
   }
 }
 
+// Which job this drive's disc belongs to. Job 398 was ejected mid-rip because
+// the disc looked idle and its job could not be found in the queue.
+function driveJobHtml(d){
+  const j = d.job;
+  if (!j) return '';
+  const what = j.reading ? '● Ripping' : 'Waiting';
+  return `<small><a href="#" data-gojob="${j.id}" title="Show this job in the queue"`
+    + ` style="color:${j.reading ? '#3fb950' : '#d29922'};">${what}: #${j.id} ${esc(j.name || '')}</a></small>`;
+}
+// The queue's order, shared by the list and by goToJob's page arithmetic.
+function jobOrder(a, b){
+  return jobRank(a) - jobRank(b) || (b.priority || 0) - (a.priority || 0) || a.id - b.id;
+}
+// The page (0-based) a job lands on in the unfiltered queue, or -1.
+function jobPageOf(jobs, id, size){
+  const idx = [...jobs].sort(jobOrder).findIndex(j => j.id === id);
+  if (idx < 0) return -1;
+  const per = size === 'all' ? Math.max(jobs.length, 1) : (parseInt(size) || 50);
+  return Math.floor(idx / per);
+}
+// Bring a job into view: clear any search or filter that hides it, turn to
+// its page, and flash its card.
+function goToJob(id){
+  const snap = renderJobs._lastSnap;
+  if (!snap || !snap.jobs) return;
+  const page = jobPageOf(snap.jobs, id, pageSize);
+  if (page < 0) return;
+  jobQuery = ''; jobFilter = null;
+  const box = document.getElementById('jobsearch'); if (box) box.value = '';
+  curPage = page; renderJobs._sig = '';
+  renderJobs(snap);
+  const c = document.getElementById('job-' + id);
+  if (c) {
+    c.scrollIntoView({behavior: 'smooth', block: 'center'});
+    c.classList.remove('flash'); void c.offsetWidth; c.classList.add('flash');
+  }
+}
+
 function toast(msg){
   let host = document.getElementById('toasts');
   if (!host){ host = document.createElement('div'); host.id = 'toasts'; document.body.appendChild(host); }
@@ -461,9 +508,16 @@ async function renameDrive(d){
   try { await api('POST','/api/drives/name',{device:d.device,name}); await loadDrives(); }
   catch(e){ alert(e.message); }
 }
-async function trayAction(d, action){
-  try { await api('POST','/api/drives/'+action,{device:d.device||null}); }
-  catch(e){ alert((action==='eject'?'Eject':'Close tray')+' failed: '+e.message); }
+async function trayAction(d, action, force){
+  try { await api('POST','/api/drives/'+action,{device:d.device||null, force:!!force}); }
+  catch(e){
+    // The server refuses to open a tray a rip is reading from, and says whose.
+    if (action === 'eject' && !force && e.status === 409 && e.detail && e.detail.job != null) {
+      if (confirm(e.message + '\n\nEject anyway?')) return trayAction(d, action, true);
+      return;
+    }
+    alert((action==='eject'?'Eject':'Close tray')+' failed: '+e.message);
+  }
 }
 function openAddSelector(){
   const m = document.getElementById('addsel-modal');
@@ -970,7 +1024,7 @@ function renderJobs(snap) {
   if (!snap.jobs || !snap.jobs.length) { host.innerHTML = '<span id="placeholder" class="muted">No jobs yet. Add a disc from the Drives panel.</span>'; renderedStateClear(); renderJobs._sig = ''; renderJobs._known = new Set(); renderBulkBar(0); const pg = document.getElementById('pager'); if (pg){ pg.innerHTML=''; pg._sig=''; } return; }
   const ph = document.getElementById('placeholder'); if (ph) ph.remove();
   const allJobs = [...snap.jobs].filter(j => (!jobFilter || catOf(j)===jobFilter) && matchesQuery(j, jobQuery))
-                                .sort((a,b) => jobRank(a)-jobRank(b) || (b.priority||0)-(a.priority||0) || a.id-b.id);
+                                .sort(jobOrder);
   if (!allJobs.length) {
     // Say so. A search that silently empties the queue reads as a broken page,
     // and with the chip filter also on it's not obvious which one hid everything.
