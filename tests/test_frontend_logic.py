@@ -522,3 +522,15 @@ def test_titles_already_encoded_or_in_the_library_count_as_ripped():
     sec = js(f"titlesSection({job})")
     assert sec["summary"] == "Titles — 3 of 3 picked · 3 ripped"
     assert "in library" in sec["body"]
+
+
+# --- the season on the form against the season on the label -------------------------
+
+def test_a_season_that_disagrees_with_the_disc_label_is_called_out():
+    """Job 397's label said S9; the form said 8, and nothing questioned it, so
+    every title was compared with the wrong season's episodes."""
+    said = js("seasonMismatch(9, '8')")
+    assert "season 9" in said and "season 8" in said
+    assert js("seasonMismatch(9, '9')") == ""
+    assert js("seasonMismatch(null, '8')") == ""          # the label states none
+    assert js("seasonMismatch(9, '')") == ""              # nothing chosen yet

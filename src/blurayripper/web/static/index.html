@@ -644,6 +644,14 @@ function suggestEditions(titles, selected, tmdbMinutes){
   return out;
 }
 
+// The disc label states a season (HOW_I_MET_YOUR_MOTHER_S9) and the form says
+// another. Job 397 was auto-identified as season 8 that way, so every title was
+// compared with the wrong episodes. Empty when they agree or the label says none.
+function seasonMismatch(labelSeason, chosen){
+  if (!labelSeason || !chosen || +labelSeason === +chosen) return '';
+  return `The disc label says season ${labelSeason}, but this is set to season ${chosen}.`;
+}
+
 // A title this many times the disc's usual episode length is a two-part episode
 // mastered as one: HIMYM S8 D2's "The Final Page" runs 2595s beside 1296s. The
 // server applies the same rule (discinfo.double_length_titles) to the box-set
@@ -1425,6 +1433,7 @@ function buildMapping(card, j){
           </select>
           First episode <input data-firstep type="number" value="${guessFirst}" min="0" style="width:64px;">
           <button class="sec" data-load>Load episodes</button></div>
+        <div data-seasonwarn style="font-size:12px;color:#d29922;"></div>
         <div data-continues class="muted" style="font-size:12px;"></div>
         ${hint}
         <div class="muted" style="font-size:12px;">DVD titles are usually in order; Blu-ray titles are often scrambled or reversed — pick each title's episode below (durations shown to help match), or use a fill button.</div>
@@ -1478,6 +1487,12 @@ function buildMapping(card, j){
         e.target.dataset.touched = '1';
       });
       tv.querySelector('[data-season]').addEventListener('change', continueFromPreviousDiscs);
+      const warnSeason = () => {
+        const w = seasonMismatch(j.label_season, tv.querySelector('[data-season]').value);
+        tv.querySelector('[data-seasonwarn]').textContent = w ? '⚠ ' + w : '';
+      };
+      tv.querySelector('[data-season]').addEventListener('input', warnSeason);
+      warnSeason();
       tv.querySelector('[data-discno]').addEventListener('change', continueFromPreviousDiscs);
       continueFromPreviousDiscs();
       const epOptions = (num) => state.episodes.map(e=>
@@ -1528,7 +1543,9 @@ function buildMapping(card, j){
         const episodes=ids.map((_,i)=>first+i);  // the episodes on this disc
         const gmode = body.querySelector(`input[name=g${j.id}]:checked`).value;
         const tune_grain = gmode==='on'?true:(gmode==='off'?false:null);
-        if(!confirm(`Rip ${ids.length} title(s), then auto-identify against episodes ${episodes.join(', ')} of "${state.chosen.title}" S${pad(season)} by subtitles?`)) return;
+        const off = seasonMismatch(j.label_season, season);
+        if(!confirm((off ? `⚠ ${off}\n\n` : '')
+            + `Rip ${ids.length} title(s), then auto-identify against episodes ${episodes.join(', ')} of "${state.chosen.title}" S${pad(season)} by subtitles?`)) return;
         try {
           await api('POST',`/api/jobs/${j.id}/auto-identify`,{title_ids:ids, show_title:state.chosen.title, show_year:state.chosen.year, show_tmdb_id:state.chosen.id, season, episodes, grain_mode:gmode, tune_grain});
         } catch(e){ alert(e.message); }
@@ -1594,6 +1611,8 @@ function buildMapping(card, j){
           year:state.chosen.year, season:s, episode:ep, episode_end:end,
           episode_title: names.every(Boolean) ? names.join(' & ') : null};
       });
+      const off = seasonMismatch(j.label_season, s);
+      if (off && !confirm(`${off}\n\nName these as season ${s} anyway?`)) return;
       const eps = assignments.flatMap(a => a.episode_end ? [a.episode, a.episode_end] : [a.episode]);
       if (new Set(eps).size !== eps.length && !confirm('Two titles map to the same episode — continue anyway?')) return;
     }
