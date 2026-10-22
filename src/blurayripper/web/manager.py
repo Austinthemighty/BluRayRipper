@@ -604,6 +604,12 @@ class JobManager:
             # owns the disc — otherwise an ejected disc stays pinned to the panel.
             if self._lane(wj, wj.state) != "rip":
                 continue
+            # A job parked at a gate after its rip is done (397: every title
+            # ripped, disc ejected, waiting to be named) no longer has a disc in
+            # there. Pinning its name hid every disc put in after it.
+            if (wj.state not in (JobState.SCANNING, JobState.RIPPING)
+                    and not self._rip_pending(wj)):
+                continue
             idx = _drive_index(wj.source)
             if idx is None:
                 continue

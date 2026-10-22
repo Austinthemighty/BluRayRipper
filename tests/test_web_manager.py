@@ -656,6 +656,35 @@ def test_drives_overlay_active_rip_name(manager):
     assert drive.disc_name == "Dumbo"
 
 
+def test_a_job_waiting_after_its_rip_does_not_pin_its_disc_to_the_drive(manager):
+    """Job 397: every title ripped, disc ejected, then parked at the naming and
+    match gates — still in the rip lane. The panel kept showing its disc for
+    hours, whatever was put in the drive after it. A gate job that has not
+    ripped yet does still own the disc in the drive."""
+    from blurayripper.tools.makemkv import Drive
+    from blurayripper.pipeline import Job
+
+    manager._drives_cache = [Drive(index=0, name="ASUS", device="/dev/sr1",
+                                   disc_name="HOW_I_MET_YOUR_MOTHER_S8_D1")]
+    wj = WebJob(id=397, source="disc:0", state=JobState.AWAITING_MATCH)
+    wj.disc = _fake_disc()
+    wj.disc.disc_name = "HOW_I_MET_YOUR_MOTHER_S9"
+    wj.selected_title_ids = [0, 1]
+    wj._pipeline_job = Job(source="disc:0")
+    wj._pipeline_job.checkpoints = {0: {"ripped_path": "job_397/rip/t000/a.mkv"},
+                                    1: {"ripped_path": "job_397/rip/t001/b.mkv"}}
+    manager.jobs[397] = wj
+
+    (drive,) = manager.drives()
+    assert drive.disc_name == "HOW_I_MET_YOUR_MOTHER_S8_D1"
+
+    # Same gate before anything was ripped: that disc IS the one in the drive.
+    wj._pipeline_job.checkpoints = {}
+    wj.state = JobState.AWAITING_MAPPING
+    (drive,) = manager.drives()
+    assert drive.disc_name == "HOW_I_MET_YOUR_MOTHER_S9"
+
+
 def test_display_name_identifies_which_boxset_disc(manager):
     """Every disc in a box set reports the same label ("HOUSE"), so a failed job
     can't be found on the shelf. The mapping says which season/episodes it is."""
