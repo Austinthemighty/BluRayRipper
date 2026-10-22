@@ -2591,3 +2591,25 @@ async def test_a_merged_log_stays_bounded(manager, monkeypatch):
     log = manager.jobs[397].log
     assert len(log) == manager._MERGED_LOG_LINES
     assert "line 899 of job 396" in "\n".join(log)   # the newest lines are kept
+
+
+def test_a_ripped_job_does_not_stop_the_next_disc_of_a_set_being_noticed(manager):
+    """Every disc of a box set can carry the same label (LANDMAN_SEASON2). A
+    ripped job waiting days for an encoder held that label, so each next disc
+    went unnoticed and was added by hand. A job still needing its disc holds it."""
+    def job(jid, state, ripped):
+        wj = WebJob(id=jid, source="disc:0", state=state)
+        wj.disc = _fake_disc()
+        wj.disc.disc_name = "LANDMAN_SEASON2"
+        wj.selected_title_ids = [0]
+        wj._pipeline_job = Job(source="disc:0")
+        wj._pipeline_job.checkpoints = (
+            {0: {"ripped_path": "job_1/rip/t000/a.mkv"}} if ripped else {})
+        manager.jobs[jid] = wj
+        return wj
+
+    job(388, JobState.READY, ripped=True)            # D3, waiting for an encoder
+    assert manager._disc_has_active_job("LANDMAN_SEASON2") is False
+
+    job(389, JobState.AWAITING_MAPPING, ripped=False)   # D4, in the drive, not ripped
+    assert manager._disc_has_active_job("LANDMAN_SEASON2") is True

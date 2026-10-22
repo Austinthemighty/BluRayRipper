@@ -1343,9 +1343,15 @@ class JobManager:
         """Whether THIS disc is already being handled — matched by disc name, not
         the drive selector. `disc:N` is reused across discs, so a queued job from a
         previous disc in the same drive must NOT block auto-scanning a new one."""
+        # Only while the job still needs the disc. A box set prints one label on
+        # every disc (LANDMAN_SEASON2), and a ripped job waiting days for an
+        # encoder used to hold that label, so each next disc of the set went
+        # unnoticed and had to be added by hand. A true duplicate — the same disc
+        # again — is still caught after its scan, by fingerprint.
         return any(
             wj.disc is not None and (wj.disc.disc_name or "").strip() == disc_name
             and self._live_state(wj) not in (JobState.DONE, JobState.FAILED)
+            and self._rip_pending(wj)
             for wj in self.jobs.values()
         )
 
