@@ -326,6 +326,10 @@ class Pipeline:
                 job, title_id, assignment, staging_root, scheduler, report
             )
             job.results.append(result)
+            # This path encodes each title before ripping the next, so the copy
+            # can go as soon as the last title is out of it rather than waiting
+            # for the whole job — it is the size of a disc.
+            self._release_disc_copy(job, staging_root, report)
 
     async def prep_phase(
         self, job: Job, staging_root: Path, report, include_subs: bool = True
