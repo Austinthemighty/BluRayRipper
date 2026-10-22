@@ -312,6 +312,20 @@ def extract_art_from_iso(iso_path: Path, dest_dir: Path, *, poster: bool = True,
     return art
 
 
+def copy_saved_art(saved: Path, dest_dir: Path, *, poster: bool = True,
+                   fanart: bool = True) -> DiscArt:
+    """Place art that extract_art saved earlier (``poster.*`` / ``fanart.*``).
+
+    For a disc ripped before it was named: the art has to come off the disc
+    before the rip ejects it, and its destination is not known until later."""
+    art = DiscArt()
+    for stem, wanted in (("poster", poster), ("fanart", fanart)):
+        src = next(iter(sorted(saved.glob(f"{stem}.*"))), None) if wanted else None
+        if src is not None:
+            setattr(art, stem, _copy_as(src, dest_dir, stem))
+    return art
+
+
 def extract_art(root: Path, dest_dir: Path, *, poster: bool = True,
                 fanart: bool = True) -> DiscArt:
     """Copy the disc's best portrait to poster.jpg and best landscape to

@@ -2067,17 +2067,51 @@ class Pipeline:
             if drive.device:
                 job.disc.drive_device = drive.device
 
+    async def rip_titles(self, job: Job, staging_root: Path, report) -> None:
+        """Rip every selected title, back to back, and nothing else.
+
+        For a disc ripped while it waits to be named: the rip depends only on
+        the disc, and the disc is the part that cannot wait. The disc's own art
+        is saved first, because the rip ejects the disc and where the art goes
+        is not known until the naming is. Ejects after the last title, as any
+        rip does; prep_phase later finds every title ripped and carries on."""
+        assert job.disc is not None
+        job._ripped_this_run = False
+        await self._resolve_source_drive(job, report)
+        await self._stash_disc_art(job, staging_root, report)
+        await self._prepare_disc_once(job, staging_root, report)
+        for title_id in list(job.selected_title_ids):
+            await self._ensure_ripped(job, title_id, staging_root, report)
+        self._release_disc_copy(job, staging_root, report)
+
+    async def _stash_disc_art(self, job: Job, staging_root: Path, report) -> None:
+        """Save the disc's own art to staging, for _place_cover_art to use once
+        the disc is gone. Best-effort, like the placement itself."""
+        if not self.settings.extract_cover_art or job.disc is None:
+            return
+        root = coverart.disc_root(job.disc)
+        if root is None:
+            return
+        try:
+            await asyncio.to_thread(coverart.extract_art, root, staging_root / "disc_art")
+        except Exception as exc:
+            report.on_event(f"Cover art skipped ({type(exc).__name__}: {exc}).")
+
     async def _place_cover_art(self, job: Job, report,
                                staging_root: Path | None = None) -> None:
         """Copy the disc's own cover art to each output folder as poster.jpg.
         Best-effort and idempotent; must run BEFORE ripping (auto-eject removes
-        the disc after the last rip)."""
+        the disc after the last rip) — or use what rip_titles saved, for a disc
+        ripped before it was named."""
         if not self.settings.extract_cover_art or job.disc is None:
             return
         src = job.disc.source or ""
         iso = src[len("iso:"):] if src.startswith("iso:") else None
         root = coverart.disc_root(job.disc)
-        if root is None and iso is None:
+        saved = staging_root / "disc_art" if staging_root is not None else None
+        if saved is not None and not (saved.is_dir() and any(saved.iterdir())):
+            saved = None
+        if root is None and iso is None and saved is None:
             return  # unsupported source (e.g. a Linux optical device path)
         folders = {
             self._poster_folder(a, staging_root)
@@ -2091,7 +2125,11 @@ class Pipeline:
             if have_poster and have_fanart:
                 continue  # already placed (resume / other disc of a set)
             try:
-                if iso is not None:
+                if saved is not None:
+                    art = await asyncio.to_thread(
+                        coverart.copy_saved_art, saved, folder,
+                        poster=not have_poster, fanart=not have_fanart)
+                elif iso is not None:
                     art = await asyncio.to_thread(
                         coverart.extract_art_from_iso, iso, folder,
                         poster=not have_poster, fanart=not have_fanart)

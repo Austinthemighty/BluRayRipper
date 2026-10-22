@@ -172,6 +172,7 @@ class WebJob:
     _pipeline_job: object = None  # the underlying pipeline.Job once scanned
     _grain_future: object = None  # asyncio.Future resolved when user picks grain
     _task: object = None          # the asyncio.Task running scan/process (for cancel)
+    _early_rip: object = None     # the asyncio.Task ripping while it waits to be named
 
 
 class _Reporter:
@@ -1710,6 +1711,55 @@ class JobManager:
         wj.state = JobState.AWAITING_MAPPING
         self._persist(wj)
         self.bus.publish()
+        self._start_early_rip(wj)
+
+    def _start_early_rip(self, wj: WebJob) -> None:
+        """Rip the chosen titles now, while the job waits to be named.
+
+        The rip depends only on the disc and the naming only on a person, but
+        the disc was the one kept waiting. Left in the drive for about half an
+        hour it falls asleep and reads slowly (job 399 sat at the naming form
+        from 13:57), and the drive could have taken the next disc. Confirming the
+        naming later finds the titles ripped and carries on from them."""
+        # _rip_pending is also what rules out a job added from a file: it has
+        # no disc, so nothing is ever pending.
+        if wj._pipeline_job is None or wj.disc is None or not self._rip_pending(wj):
+            return
+        if wj._early_rip is not None and not wj._early_rip.done():
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return  # called outside the event loop (a script, a sync caller)
+        wj._early_rip = self._spawn(self._early_rip_task(wj))
+
+    async def _early_rip_task(self, wj: WebJob) -> None:
+        reporter = _Reporter(self, wj)
+        job = wj._pipeline_job
+        job.selected_title_ids = list(wj.selected_title_ids)
+        staging_root = self.settings.storage.staging_dir / f"job_{wj.id}"
+        reporter.on_event(
+            "Ripping the chosen titles now, while the naming waits — the disc "
+            "comes out sooner and doesn't sit in the drive long enough to slow it.")
+        try:
+            async with self._prep_slot(wj):
+                await self.pipeline.rip_titles(job, staging_root, reporter)
+            reporter.on_event("Every chosen title is ripped — name them whenever you're ready.")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            text = str(exc).strip()
+            reporter.on_event(
+                f"Ripping ahead of the naming stopped ({type(exc).__name__}: "
+                f"{text.splitlines()[0] if text else 'no detail'}). It is tried again "
+                f"when the naming is confirmed; titles already ripped are kept.")
+        finally:
+            # The pipeline marks its job RIPPING while it works; put it back to
+            # the gate the job is actually at, so nothing reads a phantom rip.
+            job.state = wj.state
+            wj.stage = ""
+            self._persist(wj)
+            self.bus.publish()
 
     def set_mapping(
         self, job_id: int, assignments: list[EpisodeAssignment],
@@ -2154,6 +2204,10 @@ class JobManager:
         wj = self.jobs.get(job_id)
         if wj is None:
             return
+        early = wj._early_rip
+        if early is not None and not early.done():
+            early.cancel()
+            await asyncio.wait({early})
         task = wj._task
         if task is not None and not task.done():
             wj.log.append(stamp_log("Removing — cancelling in-flight work…"))
@@ -2310,6 +2364,8 @@ class JobManager:
                 self.bus.publish()
                 self._notify(f"🟡 Needs your input: {self._name_of(wj)}",
                              f"Job #{wj.id} scanned — {'confirm the name' if wj.state is JobState.AWAITING_MAPPING else 'pick titles'} in the UI.")
+                if wj.state is JobState.AWAITING_MAPPING:
+                    self._start_early_rip(wj)
         except Exception as exc:
             wj.state = JobState.FAILED
             wj.error = f"{type(exc).__name__}: {exc}"
@@ -2451,6 +2507,14 @@ class JobManager:
         reporter = _Reporter(self, wj)
         wj._activity_at = wj._progress_at = time.monotonic()  # watchdog baseline
         wj._log_mark = len(wj.log)          # a failure hint reads only this run
+        early = wj._early_rip
+        if early is not None and not early.done():
+            # Named while its titles were still ripping. Let that rip finish,
+            # rather than queue behind our own drive lock; then everything below
+            # finds the titles ripped. Waited on before the job's fields change,
+            # so the rip's "last title, eject now" still sees its own list.
+            reporter.on_event("Waiting for the titles already being ripped to finish…")
+            await asyncio.wait({early})
         job = wj._pipeline_job
         job.selected_title_ids = wj.selected_title_ids
         job.assignments = wj.assignments

@@ -558,7 +558,9 @@ async def test_each_thing_that_needs_you_pushes_exactly_one_alert(rig, ntfy):
 
     assert ntfy.titles() == [
         f"🟡 Needs your input: {DISC_LABEL}",
-        f"💿 Finished ripping: {SHOW}",
+        # Ripped while it waited to be named, so the disc is still known by its
+        # label — which is also what is printed on the disc you take out.
+        f"💿 Finished ripping: {DISC_LABEL}",
         f"❌ Failed: {JOB_NAME}",
         "🔌 Worker offline: SteamMachine",
         "✅ Worker back: SteamMachine",
@@ -586,7 +588,7 @@ async def test_the_configured_priority_rides_along_unless_the_alert_escalates(ri
     assert rig.settings.notify_priority == "low"        # what the box is set to
     assert dict(zip(ntfy.titles(), ntfy.priorities())) == {
         f"🟡 Needs your input: {DISC_LABEL}": "low",
-        f"💿 Finished ripping: {SHOW}": "low",
+        f"💿 Finished ripping: {DISC_LABEL}": "low",
         f"❌ Failed: {JOB_NAME}": "high",
         "🔌 Worker offline: SteamMachine": "high",
     }

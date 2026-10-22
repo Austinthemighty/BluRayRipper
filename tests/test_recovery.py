@@ -25,6 +25,7 @@ async def _settle():
 async def test_recover_resumes_running_and_restores_others(tmp_path, monkeypatch):
     settings = load_settings()
     monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    monkeypatch.setattr(settings.storage, "staging_dir", tmp_path / "staging")
     store = MemoryStore()
     store.save(JobRecord(
         id=5, source="disc:0", state="ready", fingerprint="fp", disc=_disc_dict(),
@@ -64,13 +65,19 @@ async def test_recover_resumes_running_and_restores_others(tmp_path, monkeypatch
 async def test_clustered_recovery_leaves_ready_jobs_for_workers(tmp_path, monkeypatch):
     settings = load_settings()
     monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    monkeypatch.setattr(settings.storage, "staging_dir", tmp_path / "staging")
     settings.cluster.use_workers = True
     store = MemoryStore()
     # Many READY (prepped, queued) jobs must NOT be re-run by the rip box.
     # "Prepped" means the rip finished, so they carry a rip checkpoint — that's
     # what distinguishes them from a READY job whose rip never completed, which
-    # no worker can take and which serve therefore has to reclaim.
+    # no worker can take and which serve therefore has to reclaim. The ripped
+    # files exist, as they would: this passed only while the repo's own staging
+    # folder happened not to exist, which made the file check give up.
     for i in range(1, 6):
+        ripped = tmp_path / "staging" / f"job_{i}" / "rip" / "t000" / "a.mkv"
+        ripped.parent.mkdir(parents=True)
+        ripped.write_bytes(b"\x1aE\xdf\xa3")
         store.save(JobRecord(id=i, source=f"disc:{i}", state="ready", disc=_disc_dict(),
                              selected_title_ids=[0],
                              checkpoints={"0": {"ripped_path": f"job_{i}/rip/t000/a.mkv"}}))
@@ -99,6 +106,7 @@ async def test_clustered_recovery_leaves_ready_jobs_for_workers(tmp_path, monkey
 async def test_recover_resumes_interrupted_failed_job(tmp_path, monkeypatch):
     settings = load_settings()
     monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    monkeypatch.setattr(settings.storage, "staging_dir", tmp_path / "staging")
     store = MemoryStore()
     # A job persisted FAILED by old code, but the error is a killed process.
     store.save(JobRecord(
@@ -131,6 +139,7 @@ async def test_recover_resumes_interrupted_failed_job(tmp_path, monkeypatch):
 async def test_jobs_persist_to_store_on_transitions(tmp_path, monkeypatch):
     settings = load_settings()
     monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    monkeypatch.setattr(settings.storage, "staging_dir", tmp_path / "staging")
     store = MemoryStore()
     manager = JobManager(settings, store=store)
 
@@ -179,6 +188,7 @@ def test_an_unripped_ready_disc_job_is_parked_for_review(tmp_path, monkeypatch):
     settings = load_settings()
     settings.cluster.use_workers = True
     monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    monkeypatch.setattr(settings.storage, "staging_dir", tmp_path / "staging")
     store = Durable()
     store.save(_rec(id=300, checkpoints={}))          # no rip checkpoint at all
 
@@ -211,6 +221,7 @@ def test_recovery_still_leaves_a_ripped_ready_job_for_the_workers(tmp_path, monk
     settings = load_settings()
     settings.cluster.use_workers = True
     monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    monkeypatch.setattr(settings.storage, "staging_dir", tmp_path / "staging")
     store = Durable()
     store.save(_rec(id=301, checkpoints={"0": {"ripped_path": "job_301/rip/t000/a.mkv"}}))
 
@@ -235,6 +246,7 @@ def test_a_ready_file_job_is_not_taken_back(tmp_path, monkeypatch):
     settings = load_settings()
     settings.cluster.use_workers = True
     monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    monkeypatch.setattr(settings.storage, "staging_dir", tmp_path / "staging")
     store = Durable()
     store.save(_rec(id=302, source=r"Z:\x\Movie.mkv", checkpoints={}))
 
@@ -259,6 +271,7 @@ def _mgr_with_failed_disc(tmp_path, monkeypatch, *, ripped: bool):
 
     settings = load_settings()
     monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    monkeypatch.setattr(settings.storage, "staging_dir", tmp_path / "staging")
     m = JobManager(settings, store=MemoryStore())
     wj = WebJob(id=300, source="disc:0", state=JobState.FAILED)
     wj.disc = DiscInfo(source="disc:0", disc_name="HOUSE_S1_D3", titles=[])

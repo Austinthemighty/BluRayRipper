@@ -340,15 +340,17 @@ async def test_the_file_is_named_from_tmdb_not_from_the_disc_label(rig):
 
 async def test_two_equally_good_matches_park_the_job_instead_of_guessing(rig):
     """Same disc, one thing varied: TMDB returns two exact-title matches. A wrong
-    auto-pick costs a whole disc's rip and encode, so ambiguity must stop at the
-    naming gate — with the disc still un-ripped."""
+    auto-pick names a whole disc as the wrong film, so ambiguity must stop at the
+    naming gate. The disc is ripped meanwhile — that needs no name, and it gets
+    the disc out of the drive — but nothing is named, encoded or placed."""
     rig.tmdb.append(metadata.MovieCandidate(
         tmdb_id=99999, title=TMDB_TITLE, year=2018, overview="A remake."))
 
     await _run_story(rig)
 
     assert rig.job().state is JobState.AWAITING_MAPPING
-    assert "rip" not in rig.kinds(), "an ambiguous match still started ripping"
+    assert rig.job().assignments == {}, "an ambiguous match was named anyway"
+    assert "encode" not in rig.kinds()
     assert not rig.settings.storage.movies_root.exists()
 
 

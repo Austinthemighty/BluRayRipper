@@ -385,3 +385,42 @@ async def test_the_copy_survives_until_the_last_title_is_out_of_it(
     pipe._release_disc_copy(job, staging, r)
     assert not (staging / "disc").exists()
     assert "Disc copy removed" in r.text
+
+
+# --- the rip-only step used while a disc waits to be named ----------------------------
+
+async def test_ripping_ahead_of_the_naming_rips_every_title_and_saves_the_art_first(
+        tmp_path, monkeypatch):
+    """The disc's own art has to come off before the last rip ejects it, because
+    where it goes is not known until the naming is."""
+    pipe = _pipe(tmp_path, monkeypatch, backup_first=False)
+    job = _job(_titles(*DISC))
+    order = []
+
+    async def follow(job, report): order.append("follow")
+    async def stash(job, root, report): order.append("art")
+    async def ripped(job, tid, root, report): order.append(f"rip {tid}")
+    monkeypatch.setattr(pipe, "_resolve_source_drive", follow)
+    monkeypatch.setattr(pipe, "_stash_disc_art", stash)
+    monkeypatch.setattr(pipe, "_ensure_ripped", ripped)
+
+    await pipe.rip_titles(job, tmp_path / "job_1", _Report())
+
+    assert order == ["follow", "art", "rip 0", "rip 1", "rip 2"]
+
+
+async def test_art_saved_before_the_disc_left_is_what_gets_placed(tmp_path, monkeypatch):
+    from blurayripper.services import coverart
+    pipe = _pipe(tmp_path, monkeypatch)
+    pipe.settings.extract_cover_art = True
+    job = _job(_titles(*DISC))
+    staging = tmp_path / "job_1"
+    (staging / "disc_art").mkdir(parents=True)
+    (staging / "disc_art" / "fanart.jpg").write_bytes(b"\xff\xd8saved")
+    monkeypatch.setattr(coverart, "disc_root", lambda disc: None)   # the disc is gone
+    folder = tmp_path / "Show"
+    monkeypatch.setattr(pipe, "_poster_folder", lambda a, root: folder)
+
+    await pipe._place_cover_art(job, _Report(), staging)
+
+    assert (folder / "fanart.jpg").read_bytes() == b"\xff\xd8saved"

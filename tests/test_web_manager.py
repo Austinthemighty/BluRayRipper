@@ -37,8 +37,11 @@ def _single_title_disc():
 @pytest.fixture
 def manager(tmp_path, monkeypatch):
     settings = load_settings()
-    # Keep the mapping DB + any output under tmp.
+    # Keep the mapping DB, any output AND the staging area under tmp. Staging
+    # was left on the repo default, so jobs that ripped wrote into the repo's
+    # own staging/ — and a test that reads staging then depended on leftovers.
     monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+    monkeypatch.setattr(settings.storage, "staging_dir", tmp_path / "staging")
     m = JobManager(settings)
 
     async def fake_scan(source, report):
@@ -2591,6 +2594,129 @@ async def test_a_merged_log_stays_bounded(manager, monkeypatch):
     log = manager.jobs[397].log
     assert len(log) == manager._MERGED_LOG_LINES
     assert "line 899 of job 396" in "\n".join(log)   # the newest lines are kept
+
+
+# --- ripping while the naming waits ------------------------------------------------
+
+def _rip_rig(manager, monkeypatch, *, gate=None, fail=None):
+    """Stand in for the pipeline's rip-only step; record what it was asked."""
+    ripped = []
+
+    async def rip_titles(job, staging_root, report):
+        ripped.append(list(job.selected_title_ids))
+        report.on_progress("Rip t0: Saving to MKV file", 0.5)
+        if gate is not None:
+            await gate.wait()
+        if fail is not None:
+            raise fail
+        ripped.append(("at the end", list(job.selected_title_ids)))
+        for tid in job.selected_title_ids:
+            job.checkpoints[tid] = {"ripped_path": f"job_x/rip/t{tid:03d}/a.mkv"}
+
+    monkeypatch.setattr(manager.pipeline, "rip_titles", rip_titles)
+    return ripped
+
+
+async def _at_naming(manager, titles=(0, 1)):
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    manager.set_titles(wj.id, list(titles))
+    await _settle()
+    return wj
+
+
+async def test_picking_the_titles_rips_them_while_the_naming_waits(manager, monkeypatch):
+    """Job 399 sat at the naming form from 13:57 with its disc in the drive,
+    where it falls asleep after half an hour and reads slowly. The rip needs
+    only the disc; the naming needs only a person."""
+    ripped = _rip_rig(manager, monkeypatch)
+
+    wj = await _at_naming(manager)
+
+    assert ripped == [[0, 1], ("at the end", [0, 1])]
+    assert wj.state is JobState.AWAITING_MAPPING          # the form stays up
+    assert wj._pipeline_job.state is JobState.AWAITING_MAPPING   # no phantom "ripping"
+    assert all(wj._pipeline_job.checkpoints[t]["ripped_path"] for t in (0, 1))
+    assert any("while the naming waits" in line for line in wj.log)
+    assert wj.stage == ""
+
+
+async def test_confirming_mid_rip_waits_for_that_rip_rather_than_starting_another(
+        manager, monkeypatch):
+    gate = asyncio.Event()
+    ripped = _rip_rig(manager, monkeypatch, gate=gate)
+    wj = await _at_naming(manager)
+
+    manager.set_mapping(wj.id, [EpisodeAssignment(t, MediaKind.TV, "Show", 2005,
+                                                  season=1, episode=t + 1)
+                                for t in (0, 1)])
+    await _settle()
+    assert "job" not in manager._executed, "ran before the rip it depends on finished"
+    assert any("already being ripped" in line for line in wj.log)
+
+    gate.set()
+    await _settle()
+    assert ripped == [[0, 1], ("at the end", [0, 1])]   # one rip, not two
+    assert manager._executed["job"].checkpoints[1]["ripped_path"]
+
+
+async def test_naming_fewer_titles_mid_rip_does_not_change_the_list_under_the_rip(
+        manager, monkeypatch):
+    """The rip ejects after the LAST title on its list. Confirming a naming
+    that drops title 1 while title 1 is ripping must not shorten that list, or
+    the "last title" never comes and the disc is never ejected."""
+    gate = asyncio.Event()
+    ripped = _rip_rig(manager, monkeypatch, gate=gate)
+    wj = await _at_naming(manager)
+
+    manager.set_mapping(wj.id, [EpisodeAssignment(0, MediaKind.TV, "Show", 2005,
+                                                  season=1, episode=1)])
+    await _settle()
+    gate.set()
+    await _settle()
+
+    assert ripped[-1] == ("at the end", [0, 1])
+    assert manager._executed["job"].selected_title_ids == [0]
+
+
+async def test_a_rip_that_fails_while_the_naming_waits_leaves_the_form_alone(
+        manager, monkeypatch):
+    """It is an optimisation. The naming must still be possible, and the rip
+    is simply tried again once it is confirmed."""
+    _rip_rig(manager, monkeypatch, fail=RuntimeError("Failed to open disc\nmore detail"))
+
+    wj = await _at_naming(manager)
+
+    assert wj.state is JobState.AWAITING_MAPPING
+    assert wj.error is None
+    assert any("Ripping ahead of the naming stopped (RuntimeError: Failed to open disc)"
+               in line for line in wj.log)
+
+
+async def test_removing_a_job_stops_its_rip(manager, monkeypatch):
+    gate = asyncio.Event()
+    _rip_rig(manager, monkeypatch, gate=gate)
+    wj = await _at_naming(manager)
+    early = wj._early_rip
+
+    await manager.remove(wj.id)
+
+    assert early.cancelled()
+    assert wj.id not in manager.jobs
+
+
+async def test_a_job_added_from_a_file_has_no_disc_to_rip_early(manager, monkeypatch):
+    ripped = _rip_rig(manager, monkeypatch)
+    wj = WebJob(id=77, source="/mnt/share/Show S01E01.mkv", state=JobState.AWAITING_TITLES)
+    wj.disc = _fake_disc()
+    wj._pipeline_job = Job(source=wj.source)
+    wj._pipeline_job.disc = wj.disc
+    manager.jobs[77] = wj
+
+    manager.set_titles(77, [0])
+    await _settle()
+
+    assert ripped == []
 
 
 def test_a_ripped_job_does_not_stop_the_next_disc_of_a_set_being_noticed(manager):

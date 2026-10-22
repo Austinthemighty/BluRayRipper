@@ -429,6 +429,8 @@ async def test_retry_hands_the_job_back_to_the_pipeline_with_its_checkpoints(tmp
     await _settle()
 
     assert manager.snapshot()["jobs"][0]["state"] == "done"
-    assert seen[0] == {}  # the first run started from nothing
+    # The first run started with nothing ripped. (The titles are tried as soon as
+    # they are picked, so an entry may exist — but with no ripped file in it.)
+    assert not any(cp.get("ripped_path") for cp in seen[0].values())
     # The retry got the rip the failed run left behind, not a blank slate.
     assert seen[1] == {0: {"ripped_path": "job_1/rip/t000/title_t00.mkv"}}
