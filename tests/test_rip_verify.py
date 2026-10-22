@@ -92,3 +92,57 @@ async def test_an_unknown_expected_duration_still_skips_quietly(pipe):
     r = _Report()
     await pipe._verify_rip_duration(_job(0), 1, Path("x.mkv"), r)   # no raise
     assert not any("can't be read back" in e for e in r.events)
+
+
+async def test_a_rip_holding_far_more_than_its_title_is_rejected(pipe):
+    """Job 380 believed it was ripping a 21-minute How I Met Your Mother episode
+    and actually read a Landman Blu-ray from the other drive. It produced 3394s
+    and 4338s files against 1292s titles, and this check waved both through —
+    it only ever looked downwards, because it was written to catch truncation.
+
+    A file three times the length of the title it was asked for is not a long
+    episode; it is different content."""
+    pipe.mkvtools.probe = _probe(3394)
+    r = _Report()
+    with pytest.raises(RuntimeError) as exc:
+        await pipe._verify_rip_duration(_job(1292), 1, Path("x.mkv"), r)
+    assert "holds more than this title" in str(exc.value)
+    assert "3394s" in str(exc.value) and "1292s" in str(exc.value)
+    assert not r.events, "a rejected rip must not also report itself verified"
+
+
+async def test_the_normal_second_or_two_of_overshoot_still_passes(pipe):
+    """Real rips from the live box: 1296s against a 1294s title, 1254s against
+    1252s. A good rip routinely runs slightly OVER the scan's figure, so the
+    ceiling cannot be symmetric with the 3% truncation tolerance — at that width
+    it would sit close enough to trip on rounding."""
+    for actual, expected in ((1296, 1294), (1254, 1252), (1295, 1293), (1292, 1288)):
+        pipe.mkvtools.probe = _probe(actual)
+        r = _Report()
+        await pipe._verify_rip_duration(_job(expected), 1, Path("x.mkv"), r)
+        assert r.events and "Rip verified" in r.events[0]
+
+
+async def test_the_ceiling_does_not_tighten_when_the_tolerance_does(pipe):
+    """Setting a strict truncation tolerance is about catching short rips. It
+    must not make the app start rejecting good ones for being two seconds long."""
+    pipe.settings.rip_duration_tolerance_pct = 1
+    pipe.mkvtools.probe = _probe(1296)
+    r = _Report()
+    await pipe._verify_rip_duration(_job(1294), 1, Path("x.mkv"), r)   # no raise
+    assert "Rip verified" in r.events[0]
+
+    # ...and a genuinely wrong file is still caught at that setting.
+    pipe.mkvtools.probe = _probe(4338)
+    with pytest.raises(RuntimeError, match="holds more than this title"):
+        await pipe._verify_rip_duration(_job(1252), 1, Path("x.mkv"), _Report())
+
+
+async def test_a_disabled_tolerance_still_checks_nothing(pipe):
+    """0 means off, and off has to mean both directions — otherwise turning the
+    check off would silently leave half of it running."""
+    pipe.settings.rip_duration_tolerance_pct = 0
+    pipe.mkvtools.probe = _probe(9999)
+    r = _Report()
+    await pipe._verify_rip_duration(_job(1292), 1, Path("x.mkv"), r)   # no raise
+    assert r.events == []

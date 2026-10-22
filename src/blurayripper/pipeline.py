@@ -41,6 +41,11 @@ from .tools.makemkv import MakeMKV
 from .tools.mkvtools import MkvTools, SubtitleTrack
 from .tools.subtitleedit import SubtitleEdit
 
+# Headroom above a disc title's runtime before a rip is treated as holding the
+# wrong content. Never tighter than this, however tight the truncation tolerance
+# is set: a good rip overshoots by a second or two, a wrong one by multiples.
+_RIP_OVERRUN_PCT = 25
+
 # How long the post-rip auto-eject may take before the job gives up on the tray
 # and moves on. Generous: a healthy drive takes a second or two, and a disc that
 # is still being flushed can take longer.
@@ -771,8 +776,15 @@ class Pipeline:
 
     async def _verify_rip_duration(self, job: Job, title_id: int, ripped_mkv: Path,
                                    report, fresh: bool = True) -> None:
-        """Reject a rip whose runtime is much shorter than the disc title — the
-        signature of a truncated rip (bad sectors) that MakeMKV still exited 0 on.
+        """Reject a rip whose runtime does not match the disc title.
+
+        TOO SHORT is the signature of a truncated rip (bad sectors) that MakeMKV
+        still exited 0 on. TOO LONG means the file holds more than the title it
+        was asked for — a DVD title overlapping its "play all", or, as happened
+        here, a rip that read an entirely different disc: job 380 produced 3394s
+        and 4338s files against 1292s titles and this check waved both through,
+        because it only ever looked downwards.
+
         Skips only when it genuinely cannot compare: the tolerance is off, or the
         scan never reported a duration. A probe FAILURE is not that — this runs
         on a file just written, so a file mkvmerge cannot parse is a broken file,
@@ -815,6 +827,21 @@ class Pipeline:
                 f"Rip of title {title_id} is {actual}s but the disc title is "
                 f"{expected}s ({actual * 100 // expected}%) — looks truncated "
                 f"(disc read error?). Not keeping it; will re-rip.")
+        # The ceiling is deliberately looser than the floor, and not symmetric
+        # with it. A good rip routinely runs a second or two OVER the scan's
+        # figure (1296s against 1294s is normal), so at the default 3% tolerance
+        # a symmetric ceiling would sit close enough to trip on rounding. This
+        # is not a precision check — it is here to catch a file holding wholly
+        # different content, which overshoots by multiples, not by percent.
+        ceiling = expected * (100 + max(tol_pct, _RIP_OVERRUN_PCT)) // 100
+        if actual > ceiling:
+            raise RuntimeError(
+                f"Rip of title {title_id} is {actual}s but the disc title is "
+                f"only {expected}s ({actual * 100 // expected}%) — the file "
+                f"holds more than this title. Either it overlaps another title "
+                f"(common on DVDs, where episodes share cells with the 'play "
+                f"all'), or the rip read a different disc than the one that was "
+                f"scanned. Not keeping it.")
         report.on_event(f"Rip verified: {actual}s vs disc {expected}s.")
 
     async def _ensure_ripped(self, job: Job, title_id: int, staging_root: Path, report) -> Path:
