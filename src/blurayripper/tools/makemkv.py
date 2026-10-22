@@ -626,3 +626,61 @@ class MakeMKV:
         await process.run(cmd, on_line=handle)
         after = set(dest_dir.glob("*.mkv"))
         return sorted(after - before)
+
+    async def backup_disc(
+        self,
+        source: str,
+        dest_dir: Path,
+        *,
+        on_progress: ProgressHandler | None = None,
+        on_message: Callable[[str], None] | None = None,
+    ) -> None:
+        """Copy a whole disc to ``dest_dir``, decrypted, in ONE pass.
+
+        Ripping title by title re-opens and re-scans the disc every time, which
+        on a real box cost 39% of the job: 503 seconds of re-opening against 791
+        of copying on an eight-episode DVD, and the opens got slower as it went
+        (54s for the first titles, 177s for the last). makemkvcon cannot be told
+        to rip a chosen subset in one invocation — `mkv` takes one title index
+        or `all` — so the only way to read the disc once is to read all of it.
+
+        Afterwards the titles are produced from this copy with the ordinary
+        ``rip_title`` against a ``file:`` source, which is why nothing else in
+        the rip path needs to know this happened.
+
+        ``--decrypt`` is not optional: without it the copy keeps the disc's
+        encryption and cannot be opened again as a source.
+        """
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            self._bin,
+            "-r",
+            "--progress=-same",
+            "--decrypt",
+            "backup",
+            source,
+            str(dest_dir),
+        ]
+        current_label = {"text": ""}
+
+        async def handle(line: str) -> None:
+            prefix, _, payload = line.partition(":")
+            if prefix in ("PRGC", "PRGT"):
+                fields = _split_robot_line(payload)
+                if len(fields) >= 3:
+                    current_label["text"] = fields[2]
+            elif prefix == "PRGV":
+                fields = _split_robot_line(payload)
+                if len(fields) >= 3 and on_progress is not None:
+                    total = _to_int(fields[1])
+                    maximum = _to_int(fields[2])
+                    frac = (total / maximum) if maximum else None
+                    res = on_progress(current_label["text"], frac)
+                    if res is not None and hasattr(res, "__await__"):
+                        await res
+            elif prefix == "MSG":
+                fields = _split_robot_line(payload)
+                if len(fields) >= 4 and on_message is not None:
+                    on_message(fields[3])
+
+        await process.run(cmd, on_line=handle)

@@ -1342,3 +1342,45 @@ def test_an_unrecognised_stream_type_is_recorded_as_unknown_not_guessed():
     disc = parse_info(['SINFO:0,3,1,6201,"Button"'], "disc:0")
 
     assert disc.titles[0].streams[0].stream_type is StreamType.UNKNOWN
+
+
+async def test_the_backup_command_decrypts_and_names_the_destination(
+        tmp_path, monkeypatch):
+    """`--decrypt` is not optional: without it the copy keeps the disc's
+    encryption and cannot be opened again as a `file:` source, so the whole
+    point — ripping titles out of it afterwards — fails at the second step.
+
+    The positional order is `backup <source> <dest>`; swapping them writes the
+    disc somewhere unintended."""
+    dest = tmp_path / "backup"
+    fake = _install(monkeypatch, FakeProcess())
+
+    await _mk(tmp_path).backup_disc("disc:0", dest)
+
+    assert fake.cmd[-3:] == ["backup", "disc:0", str(dest)]
+    assert "--decrypt" in fake.cmd
+    assert "-r" in fake.cmd
+    assert all(isinstance(a, str) for a in fake.cmd), fake.cmd
+    assert dest.is_dir(), "the destination must exist before makemkvcon is spawned"
+
+
+async def test_a_backup_reports_progress_and_messages_like_a_rip(
+        tmp_path, monkeypatch):
+    """It reuses the rip's robot-output plumbing, so a backup advances in the UI
+    the same way a rip does. A backup that looked frozen for the length of a
+    whole disc would read as exactly the hang this box has been producing."""
+    lines = [
+        'PRGC:0,0,"Decrypting"',
+        "PRGV:10,50,100",
+        'MSG:5005,0,0,"Backup done","%1","x"',
+    ]
+    _install(monkeypatch, FakeProcess(lambda cmd: list(lines)))
+    seen, msgs = [], []
+
+    await _mk(tmp_path).backup_disc(
+        "disc:0", tmp_path / "b",
+        on_progress=lambda label, frac: seen.append((label, frac)),
+        on_message=msgs.append)
+
+    assert seen == [("Decrypting", 0.5)]
+    assert msgs == ["Backup done"]

@@ -37,7 +37,7 @@ from .tools.process import in_detached_thread
 from .tools.dovitool import DoviTool
 from .tools.ffmpeg import FFmpeg
 from .tools.handbrake import EncodeProgress, HandBrake
-from .tools.makemkv import MakeMKV
+from .tools.makemkv import MakeMKV, os_disc_capacity_bytes
 from .tools.mkvtools import MkvTools, SubtitleTrack
 from .tools.subtitleedit import SubtitleEdit
 
@@ -45,6 +45,11 @@ from .tools.subtitleedit import SubtitleEdit
 # wrong content. Never tighter than this, however tight the truncation tolerance
 # is set: a good rip overshoots by a second or two, a wrong one by multiples.
 _RIP_OVERRUN_PCT = 25
+
+# How far a title's runtime may differ between the disc and a copy of it before
+# the copy is treated as a different disc. Seconds, not percent: this compares
+# the same title read twice, so any real difference is a different title.
+_BACKUP_DURATION_SLACK = 2
 
 # How long the post-rip auto-eject may take before the job gives up on the tray
 # and moves on. Generous: a healthy drive takes a second or two, and a disc that
@@ -300,6 +305,7 @@ class Pipeline:
         # folder created it hours before the video arrived.
         await self._place_cover_art(job, report, staging_root)  # before any rip/eject
         await self._place_tmdb_art(job, report, staging_root)   # real art overrides disc art
+        await self._prepare_disc_once(job, staging_root, report)
         for title_id in job.selected_title_ids:
             assignment = job.assignments.get(title_id)
             if assignment is None:
@@ -326,6 +332,10 @@ class Pipeline:
         await self._resolve_source_drive(job, report)
         await self._place_cover_art(job, report, staging_root)
         await self._place_tmdb_art(job, report, staging_root)
+        # Read the disc once if that is worth doing. The loop below is
+        # unchanged either way — it just reads from the copy. After the
+        # artwork, which wants the disc, because this ejects it.
+        await self._prepare_disc_once(job, staging_root, report)
         # 1) Rip per title (sequential — one drive).
         todo: list[tuple[int, EpisodeAssignment, Path, Path]] = []
         for title_id, assignment in _assigned_titles(job):
@@ -335,6 +345,8 @@ class Pipeline:
             ripped = await self._ensure_ripped(job, title_id, staging_root, report)
             sub_dir = staging_root / "sub" / f"t{title_id:03d}"
             todo.append((title_id, assignment, ripped, sub_dir))
+
+        self._release_disc_copy(job, staging_root, report)
 
         # 2) Subtitles (extract + OCR + place sidecars) — unless a worker will.
         if include_subs:
@@ -717,11 +729,16 @@ class Pipeline:
         assert job.disc is not None
         default_lang = self.settings.languages.default.lower()
 
-        # Phase 1 — rip every title back-to-back (ejects after the last).
+        # Phase 1 — rip every title back-to-back. With a disc copy the disc
+        # is ejected before the first title rather than after the last,
+        # which is what this phase's docstring always wanted.
+        await self._prepare_disc_once(job, staging_root, report)
         ripped_paths: dict[int, Path] = {}
         for title_id in job.selected_title_ids:
             ripped_paths[title_id] = await self._ensure_ripped(
                 job, title_id, staging_root, report)
+
+        self._release_disc_copy(job, staging_root, report)
 
         # Phase 2 — OCR each title's main track (no disc needed now).
         job.state = JobState.IDENTIFYING
@@ -916,8 +933,14 @@ class Pipeline:
                     failed_msgs.append(msg.strip())
                 report.on_event(msg)
 
+            # The disc copy when there is one, otherwise the disc. This single
+            # substitution is the whole of the one-pass change as far as the
+            # rip is concerned: same call, same per-title checkpoint, same
+            # resume, same progress label — just a source that does not need
+            # re-opening for every title.
+            rip_from = getattr(job, "_rip_source", None) or job.source
             ripped = await self.makemkv.rip_title(
-                job.source, title_id, rip_dir,
+                rip_from, title_id, rip_dir,
                 on_progress=lambda label, frac: report.on_progress(
                     f"Rip t{title_id}: {label}{speed.update(frac)}", frac
                 ),
@@ -944,47 +967,181 @@ class Pipeline:
         # (not only when this specific title was freshly ripped, or a resume that
         # reuses the last title would skip this) — eject and notify that the disc
         # is done, so you know it's safe to swap in the next one.
+        #
+        # Skipped entirely when the titles are coming out of a disc backup: that
+        # disc was ejected before the first title was made, which is the point of
+        # reading it in one pass. Ejecting again here would open a drive that may
+        # by now hold somebody else's disc.
         if (
             getattr(job, "_ripped_this_run", False)
             and title_id == job.selected_title_ids[-1]
             and job.source.split(":", 1)[0] in ("disc", "dev")
+            and not getattr(job, "_rip_source", None)
         ):
-            ejected = False
-            if self.settings.auto_eject:
-                device = await self._eject_device_for(job)
-                try:
-                    # In a thread and bounded. Ejecting talks to the drive, so a
-                    # drive that has stopped answering blocks for as long as it
-                    # likes — and this used to run INLINE on the event loop, so
-                    # one unresponsive tray froze the entire server, not just
-                    # this job. The rip is finished and checkpointed by the time
-                    # we get here, so a tray that won't open must cost a log
-                    # line, never the job: past the deadline the thread is
-                    # abandoned (it ends when the drive finally errors) and the
-                    # job carries on to subtitles and the encode.
-                    await asyncio.wait_for(
-                        in_detached_thread(eject, device), _EJECT_TIMEOUT)
-                    ejected = True
-                    _emit_ejected(report, device)  # drop the drive's cached disc name
-                    report.on_event(
-                        f"Ejected disc ({device or 'default drive'}) — safe to load the next one."
-                    )
-                except (TimeoutError, asyncio.TimeoutError):
-                    report.on_event(
-                        f"Auto-eject timed out after {_EJECT_TIMEOUT:.0f}s "
-                        f"({device or 'default drive'}) — the drive isn't responding. "
-                        f"The rip is complete and saved; eject it by hand.")
-                except Exception as exc:
-                    hint = (" — on Windows the force-eject IOCTL needs admin; run "
-                            "`serve` as Administrator" if sys.platform.startswith("win") else "")
-                    report.on_event(f"Auto-eject failed ({device or 'no device'}): {exc}{hint}")
-            name = self._rip_notify_name(job)
-            _emit_notify(
-                report, f"💿 Finished ripping: {name}",
-                f"“{name}” is done ripping"
-                + (" — disc ejected, safe to swap in the next one." if ejected
-                   else ". Safe to swap the disc."))
+            await self._eject_and_notify(job, report)
         return ripped_mkv
+
+    async def _prepare_disc_once(self, job: Job, staging_root: Path, report) -> None:
+        """Read the whole disc once, then point this job's rips at that copy.
+
+        Does nothing unless it is confident, and never fails a job: anything that
+        does not work out leaves ``job._rip_source`` unset and the titles are
+        ripped straight off the disc exactly as before.
+        """
+        source = await self._backup_disc_source(job, staging_root, report)
+        if source is None:
+            return
+        job._rip_source = source
+        # The disc has been read in full and the copy checked against it, so it
+        # is done with — hours earlier than it would otherwise be, which is half
+        # the point of doing this at all.
+        job._ripped_this_run = True
+        await self._eject_and_notify(job, report)
+
+    def _release_disc_copy(self, job: Job, staging_root: Path, report) -> None:
+        """Delete the whole-disc copy once every title has been made from it.
+
+        Kept until then on purpose: a job that dies mid-way resumes from the copy
+        rather than asking for the disc back. Once the last title is checkpointed
+        the copy is dead weight — and it is the size of a disc, sitting in
+        staging, which on this setup is a network share.
+        """
+        if not getattr(job, "_rip_source", None):
+            return
+        cps = job.checkpoints
+        if not all((cps.get(t) or {}).get("ripped_path")
+                   for t in job.selected_title_ids):
+            return  # something still needs it
+        library.cleanup(staging_root / "disc")
+        job._rip_source = None
+        report.on_event("Disc copy removed — every title has been made from it.")
+
+    async def _backup_disc_source(self, job: Job, staging_root: Path,
+                                  report) -> str | None:
+        """A ``file:`` selector for a verified copy of this disc, or None.
+
+        None means "carry on against the disc", and every failure path returns
+        it. This is an optimisation; it must never be the reason a disc does not
+        get ripped.
+        """
+        if not self.settings.backup_first:
+            return None
+        if not job.source.startswith(("disc:", "dev:")):
+            return None
+        if job.disc is None:
+            return None
+        if len(job.selected_title_ids) <= 1:
+            # One title gains nothing — the disc is opened once either way — and
+            # a backup would additionally read every title that was NOT wanted.
+            return None
+
+        backup_dir = staging_root / "disc"
+        have_copy = backup_dir.is_dir() and any(backup_dir.iterdir())
+        if not have_copy:
+            needed = os_disc_capacity_bytes(job.disc.drive_device)
+            if not self._room_for_backup(staging_root, needed, report):
+                return None
+            report.on_event(
+                "Reading the whole disc once, then making each title from that "
+                "copy — MakeMKV re-opens the disc for every title otherwise.")
+            try:
+                await self.makemkv.backup_disc(
+                    job.source, backup_dir,
+                    on_progress=lambda label, frac: report.on_progress(
+                        f"Disc copy: {label}", frac),
+                    on_message=report.on_event)
+            except Exception as exc:
+                report.on_event(
+                    f"Reading the disc in one pass failed ({type(exc).__name__}: "
+                    f"{exc}) — ripping title by title from the disc instead.")
+                library.cleanup(backup_dir)
+                return None
+
+        source = f"file:{backup_dir}"
+        try:
+            copied = await self.makemkv.scan(source)
+        except Exception as exc:
+            report.on_event(
+                f"The disc copy could not be read back ({type(exc).__name__}: "
+                f"{exc}) — ripping title by title from the disc instead.")
+            library.cleanup(backup_dir)
+            return None
+
+        mismatch = _backup_title_mismatch(job.disc, copied)
+        if mismatch is not None:
+            # Refusing here is the whole safety case. Titles are ripped BY INDEX,
+            # so a copy whose titles are numbered differently would file every
+            # episode under the wrong number — silently, and plausibly enough
+            # that nobody would catch it until the show was unwatchable.
+            report.on_event(
+                f"The disc copy does not line up with the disc ({mismatch}) — "
+                f"discarding it and ripping title by title from the disc, which "
+                f"is slower but cannot misnumber the titles.")
+            library.cleanup(backup_dir)
+            return None
+        report.on_event(
+            f"Disc copy verified against the disc ({len(copied.titles)} titles "
+            f"in the same order) — ripping from it.")
+        return source
+
+    def _room_for_backup(self, staging_root: Path, needed: int | None,
+                         report) -> bool:
+        """Whether a whole-disc copy fits, with headroom for the rips beside it."""
+        if not needed:
+            return True  # the OS can't tell us the disc size; don't block on it
+        try:
+            staging_root.mkdir(parents=True, exist_ok=True)
+            free = shutil.disk_usage(staging_root).free
+        except OSError:
+            return True  # can't tell; the backup itself will fail if it must
+        # The titles are written alongside the copy, and together they come to
+        # roughly twice the disc.
+        if free >= needed * 2:
+            return True
+        report.on_event(
+            f"Not enough room to copy the disc first "
+            f"({free / 1_000_000_000:.0f} GB free, about "
+            f"{needed * 2 / 1_000_000_000:.0f} GB needed) — ripping title by "
+            f"title from the disc instead.")
+        return False
+
+    async def _eject_and_notify(self, job: Job, report) -> None:
+        """Open the tray and say the disc is done with, so the next one can go in."""
+        ejected = False
+        if self.settings.auto_eject:
+            device = await self._eject_device_for(job)
+            try:
+                # In a thread and bounded. Ejecting talks to the drive, so a
+                # drive that has stopped answering blocks for as long as it
+                # likes — and this used to run INLINE on the event loop, so
+                # one unresponsive tray froze the entire server, not just
+                # this job. The rip is finished and checkpointed by the time
+                # we get here, so a tray that won't open must cost a log
+                # line, never the job: past the deadline the thread is
+                # abandoned (it ends when the drive finally errors) and the
+                # job carries on to subtitles and the encode.
+                await asyncio.wait_for(
+                    in_detached_thread(eject, device), _EJECT_TIMEOUT)
+                ejected = True
+                _emit_ejected(report, device)  # drop the drive's cached disc name
+                report.on_event(
+                    f"Ejected disc ({device or 'default drive'}) — safe to load the next one."
+                )
+            except (TimeoutError, asyncio.TimeoutError):
+                report.on_event(
+                    f"Auto-eject timed out after {_EJECT_TIMEOUT:.0f}s "
+                    f"({device or 'default drive'}) — the drive isn't responding. "
+                    f"The rip is complete and saved; eject it by hand.")
+            except Exception as exc:
+                hint = (" — on Windows the force-eject IOCTL needs admin; run "
+                        "`serve` as Administrator" if sys.platform.startswith("win") else "")
+                report.on_event(f"Auto-eject failed ({device or 'no device'}): {exc}{hint}")
+        name = self._rip_notify_name(job)
+        _emit_notify(
+            report, f"💿 Finished ripping: {name}",
+            f"“{name}” is done ripping"
+            + (" — disc ejected, safe to swap in the next one." if ejected
+               else ". Safe to swap the disc."))
 
     def _rip_notify_name(self, job: Job) -> str:
         """A human name for the just-ripped disc: prefer the movie/show title from
@@ -1919,6 +2076,33 @@ def _checkpoint(report) -> None:
     fn = getattr(report, "checkpoint", None)
     if fn is not None:
         fn()
+
+
+def _backup_title_mismatch(disc, copied) -> str | None:
+    """Why a disc copy cannot stand in for the disc, or None if it can.
+
+    Titles are ripped BY INDEX: `rip_title(source, 7, …)` asks for whatever the
+    source calls title 7. So the copy's numbering has to be the disc's numbering,
+    or every episode lands under the wrong number — the failure that is hardest
+    to notice, because each file is a real episode and only the labels are wrong.
+
+    Three checks, strongest first. Blu-ray titles carry a source filename
+    ("00800.mpls") which identifies them exactly; DVDs carry none, so for those
+    this comes down to the count and the per-index durations, which is weaker —
+    and is why a disc copy is not trusted on its own (see the subtitle check).
+    """
+    want, got = disc.titles, copied.titles
+    if len(want) != len(got):
+        return f"the copy has {len(got)} titles, the disc had {len(want)}"
+    for a, b in zip(want, got):
+        if a.source_filename and b.source_filename and a.source_filename != b.source_filename:
+            return (f"title {a.title_id} is {b.source_filename} in the copy but "
+                    f"{a.source_filename} on the disc")
+        want_s, got_s = a.duration_seconds or 0, b.duration_seconds or 0
+        if want_s and got_s and abs(want_s - got_s) > _BACKUP_DURATION_SLACK:
+            return (f"title {a.title_id} runs {got_s}s in the copy but {want_s}s "
+                    f"on the disc")
+    return None
 
 
 def _emit_ejected(report, device: str | None) -> None:
