@@ -122,6 +122,7 @@ def disc_to_dict(disc: DiscInfo | None) -> dict | None:
         "disc_name": disc.disc_name,
         "volume_label": disc.volume_label,
         "drive_device": disc.drive_device,
+        "disc_type": disc.disc_type,
         "titles": [
             {
                 "title_id": t.title_id,
@@ -168,6 +169,7 @@ def disc_from_dict(data: dict | None) -> DiscInfo | None:
     return DiscInfo(
         source=data["source"], disc_name=data.get("disc_name"),
         volume_label=data.get("volume_label"), drive_device=data.get("drive_device"),
+        disc_type=data.get("disc_type"),
         titles=titles,
     )
 

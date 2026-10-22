@@ -128,10 +128,11 @@ SCHEMA: list[tuple[str, list[Field]]] = [
               "Re-rip if the output runs shorter than the disc title by more than this "
               "(catches truncated rips from disc read errors). 0 = off.", min=0, max=100),
         Field("disc", "backup_first", "bool", "Read the disc in one pass", False,
-              "For a disc with several titles, copy the whole disc to staging once, then "
+              "For a Blu-ray with several titles, copy the whole disc to staging once, then "
               "make each title from that copy. MakeMKV re-opens and re-scans the disc for "
-              "every title otherwise — on an eight-episode DVD that was 39% of the rip — "
-              "and the disc is freed at the start instead of the end. Costs a full-disc "
+              "every title otherwise, and the disc is freed at the start instead of the "
+              "end. DVDs are always ripped title by title: MakeMKV cannot copy a DVD "
+              "whole. Costs a full-disc "
               "copy in staging; if staging is a network share, the data crosses it three "
               "times instead of once."),
     ]),

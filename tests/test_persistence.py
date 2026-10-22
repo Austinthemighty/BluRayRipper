@@ -39,6 +39,16 @@ def test_disc_roundtrip():
     assert t.audio_languages == ["eng"] and t.subtitle_languages == ["eng"]
 
 
+def test_the_disc_type_survives_a_restart_and_old_records_load_without_it():
+    disc = _disc()
+    disc.disc_type = "Blu-ray disc"
+    assert disc_from_dict(disc_to_dict(disc)).disc_type == "Blu-ray disc"
+
+    saved_before = disc_to_dict(_disc())
+    saved_before.pop("disc_type")
+    assert disc_from_dict(saved_before).disc_type is None
+
+
 def test_assignment_roundtrip():
     a = EpisodeAssignment(3, MediaKind.TV, "The Show", 2010, 1, 9, "Pilot")
     a2 = assignment_from_dict(assignment_to_dict(a))

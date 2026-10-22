@@ -405,6 +405,8 @@ def parse_info(lines: list[str], source: str) -> DiscInfo:
                 disc.disc_name = value
             elif attr_id == ATTR_VOLUME_NAME:
                 disc.volume_label = value
+            elif attr_id == ATTR_TYPE:
+                disc.disc_type = value
 
         elif prefix == "DRV" and len(fields) >= 6:
             drv_index = _to_id(fields[0])

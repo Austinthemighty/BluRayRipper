@@ -14,6 +14,8 @@ paths; this file deliberately does not repeat them.
 import json
 from pathlib import Path
 
+import pytest
+
 from blurayripper.config import load_settings
 from blurayripper.models import StreamType
 from blurayripper.tools.makemkv import (
@@ -143,6 +145,16 @@ def test_a_disc_with_no_cinfo_name_still_gets_the_drv_label():
     lines = ['DRV:0,2,999,12,"BD-RE","UNTITLED_DVD","/dev/sr0"']
 
     assert parse_info(lines, "disc:0").disc_name == "UNTITLED_DVD"
+
+
+@pytest.mark.parametrize("value", ["Blu-ray disc", "DVD disc"])
+def test_the_disc_type_is_read_from_cinfo_1(value):
+    """Whether a disc can be copied whole first depends on it: MakeMKV backs up
+    Blu-rays and not DVDs."""
+    disc = parse_info([f'CINFO:1,6209,"{value}"', 'CINFO:2,0,"Some Disc"'], "disc:0")
+
+    assert disc.disc_type == value
+    assert disc.disc_name == "Some Disc"
 
 
 def test_an_unrelated_cinfo_attribute_does_not_overwrite_the_disc_name():

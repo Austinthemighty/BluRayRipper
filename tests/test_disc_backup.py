@@ -10,6 +10,10 @@ So the disc is copied once and the ordinary per-title rip runs against the copy.
 The risk this trades for is worse than slowness, which is why most of this file
 is about refusing: titles are ripped BY INDEX, so a copy numbered differently
 from the disc would file every episode under the wrong name.
+
+That copy is Blu-ray only. MakeMKV's `backup` has never supported DVDs — job 396,
+a DVD, tried and fell back — so the DVD that motivated this is exactly the disc
+it cannot help, and the tests below use Blu-ray jobs unless they say otherwise.
 """
 
 from pathlib import Path
@@ -37,10 +41,11 @@ def _titles(*specs):
             for t, d, f in specs]
 
 
-def _job(titles, selected=None):
+def _job(titles, selected=None, disc_type="Blu-ray disc"):
     job = Job(source="disc:0")
     job.disc = DiscInfo(source="disc:0", disc_name="HIMYM_S9_D1",
-                        drive_device="/dev/sr0", titles=list(titles))
+                        drive_device="/dev/sr0", disc_type=disc_type,
+                        titles=list(titles))
     job.selected_title_ids = list(selected if selected is not None
                                   else [t.title_id for t in titles])
     job.assignments = {
@@ -283,6 +288,42 @@ async def test_a_copy_left_by_an_earlier_run_is_used_for_the_last_title(
 
     assert seen["backups"] == [], "the copy is already there"
     assert seen["rips"] == [(f"file:{staging / 'disc'}", 2)]
+
+
+async def test_a_dvd_is_ripped_title_by_title_without_trying_a_copy(
+        tmp_path, monkeypatch):
+    """Job 396: MakeMKV cannot back up a DVD, so trying costs a disc open and a
+    failure on every DVD, and the setting looks broken. Skip it, and say why."""
+    pipe = _pipe(tmp_path, monkeypatch)
+    job = _job(_titles(*DISC), disc_type="DVD disc")
+    seen = _wire(pipe, monkeypatch, copy_titles=_titles(*DISC))
+    r = _Report()
+
+    await pipe._prepare_disc_once(job, tmp_path / "job_1", r)
+    for tid in job.selected_title_ids:
+        await pipe._ensure_ripped(job, tid, tmp_path / "job_1", r)
+
+    assert seen["backups"] == []
+    assert {src for src, _tid in seen["rips"]} == {"disc:0"}
+    assert "can only copy Blu-rays" in r.text
+
+
+@pytest.mark.parametrize("filenames, copied", [
+    ((None, None, None), False),                          # DVD titles name no file
+    (("00800.mpls", "00801.mpls", "00802.mpls"), True),   # Blu-ray titles always do
+])
+async def test_a_job_scanned_before_the_type_was_recorded_is_told_apart_by_its_titles(
+        tmp_path, monkeypatch, filenames, copied):
+    """Jobs saved before the disc type was kept come back with none. Their
+    titles still say which medium they came from."""
+    spec = [(t, d, f) for (t, d, _f), f in zip(DISC, filenames)]
+    pipe = _pipe(tmp_path, monkeypatch)
+    job = _job(_titles(*spec), disc_type=None)
+    seen = _wire(pipe, monkeypatch, copy_titles=_titles(*spec))
+
+    await pipe._prepare_disc_once(job, tmp_path / "job_1", _Report())
+
+    assert bool(seen["backups"]) is copied
 
 
 async def test_a_file_job_and_a_disabled_setting_both_skip_the_copy(

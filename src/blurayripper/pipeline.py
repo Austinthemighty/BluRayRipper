@@ -1161,6 +1161,13 @@ class Pipeline:
             # One title gains nothing — the disc is opened once either way — and
             # a backup would additionally read every title that was NOT wanted.
             return None
+        if not have_copy and not _backup_supported(job.disc):
+            # MakeMKV's developer: backup works for Blu-rays only, and DVD backup
+            # never has been supported. Job 396 tried anyway and fell back.
+            report.on_event(
+                "This is a DVD, and MakeMKV can only copy Blu-rays whole — "
+                "ripping title by title from the disc.")
+            return None
 
         if not have_copy:
             needed = os_disc_capacity_bytes(job.disc.drive_device)
@@ -2293,6 +2300,15 @@ _PATH_RULES: list = []
 def configure_path_map(entries) -> None:
     global _PATH_RULES
     _PATH_RULES = pathmap.parse_rules(entries)
+
+
+def _backup_supported(disc: DiscInfo) -> bool:
+    """Whether MakeMKV can copy this disc whole: Blu-ray (and UHD), not DVD."""
+    if disc.disc_type:
+        return "dvd" not in disc.disc_type.lower()
+    # Scanned before the type was recorded. A Blu-ray title always names the
+    # playlist or stream file it comes from; a DVD title never does.
+    return any(t.source_filename for t in disc.titles)
 
 
 # Blu-ray (including UHD BD) 1x read speed = 36 Mbit/s = 4.5 MB/s.

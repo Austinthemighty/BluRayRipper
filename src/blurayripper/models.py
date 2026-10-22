@@ -80,6 +80,9 @@ class DiscInfo:
     # capable drive has a disc, not necessarily the one being opened, so it
     # cannot be attributed — this is about the drive that was actually read.
     read_error: bool = False
+    # MakeMKV's own word for the medium ("Blu-ray disc", "DVD disc"). Decides
+    # whether the disc can be copied whole first: MakeMKV backs up Blu-rays only.
+    disc_type: str | None = None
     titles: list[Title] = field(default_factory=list)
 
     def title(self, title_id: int) -> Title | None:
