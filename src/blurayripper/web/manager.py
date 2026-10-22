@@ -539,6 +539,7 @@ class JobManager:
         return resumed
 
     def _resume(self, wj: WebJob) -> None:
+        was_scanning = wj.state is JobState.SCANNING   # read before it is reset
         wj.state = JobState.READY
         wj.progress = 0.0
         wj.error = None
@@ -548,6 +549,15 @@ class JobManager:
         # "ripping"/"encoding" with nothing actually running yet.
         if wj._pipeline_job is not None:
             wj._pipeline_job.state = JobState.READY
+        # A job interrupted during its scan has no titles, so there is nothing
+        # for _run_job to prep — it would rip a job that was never scanned. Send
+        # it back to where it actually was. Keyed on the recovered STATE, not on
+        # a missing disc blob: a record can be mid-rip, with checkpoints worth
+        # keeping, and still carry no disc.
+        if was_scanning and (wj.source or "").startswith(("disc:", "dev:")):
+            wj.log.append(stamp_log("Recovered after restart — scanning again."))
+            wj._task = self._spawn(self._scan_job(wj))
+            return
         wj.log.append(stamp_log("Recovered after restart — resuming."))
         wj._task = self._spawn(self._run_job(wj))
 
@@ -652,7 +662,7 @@ class JobManager:
 
     def _is_stalled(self, wj: WebJob, live_state: JobState) -> bool:
         if live_state in self._ACTIVE_RIP_STATES:
-            return self._rip_stalled(wj)
+            return self._rip_stalled(wj, live_state)
         if live_state not in self._ACTIVE_WORKER_STATES:
             return False
         task = getattr(wj, "_task", None)
@@ -678,6 +688,16 @@ class JobManager:
         if not stalled:
             return None, None
         if live_state in self._ACTIVE_RIP_STATES:
+            if live_state is JobState.SCANNING:
+                return "scan_stuck", (
+                    "The scan never finished — makemkvcon stopped answering "
+                    "before it could read the disc, so this job has no titles "
+                    "and nothing has been ripped. Often this drive is not the "
+                    "one at fault: MakeMKV enumerates every drive before it "
+                    "opens one, so a drive that has dropped off the bus wedges "
+                    "the scan of a good disc in a different drive. Requeue "
+                    "cancels it and scans again; if it sticks here a second "
+                    "time, check the other drives in the Drives panel.")
             if self._rip_pending(wj):
                 # Distinguish "gone quiet" from "still shouting, still stuck":
                 # the second looks healthy at a glance, and the disc or drive is
@@ -707,7 +727,7 @@ class JobManager:
     # between a job being marked RIPPING and its task being attached.
     _RIP_TASK_GRACE = 90
 
-    def _rip_stalled(self, wj: WebJob) -> bool:
+    def _rip_stalled(self, wj: WebJob, live_state: JobState = JobState.RIPPING) -> bool:
         """A rip/scan that nothing is actually advancing — either a wedged
         makemkvcon (bad sector / unresponsive drive) that will never finish, or a
         job whose task is simply gone. Requeue cancels it (killing any subprocess,
@@ -732,11 +752,16 @@ class JobManager:
         # perfectly healthy: busy log, frozen progress bar, no stall flag and
         # therefore no Requeue button, with nothing to do but delete the job.
         # Measure movement too.
-        moved = getattr(wj, "_progress_at", None)
-        if moved is None:
-            moved = wj._progress_at = now
-        if (now - moved) > window:
-            return True
+        # ...but only where there IS a progress bar to freeze. A scan reports no
+        # fraction at all (on_progress is never called), so _progress_at sits at
+        # the baseline and every scan longer than the window would read as stuck.
+        # For a scan, silence above is the whole signal.
+        if live_state is not JobState.SCANNING:
+            moved = getattr(wj, "_progress_at", None)
+            if moved is None:
+                moved = wj._progress_at = now
+            if (now - moved) > window:
+                return True
         # A rip only ever runs as a LOCAL task on the rip box — workers encode,
         # they never rip. So no live task means nothing is moving this job, and
         # waiting out the full no-progress window would just delay saying so.
@@ -1555,25 +1580,34 @@ class JobManager:
         wj = self.jobs.get(job_id)
         if wj is None:
             raise ValueError(f"No job {job_id}.")
-        if not self._is_stalled(wj, self._live_state(wj)):
+        live = self._live_state(wj)
+        if not self._is_stalled(wj, live):
             raise ValueError(f"Job {job_id} isn't stalled — nothing to requeue.")
-        if wj._pipeline_job is None:
+        # A stall in the SCAN has no pipeline job to resume from: the scan is the
+        # thing that builds one. Demanding scan state here meant the one stall
+        # that strands a drive was also the one that could not be cleared —
+        # rejected for lacking exactly what it was stuck trying to produce.
+        rescan = live is JobState.SCANNING
+        if wj._pipeline_job is None and not rescan:
             raise ValueError(f"Job {job_id} can't be requeued (no scan state).")
         old_task = getattr(wj, "_task", None)  # a hung rip's live (wedged) task, if any
         wj.error = None
         wj.progress = 0.0
         wj.state = JobState.READY
-        wj._pipeline_job.state = JobState.READY
+        if wj._pipeline_job is not None:
+            wj._pipeline_job.state = JobState.READY
         try:
             self.store.release(job_id)  # drop a dead worker's stale claim
         except Exception:
             pass
-        wj.log.append(stamp_log("Requeued (was stalled) — resuming from checkpoints."))
+        wj.log.append(stamp_log(
+            "Requeued (was stalled) — scanning the disc again." if rescan
+            else "Requeued (was stalled) — resuming from checkpoints."))
         self._persist(wj)
         self.bus.publish()
-        wj._task = self._spawn(self._requeue_run(wj, old_task))
+        wj._task = self._spawn(self._requeue_run(wj, old_task, rescan=rescan))
 
-    async def _requeue_run(self, wj: WebJob, old_task) -> None:
+    async def _requeue_run(self, wj: WebJob, old_task, *, rescan: bool = False) -> None:
         """Cancel a wedged local rip task (which kills makemkvcon and frees the
         drive) and wait for it to actually die before re-running — otherwise the
         fresh rip races the old subprocess for the same drive."""
@@ -1583,6 +1617,9 @@ class JobManager:
                 await old_task
             except BaseException:
                 pass  # cancelled (or whatever it was stuck on) — drive is released now
+        if rescan:
+            await self._scan_job(wj)   # no pipeline job yet; the scan creates it
+            return
         await self._run_job(wj)
 
     def requeue_stalled(self) -> int:
@@ -2106,6 +2143,16 @@ class JobManager:
             self._persist(wj)
             self.bus.publish()
             return
+        # Say we are scanning BEFORE awaiting makemkvcon, and stamp the
+        # watchdog's baseline. Leaving the job at QUEUED (the dataclass default)
+        # meant _live_state reported "queued" for the whole scan, and
+        # _is_stalled ignores QUEUED — so a makemkvcon wedged on disc
+        # enumeration never flagged, never offered Requeue, and never showed as
+        # holding its drive. It just sat on "queued" with a dead log.
+        wj.state = JobState.SCANNING
+        wj._activity_at = wj._progress_at = time.monotonic()
+        self._persist(wj)
+        self.bus.publish()
         try:
             job = await self.pipeline.scan_disc(wj.source, reporter)
             wj._pipeline_job = job
