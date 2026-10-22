@@ -119,6 +119,46 @@ def test_assignments_refuse_on_episode_count_mismatch():
     assert not m.ok and "5" in m.reason and not m.assignments
 
 
+def _lengths(label, *seconds):
+    return DiscInfo(source="disc:0", disc_name=label, volume_label=label,
+                    titles=[Title(title_id=i, duration_seconds=s, chapter_count=5)
+                            for i, s in enumerate(seconds)])
+
+
+S8D2 = (1296, 1298, 2595, 1221, 1297, 1297, 1296)   # job 399: title 2 is E11+E12
+
+
+def test_a_two_parter_squares_the_plans_count_and_keeps_the_rest_in_step():
+    """Job 399: the plan says S8 D2 holds 8 episodes, the disc has 7 titles
+    because "The Final Page" parts 1 and 2 are one. That is not a mismatch."""
+    rows, _ = parse_csv("show,season,disc,first_episode,episodes\n"
+                        "How I Met Your Mother,8,2,9,8\n")
+    m = assignments_for(rows[0], _lengths("HOW_I_MET_YOUR_MOTHER_S8_D2", *S8D2))
+    assert m.ok
+    assert [a.episodes for a in m.assignments] == [[9], [10], [11, 12], [13], [14], [15], [16]]
+
+
+def test_a_long_title_the_plan_counts_as_one_episode_stays_one():
+    """The plan's count is what decides: seven episodes on seven titles means the
+    long one is a single long episode, not a two-parter."""
+    rows, _ = parse_csv("show,season,disc,first_episode,episodes\nShow,8,2,9,7\n")
+    m = assignments_for(rows[0], _lengths("SHOW_S8_D2", *S8D2))
+    assert m.ok and [a.episodes for a in m.assignments][2] == [11]
+    assert m.assignments[-1].episode == 15
+
+
+def test_a_long_title_with_no_count_to_settle_it_parks():
+    """Without a count nothing says whether the long title is one episode or
+    two, and guessing wrong shifts every number after it."""
+    rows, _ = parse_csv("show,season,disc,first_episode\nShow,8,2,9\n")
+    m = assignments_for(rows[0], _lengths("SHOW_S8_D2", *S8D2))
+    assert not m.ok and "twice as long" in m.reason and "title(s) 2" in m.reason
+
+    rows, _ = parse_csv("show,season,disc,first_episode,episodes\nShow,8,2,9,10\n")
+    m = assignments_for(rows[0], _lengths("SHOW_S8_D2", *S8D2))
+    assert not m.ok and "1 of them double length" in m.reason
+
+
 def test_assignments_refuse_when_nothing_says_the_season():
     rows, _ = parse_csv("disc_label,show\nSOME_BOXSET_D2,Some Show\n")
     m = assignments_for(rows[0], _disc("SOME_BOXSET_D2", n=3))

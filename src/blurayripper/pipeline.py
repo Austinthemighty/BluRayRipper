@@ -1083,7 +1083,7 @@ class Pipeline:
         try:
             refs = await gather_references(
                 self.osub, show_id, first.season,
-                sorted({pairs[t].episode for t in rips}),
+                sorted({n for t in rips for n in pairs[t].episodes}),
                 self.settings.languages.default)
         except Exception as exc:
             report.on_event(
@@ -1094,14 +1094,18 @@ class Pipeline:
             return
         wrong = []
         for m in identify_episodes(rips, refs):
-            expected = pairs[m.title_id].episode
+            # A two-parter in one title is named for both halves and matches
+            # either; only an episode outside what it was named for is wrong.
+            named = pairs[m.title_id]
+            label = (f"E{named.episodes[0]:02d}–E{named.episodes[-1]:02d}"
+                     if len(named.episodes) > 1 else f"E{named.episode:02d}")
             report.on_event(
-                f"Subtitle check, title {m.title_id}: named E{expected:02d}, "
+                f"Subtitle check, title {m.title_id}: named {label}, "
                 f"best match E{m.episode:02d} (score {m.score:.2f})."
                 if m.episode is not None else
                 f"Subtitle check, title {m.title_id}: no reference matched.")
-            if m.episode is not None and m.episode != expected and m.confident:
-                wrong.append(f"title {m.title_id} was named E{expected:02d} but "
+            if m.episode is not None and m.episode not in named.episodes and m.confident:
+                wrong.append(f"title {m.title_id} was named {label} but "
                              f"matches E{m.episode:02d} ({m.score:.2f})")
         if wrong:
             raise RuntimeError(
@@ -2211,7 +2215,8 @@ class Pipeline:
         if a.season is None or a.episode is None:
             raise ValueError(f"TV assignment for title {a.title_id} missing season/episode.")
         return naming.episode_video_path(
-            storage.tv_root, a.show_or_movie_title, a.year, a.season, a.episode, container
+            storage.tv_root, a.show_or_movie_title, a.year, a.season, a.episode, container,
+            a.episode_end,
         )
 
 

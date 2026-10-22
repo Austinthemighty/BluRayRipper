@@ -937,6 +937,22 @@ def test_two_titles_mapped_to_one_episode_are_caught_too(tmp_path):
         ])
 
 
+def test_a_two_parter_and_a_title_sharing_its_second_episode_are_refused(tmp_path):
+    """E11-E12 and E12 save as different files, so the path check cannot see
+    it — but Plex would hold two different E12s."""
+    import pytest as _pytest
+    m = _mgr(tmp_path)
+    with _pytest.raises(ValueError, match="both include S08E12"):
+        m._refuse_colliding_assignments([
+            EpisodeAssignment(2, MediaKind.TV, "HIMYM", 2005, season=8, episode=11, episode_end=12),
+            EpisodeAssignment(3, MediaKind.TV, "HIMYM", 2005, season=8, episode=12),
+        ])
+    m._refuse_colliding_assignments([                      # moved on by one: fine
+        EpisodeAssignment(2, MediaKind.TV, "HIMYM", 2005, season=8, episode=11, episode_end=12),
+        EpisodeAssignment(3, MediaKind.TV, "HIMYM", 2005, season=8, episode=13),
+    ])
+
+
 def test_an_ordinary_single_movie_mapping_is_untouched(tmp_path):
     m = _mgr(tmp_path)
     m._refuse_colliding_assignments(

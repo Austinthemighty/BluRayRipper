@@ -378,9 +378,24 @@ def assignments_for(row: PlanRow, disc: DiscInfo) -> PlanMatch:
     if not count:
         return PlanMatch(reason="no episode-length titles on this disc")
 
+    # A two-part episode mastered as one title makes the disc look an episode
+    # short (HIMYM S8 D2: 8 planned, 7 titles). Take it only when the plan's own
+    # count confirms it; a long title could equally be an extended episode.
+    doubles = discinfo.double_length_titles(titles)
+    use_doubles = False
     if row.episodes is not None and row.episodes != count:
+        if doubles and count + len(doubles) == row.episodes:
+            use_doubles = True
+        else:
+            return PlanMatch(
+                reason=f"plan expects {row.episodes} episode(s) but the disc has "
+                       f"{count} episode-length title(s)"
+                       + (f", {len(doubles)} of them double length" if doubles else ""))
+    elif row.episodes is None and doubles:
         return PlanMatch(
-            reason=f"plan expects {row.episodes} episode(s) but the disc has {count}")
+            reason=f"title(s) {', '.join(str(t) for t in sorted(doubles))} run about "
+                   "twice as long as the rest and may each hold two episodes — add the "
+                   "disc's episode count to the plan row to settle it")
 
     season = row.season
     if season is None:
@@ -403,17 +418,20 @@ def assignments_for(row: PlanRow, disc: DiscInfo) -> PlanMatch:
         return PlanMatch(
             reason=f"plan row starts at episode {first}; episode numbers start at 1")
 
-    assignments = [
-        EpisodeAssignment(
+    assignments = []
+    episode = first
+    for t in titles:
+        span = 2 if use_doubles and t.title_id in doubles else 1
+        assignments.append(EpisodeAssignment(
             title_id=t.title_id,
             kind=MediaKind.TV,
             show_or_movie_title=row.show,
             year=row.year,
             season=season,
-            episode=first + i,
-        )
-        for i, t in enumerate(titles)
-    ]
+            episode=episode,
+            episode_end=episode + span - 1 if span > 1 else None,
+        ))
+        episode += span
     return PlanMatch(assignments=assignments, season=season, first_episode=first)
 
 

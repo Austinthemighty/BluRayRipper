@@ -356,6 +356,14 @@ def test_submit_mapping_carries_tv_season_and_episode(client, manager):
     assert a.episode_title == "Pilot"
 
 
+def test_submit_mapping_carries_a_two_episode_title(client, manager):
+    wj = _scanned_job(manager, 7, JobState.AWAITING_MAPPING)
+    client.post("/api/jobs/7/mapping", json={"assignments": [
+        {"title_id": 0, "kind": "tv", "show_or_movie_title": "HIMYM",
+         "season": 8, "episode": 11, "episode_end": 12}]})
+    assert wj.assignments[0].episodes == [11, 12]
+
+
 def test_submit_mapping_rejects_an_unknown_media_kind_with_400(client, manager):
     """'movie'/'tv' come from the UI, but a stale client (or a hand-rolled POST)
     can send anything — an unknown kind is a bad request, not a crash, and must

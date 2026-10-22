@@ -57,3 +57,11 @@ def test_export_writes_srt_and_sheet(tmp_path):
     assert dest.parent.name == "The Film (1999)"
     info = dest.parent / (srt.name + ".info.txt")
     assert info.exists() and "OpenSubtitles manual upload" in info.read_text()
+
+
+def test_a_two_episode_title_is_named_for_both_on_the_upload_sheet():
+    a = EpisodeAssignment(2, MediaKind.TV, "HIMYM", 2005, season=8, episode=11, episode_end=12)
+    sheet = os_upload.build_info_sheet(
+        srt_name="ep.srt", assignment=a, language_code="eng",
+        is_sdh=False, forced=False, height=480, fps=29.97, version="v1")
+    assert "S08E11-E12" in sheet

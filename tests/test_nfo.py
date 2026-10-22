@@ -32,3 +32,11 @@ def test_write_nfo_next_to_video(tmp_path):
     out = nfo.write_nfo(video, a)
     assert out == tmp_path / "M (2000).nfo"
     assert out.read_text().startswith("<?xml")
+
+
+def test_a_two_episode_file_gets_an_entry_for_each_episode():
+    """Kodi describes a multi-episode file with one <episodedetails> per episode."""
+    a = EpisodeAssignment(2, MediaKind.TV, "HIMYM", 2005, season=8, episode=11,
+                          episode_end=12, episode_title="The Final Page (1) & The Final Page (2)")
+    root = ElementTree.fromstring("<all>" + nfo.build_nfo(a).split("?>", 1)[1] + "</all>")
+    assert [e.findtext("episode") for e in root.findall("episodedetails")] == ["11", "12"]

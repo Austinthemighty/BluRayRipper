@@ -69,6 +69,8 @@ class AssignmentIn(BaseModel):
     episode: int | None = None
     episode_title: str | None = None
     edition: str | None = None
+    # Last episode when the title holds two (a double-length two-parter).
+    episode_end: int | None = None
 
 
 class SetMapping(BaseModel):
@@ -385,6 +387,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     year=a.year,
                     season=a.season,
                     episode=a.episode,
+                    episode_end=a.episode_end,
                     episode_title=a.episode_title,
                     edition=a.edition,
                 )

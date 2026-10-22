@@ -427,3 +427,35 @@ def test_the_boxset_editor_knows_every_column_the_plan_does():
     for key in ("disc_label", "show", "year", "season", "disc",
                 "collection", "first_episode", "episodes"):
         assert f"key:'{key}'" in cols, f"the editor would drop “{key}” on save"
+
+
+# --- a two-parter mastered as one title -----------------------------------------
+
+def _lengths(*seconds):
+    return json.dumps([{"id": i, "seconds": s} for i, s in enumerate(seconds)])
+
+
+def test_fill_in_order_gives_a_double_length_title_two_episodes():
+    """Job 399, HIMYM S8 D2: title 2 is "The Final Page" parts 1 and 2. Filling
+    one episode per title made it E11 and pushed every title after it one
+    episode short — title 3, really E13, came out as E12."""
+    filled = js(f"fillInOrder({_lengths(1296, 1298, 2595, 1221, 1297, 1297, 1296)}, 9)")
+    assert filled["assign"] == {"0": 9, "1": 10, "2": 11, "3": 13, "4": 14, "5": 15, "6": 16}
+    assert filled["ends"] == {"2": 12}
+
+
+def test_the_form_and_the_server_spot_the_same_two_parters():
+    """The box-set plan applies the same rule server-side; if the two drifted, a
+    disc could name itself one way and fill the form another."""
+    from blurayripper.models import Title
+    from blurayripper.tools.discinfo import double_length_titles
+    for lengths in [(1296, 1298, 2595, 1221, 1297, 1297, 1296),
+                    (1297, 1262, 1296, 1297, 1296, 1296, 2631, 2590),
+                    (2580, 2610, 2595, 2640), (1200, 2600, 2620, 2580),
+                    (1296, 2595, 1290, 2610), (300, 1296, 2595),
+                    # Either side of both thresholds (1.7x and 2.4x of 1300s),
+                    # so a rule that drifts on either side shows up here.
+                    (1300, 1300, 2150, 2230, 3100, 3185)]:
+        server = double_length_titles([Title(title_id=i, duration_seconds=s)
+                                       for i, s in enumerate(lengths)])
+        assert set(js(f"doubleLengthIds({_lengths(*lengths)})")) == server, lengths

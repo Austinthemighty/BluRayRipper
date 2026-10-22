@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import statistics
 
 from ..models import DiscInfo, MediaKind, Title
 
@@ -69,6 +70,33 @@ def episode_candidate_titles(disc: DiscInfo) -> list[Title]:
         for t in ordered_titles(disc)
         if _EPISODE_MIN <= t.duration_seconds <= _EPISODE_MAX
     ]
+
+
+# A title this many times the disc's usual episode length is a two-part episode
+# mastered as one: 2595s beside 1296s on HIMYM S8 D2 ("The Final Page"), 2623s
+# beside ~1293s for the S9 finale. index.html applies the same rule
+# (doubleLengthIds) to fill the naming form — keep the two in step.
+DOUBLE_MIN, DOUBLE_MAX = 1.7, 2.4
+
+
+def double_length_titles(titles: list[Title]) -> set[int]:
+    """Ids of titles about twice as long as the disc's usual episode.
+
+    "Usual" is the median of the shortest cluster of episode-length titles
+    (within 1.5x the shortest), and it takes two of them to set it: a drama of
+    all 43-minute episodes has no doubles, and one short recap among long
+    episodes is no yardstick.
+    """
+    lengths = [t.duration_seconds for t in titles if t.duration_seconds >= _EPISODE_MIN]
+    if not lengths:
+        return set()
+    shortest = min(lengths)
+    single = [d for d in lengths if d < shortest * 1.5]
+    if len(single) < 2:
+        return set()
+    usual = statistics.median(single)
+    return {t.title_id for t in titles
+            if DOUBLE_MIN * usual <= t.duration_seconds <= DOUBLE_MAX * usual}
 
 
 def main_feature(disc: DiscInfo) -> Title | None:

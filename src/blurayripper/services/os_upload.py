@@ -15,6 +15,7 @@ import shutil
 from pathlib import Path
 
 from ..models import EpisodeAssignment, MediaKind
+from .naming import episode_code
 
 # ISO 639-2/B -> English name for the languages we're likely to keep. Falls back
 # to the raw code so an unlisted language still yields a usable sheet.
@@ -69,7 +70,8 @@ def suggested_release_name(assignment: EpisodeAssignment, height: int | None) ->
     parts = [assignment.show_or_movie_title.replace(" ", ".")]
     if (assignment.kind is MediaKind.TV and assignment.season is not None
             and assignment.episode is not None):
-        parts.append(f"S{assignment.season:02d}E{assignment.episode:02d}")
+        parts.append(episode_code(assignment.season, assignment.episode,
+                                  assignment.episode_end))
     elif assignment.year:
         parts.append(str(assignment.year))
     if height:
@@ -99,7 +101,8 @@ def build_info_sheet(
     if assignment.kind is MediaKind.TV:
         se = ""
         if assignment.season is not None and assignment.episode is not None:
-            se = f"S{assignment.season:02d}E{assignment.episode:02d}"
+            se = episode_code(assignment.season, assignment.episode,
+                              assignment.episode_end)
         et = f" - {assignment.episode_title}" if assignment.episode_title else ""
         lines.append(f"Episode:               {se}{et}")
     lines += [

@@ -54,3 +54,25 @@ def test_fingerprint_changes_with_different_durations():
     disc_b = _tv_disc()
     disc_b.titles[0].duration_seconds += 600
     assert discinfo.disc_fingerprint(disc_a) != discinfo.disc_fingerprint(disc_b)
+
+
+def _titles(*seconds):
+    return [Title(title_id=i, duration_seconds=s) for i, s in enumerate(seconds)]
+
+
+def test_a_two_parter_mastered_as_one_title_is_spotted():
+    """Lengths from the real discs: HIMYM S8 D2 (job 399) and the S9 finale
+    disc (job 397, whose two long titles are both the finale)."""
+    s8d2 = _titles(1296, 1298, 2595, 1221, 1297, 1297, 1296)
+    assert discinfo.double_length_titles(s8d2) == {2}
+    s9d3 = _titles(1297, 1262, 1296, 1297, 1296, 1296, 2631, 2590)
+    assert discinfo.double_length_titles(s9d3) == {6, 7}
+
+
+def test_long_episodes_and_odd_lengths_are_not_mistaken_for_two_parters():
+    # A drama of all 43-minute episodes.
+    assert discinfo.double_length_titles(_titles(2580, 2610, 2595, 2640)) == set()
+    # One short recap among long episodes is no yardstick.
+    assert discinfo.double_length_titles(_titles(1200, 2600, 2620, 2580)) == set()
+    # Two singles and two doubles: the singles still set the scale.
+    assert discinfo.double_length_titles(_titles(1296, 2595, 1290, 2610)) == {1, 3}

@@ -1247,8 +1247,14 @@ class JobManager:
             row = replace(row, year=None)
         result = boxset_plan.assignments_for(row, job.disc)
         if not result.ok:
+            # A row matched from the label's parts (show, season, disc) has no
+            # disc_label, and this printed an empty “”. Name it by those parts.
+            which = (f"“{row.disc_label}”" if row.disc_label else
+                     f"“{row.show}”"
+                     + (f" S{row.season:02d}" if row.season is not None else "")
+                     + (f" D{row.disc:02d}" if row.disc is not None else ""))
             reporter.on_event(
-                f"Box-set plan matched “{row.disc_label}” but didn't apply: "
+                f"Box-set plan matched {which} but didn't apply: "
                 f"{result.reason}. Confirm this one manually.")
             return False
         if row.year is None:
@@ -1266,7 +1272,7 @@ class JobManager:
         wj.show_tmdb_id = tmdb_id
         wj.state = JobState.READY
         job.state = JobState.READY
-        last = result.assignments[-1].episode
+        last = result.assignments[-1].episodes[-1]
         span = (f"E{result.first_episode:02d}" if last == result.first_episode
                 else f"E{result.first_episode:02d}–E{last:02d}")
         reporter.on_event(
@@ -1326,9 +1332,9 @@ class JobManager:
             episodes = await client.get_season(show.tmdb_id, season)
             by_num = {e.episode_number: e.name for e in episodes}
             for a in assignments:
-                name = by_num.get(a.episode)
-                if name:
-                    a.episode_title = name
+                names = [by_num.get(n) for n in a.episodes]
+                if names and all(names):
+                    a.episode_title = " & ".join(names)
             return show.tmdb_id
         except Exception:
             return None  # numbers-only naming is still correct
@@ -1745,6 +1751,22 @@ class JobManager:
                     f"\"{{edition-Theatrical}}\" and \"{{edition-Unrated}}\" as two "
                     f"versions of one film), or untick one.")
             seen[dest] = a
+        # A two-parter named E11-E12 beside a title named E12 saves as two
+        # different files, so the path check above cannot see it — but Plex
+        # would hold two copies of E12 and nobody would know which was right.
+        held: dict[tuple, object] = {}
+        for a in assignments:
+            if a.kind is not MediaKind.TV or a.season is None:
+                continue
+            for n in a.episodes:
+                other = held.get((a.show_or_movie_title, a.season, n))
+                if other is not None and other is not a:
+                    raise ValueError(
+                        f"Titles {other.title_id} and {a.title_id} both include "
+                        f"S{a.season:02d}E{n:02d}. A title marked as two episodes "
+                        f"takes the next number too — move the titles after it on "
+                        f"by one.")
+                held[(a.show_or_movie_title, a.season, n)] = a
 
     def rename_job(self, job_id: int, title: str, year: int | None) -> None:
         """Fix a job's identity — a movie OR a show whose title/year is wrong (e.g.
@@ -3104,15 +3126,15 @@ class JobManager:
             return f"{title} ({first.year})" if first.year else title
         label_season, disc = self._disc_hint(wj)
         seasons = sorted({a.season for a in assigns if a.season is not None})
-        episodes = sorted({a.episode for a in assigns if a.episode is not None})
+        episodes = sorted({n for a in assigns for n in a.episodes})
         if len(seasons) > 1:
             # A disc that spans a season boundary (S01E22 + S02E01 + S02E02) must
             # not have its two spans read independently: "S01–S02E01–E22" says
             # episodes 1–22 of BOTH seasons, when what is on the disc is the end of
             # one season and the start of the next — the opposite of the shelf hint
             # this name exists to give. Qualify each end of the span with its season.
-            pairs = sorted((a.season, a.episode) for a in assigns
-                           if a.season is not None and a.episode is not None)
+            pairs = sorted((a.season, n) for a in assigns if a.season is not None
+                           for n in a.episodes)
             if pairs:
                 (s0, e0), (s1, e1) = pairs[0], pairs[-1]
                 # Both ends stay season-qualified; there is no one season to put
@@ -3228,9 +3250,10 @@ class JobManager:
         highest, basis = 0, []
         for wj in self.jobs.values():
             episodes = sorted(
-                a.episode for a in wj.assignments.values()
-                if a is not None and a.episode is not None and a.season == season
-                and (a.show_or_movie_title or "").strip().casefold() == want)
+                n for a in wj.assignments.values()
+                if a is not None and a.season == season
+                and (a.show_or_movie_title or "").strip().casefold() == want
+                for n in a.episodes)
             if not episodes:
                 continue
             highest = max(highest, episodes[-1])

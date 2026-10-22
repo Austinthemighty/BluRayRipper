@@ -275,6 +275,15 @@ def movie_video_path(
     return movies_root / folder / f"{name}.{container}"
 
 
+def episode_code(season: int, episode: int, episode_end: int | None = None) -> str:
+    """``S08E11``, or ``S08E11-E12`` for one file holding two episodes — the
+    form Plex reads as a multi-episode file."""
+    code = f"S{season:02d}E{episode:02d}"
+    if episode_end is not None and episode_end > episode:
+        code += f"-E{episode_end:02d}"
+    return code
+
+
 def episode_video_path(
     tv_root: Path,
     show: str,
@@ -282,10 +291,11 @@ def episode_video_path(
     season: int,
     episode: int,
     container: str,
+    episode_end: int | None = None,
 ) -> Path:
     show_folder = _title_with_year(show, year)
     season_folder = f"Season {season:02d}"
-    basename = f"{sanitize(show)} - S{season:02d}E{episode:02d}"
+    basename = f"{sanitize(show)} - {episode_code(season, episode, episode_end)}"
     return tv_root / show_folder / season_folder / f"{basename}.{container}"
 
 

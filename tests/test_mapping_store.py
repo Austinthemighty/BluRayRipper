@@ -40,3 +40,10 @@ def test_forget(tmp_path):
     store.save("fp", "name", _assignments())
     store.forget("fp")
     assert store.get("fp") is None
+
+
+def test_a_two_episode_title_is_remembered_for_a_re_rip(tmp_path):
+    store = MappingStore(tmp_path / "mappings.db")
+    store.save("fp", "HIMYM S8 D2", [
+        EpisodeAssignment(2, MediaKind.TV, "HIMYM", 2005, 8, 11, episode_end=12)])
+    assert store.get("fp")[0].episodes == [11, 12]

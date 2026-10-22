@@ -239,3 +239,21 @@ def test_a_spelled_out_season_in_brackets_still_finds_the_show():
     # Stripping everything leaves the original rather than an empty search.
     assert clean_tmdb_query("The Complete Second Season", "tv")[0] \
         == "The Complete Second Season"
+
+
+def test_a_title_holding_two_episodes_is_named_for_both():
+    """HIMYM S8 D2's "The Final Page" is parts 1 and 2 in one 43-minute title.
+    S08E11-E12 is the form Plex reads as one file holding both."""
+    from blurayripper.models import EpisodeAssignment, MediaKind
+    p = naming.episode_video_path(Path("/tv"), "How I Met Your Mother", 2005, 8, 11,
+                                  "mkv", episode_end=12)
+    assert p.name == "How I Met Your Mother - S08E11-E12.mkv"
+    assert naming.episode_video_path(Path("/tv"), "Show", None, 8, 13, "mkv").name \
+        == "Show - S08E13.mkv"
+    assert naming.episode_code(8, 11, 11) == "S08E11"      # an end equal to the start is one episode
+
+    a = EpisodeAssignment(2, MediaKind.TV, "How I Met Your Mother", 2005, season=8,
+                          episode=11, episode_end=12)
+    assert a.episodes == [11, 12]
+    assert EpisodeAssignment(3, MediaKind.TV, "X", season=8, episode=13).episodes == [13]
+    assert EpisodeAssignment(0, MediaKind.MOVIE, "X").episodes == []

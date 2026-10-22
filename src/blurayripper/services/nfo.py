@@ -22,16 +22,21 @@ def build_nfo(a: EpisodeAssignment) -> str:
             rows.append(f"  <edition>{escape(a.edition)}</edition>")
         body = "<movie>\n" + "\n".join(rows) + "\n</movie>\n"
     else:
-        title = a.episode_title or (f"Episode {a.episode}" if a.episode else "Episode")
-        rows = [f"  <title>{escape(title)}</title>",
-                f"  <showtitle>{escape(a.show_or_movie_title)}</showtitle>"]
-        if a.season is not None:
-            rows.append(f"  <season>{a.season}</season>")
-        if a.episode is not None:
-            rows.append(f"  <episode>{a.episode}</episode>")
-        if a.year:
-            rows.append(f"  <year>{a.year}</year>")
-        body = "<episodedetails>\n" + "\n".join(rows) + "\n</episodedetails>\n"
+        # One <episodedetails> per episode the file holds: that is how Kodi
+        # describes a multi-episode file (S08E11-E12).
+        blocks = []
+        for n in a.episodes or [None]:
+            title = a.episode_title or (f"Episode {n}" if n else "Episode")
+            rows = [f"  <title>{escape(title)}</title>",
+                    f"  <showtitle>{escape(a.show_or_movie_title)}</showtitle>"]
+            if a.season is not None:
+                rows.append(f"  <season>{a.season}</season>")
+            if n is not None:
+                rows.append(f"  <episode>{n}</episode>")
+            if a.year:
+                rows.append(f"  <year>{a.year}</year>")
+            blocks.append("<episodedetails>\n" + "\n".join(rows) + "\n</episodedetails>\n")
+        body = "".join(blocks)
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + body
 
 

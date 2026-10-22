@@ -590,6 +590,36 @@ function suggestEditions(titles, selected, tmdbMinutes){
   return out;
 }
 
+// A title this many times the disc's usual episode length is a two-part episode
+// mastered as one: HIMYM S8 D2's "The Final Page" runs 2595s beside 1296s. The
+// server applies the same rule (discinfo.double_length_titles) to the box-set
+// plan — keep the two in step. "Usual" is the median of the shortest cluster of
+// episode-length titles, and needs two of them to mean anything.
+const DOUBLE_MIN = 1.7, DOUBLE_MAX = 2.4, EPISODE_MIN_S = 18 * 60;
+function doubleLengthIds(titles){
+  const lens = titles.map(t => t.seconds || 0).filter(s => s >= EPISODE_MIN_S);
+  if (!lens.length) return [];
+  const shortest = Math.min(...lens);
+  const single = lens.filter(s => s < shortest * 1.5).sort((a, b) => a - b);
+  if (single.length < 2) return [];
+  const m = single.length;
+  const usual = m % 2 ? single[(m - 1) / 2] : (single[m / 2 - 1] + single[m / 2]) / 2;
+  return titles.filter(t => (t.seconds || 0) >= DOUBLE_MIN * usual
+                         && (t.seconds || 0) <= DOUBLE_MAX * usual).map(t => t.id);
+}
+// Number titles in disc order from `start`. A double-length title takes two
+// episodes, so the titles after it stay in step instead of each being one short.
+function fillInOrder(titles, start){
+  const doubles = new Set(doubleLengthIds(titles));
+  const assign = {}, ends = {};
+  let ep = start;
+  titles.forEach(t => {
+    assign[t.id] = ep;
+    if (doubles.has(t.id)) { ends[t.id] = ep + 1; ep += 2; } else { ep += 1; }
+  });
+  return {assign, ends};
+}
+
 // One Edition control per selected title, for a disc carrying more than one cut
 // of the same film. The runtime is shown because it is the only thing that tells
 // you which row is which — a theatrical and an unrated cut differ by minutes,
@@ -1263,7 +1293,9 @@ function buildMapping(card, j){
       // Pre-fill from the disc label ("HAWAII_FIVE_0_S1_D4" -> season 1, disc 4).
       // The disc's position in the set implies which block of episodes it holds:
       // disc 4 with 4 episode titles ≈ E13-E16. A guess — the user still confirms.
-      const nSel = j.selected.length || 1;
+      const selTitles = j.titles.filter(t => j.selected.includes(t.id));
+      // Episodes, not titles: a two-parter mastered as one title holds two.
+      const nSel = (selTitles.length + doubleLengthIds(selTitles).length) || 1;
       const guessSeason = j.label_season || 1;
       // Only a SEASON-scoped disc number implies an episode block: on a complete
       // series numbered straight through, disc 15 is not episode 57 of anything.
@@ -1321,7 +1353,7 @@ function buildMapping(card, j){
         } else {
           const done = r.basis.reduce((n,b)=>n+b.count, 0);
           const last = r.basis[r.basis.length-1];
-          const n = sel().length || 1;
+          const n = (sel().length + doubleLengthIds(sel()).length) || 1;
           note.innerHTML = `Season ${s} already has <b>${done} episode${done===1?'':'s'}</b> named `
             + `(up to E${pad(last.last)}, job #${last.job}), so this disc continues at `
             + `<b>E${pad(r.next)}</b>`+ (n>1 ? `–E${pad(r.next+n-1)}` : '') + `.`;
@@ -1338,15 +1370,16 @@ function buildMapping(card, j){
       continueFromPreviousDiscs();
       const epOptions = (num) => state.episodes.map(e=>
         `<option value="${e.episode}" ${e.episode===num?'selected':''}>E${pad(e.episode)} — ${e.name||'?'}${e.runtime?' · '+e.runtime+'m':''}</option>`).join('');
-      const render = (assign, flags) => {
+      const render = (assign, flags, ends) => {
         const s=+tv.querySelector('[data-season]').value;
         tv.querySelector('[data-eps]').innerHTML = sel().map(t=>
           `<div class="row">Title ${t.id} <span class="muted">${t.duration}</span> → S${pad(s)}
             <select data-ep="${t.id}" style="max-width:360px;">${epOptions(assign[t.id])}</select>
+            <label class="muted" style="font-size:12px;" title="This title holds two episodes: a two-part episode put on the disc as one, about twice the usual length. It is saved as S01E11-E12, which Plex shows as both."><input type="checkbox" data-epdouble="${t.id}" ${ends&&ends[t.id]?'checked':''}> + next episode</label>
             ${flags&&flags.has(t.id)?'<span title="Several episodes share this runtime, so runtime cannot tell them apart — verify this one." style="color:#d29922;">⚠ ambiguous</span>':''}</div>`).join('');
         body.querySelector('[data-confirm]').disabled=false;
       };
-      const inOrder = () => { const start=+tv.querySelector('[data-firstep]').value||1; const a={}; sel().forEach((t,i)=>a[t.id]=start+i); return a; };
+      const inOrder = () => fillInOrder(sel(), +tv.querySelector('[data-firstep]').value||1);
       const byRuntime = () => {
         // Greedy nearest-runtime, with a tie flag: a title is "ambiguous" when
         // more than one episode sits within ~90s of its duration, since runtime
@@ -1368,9 +1401,9 @@ function buildMapping(card, j){
         state.byNum={}; state.episodes.forEach(e=>state.byNum[e.episode]=e.name);
         if(!state.episodes.length){ tv.querySelector('[data-eps]').innerHTML='<span class="muted">No episodes found for that season.</span>'; return; }
         tv.querySelector('[data-fill]').style.display='';
-        render(inOrder());
+        const o = inOrder(); render(o.assign, null, o.ends);
       };
-      tv.querySelector('[data-order]').onclick = () => render(inOrder());
+      tv.querySelector('[data-order]').onclick = () => { const o = inOrder(); render(o.assign, null, o.ends); };
       tv.querySelector('[data-runtime]').onclick = () => {
         if(!state.episodes.some(e=>e.runtime)) alert('TMDB has no episode runtimes for this season — pick episodes manually from the dropdowns.');
         const {a, flags} = byRuntime();
@@ -1440,10 +1473,16 @@ function buildMapping(card, j){
     } else {
       const s=+body.querySelector('[data-season]').value;
       const byNum=state.byNum||{};
-      assignments = [...body.querySelectorAll('select[data-ep]')].map(sel=>({
-        title_id:+sel.dataset.ep, kind:'tv', show_or_movie_title:state.chosen.title, year:state.chosen.year,
-        season:s, episode:+sel.value, episode_title: byNum[+sel.value]||null }));
-      const eps = assignments.map(a=>a.episode);
+      assignments = [...body.querySelectorAll('select[data-ep]')].map(sel=>{
+        const ep = +sel.value;
+        const dbl = body.querySelector(`[data-epdouble="${sel.dataset.ep}"]`);
+        const end = dbl && dbl.checked ? ep + 1 : null;
+        const names = (end ? [ep, end] : [ep]).map(n => byNum[n]);
+        return {title_id:+sel.dataset.ep, kind:'tv', show_or_movie_title:state.chosen.title,
+          year:state.chosen.year, season:s, episode:ep, episode_end:end,
+          episode_title: names.every(Boolean) ? names.join(' & ') : null};
+      });
+      const eps = assignments.flatMap(a => a.episode_end ? [a.episode, a.episode_end] : [a.episode]);
       if (new Set(eps).size !== eps.length && !confirm('Two titles map to the same episode — continue anyway?')) return;
     }
     const gmode = body.querySelector(`input[name=g${j.id}]:checked`).value;

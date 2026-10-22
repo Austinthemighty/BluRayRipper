@@ -706,6 +706,15 @@ def test_display_name_identifies_which_boxset_disc(manager):
     # A single episode.
     assert manager._display_name(job_with(ep(1, 2, 7))) == "House S02E07"
 
+    # A two-parter at the end of the disc counts to its second half.
+    last = ep(5, 1, 7)
+    last.episode_end = 8
+    assert manager._display_name(job_with(ep(4, 1, 6), last)) == "House S01E06–E08"
+    # Across a season boundary, too: the span ends on the two-parter's second half.
+    tail = ep(2, 2, 1)
+    tail.episode_end = 2
+    assert manager._display_name(job_with(ep(1, 1, 24), tail)) == "House S01E24–S02E02"
+
     # Movies keep title + year.
     movie = EpisodeAssignment(title_id=0, kind=MediaKind.MOVIE,
                               show_or_movie_title="Yogi Bear", year=2010)
@@ -2326,6 +2335,11 @@ def test_the_next_disc_continues_from_the_ones_already_named(manager):
     assert manager.next_episode_for("Landman", 1)[0] == 3
     assert manager.next_episode_for("Landman", 3) == (1, [])
     assert manager.next_episode_for("Unseen Show", 1) == (1, [])
+
+    # A two-parter in one title used two numbers: the next disc starts after both.
+    wj = _tv(manager, 505, "How I Met Your Mother", 8, [9, 10, 11])
+    wj.assignments[2].episode_end = 12
+    assert manager.next_episode_for("How I Met Your Mother", 8)[0] == 13
 
     # Case and padding in the show name must not start a parallel count.
     assert manager.next_episode_for("  landman  ", 2)[0] == 8

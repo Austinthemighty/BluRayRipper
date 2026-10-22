@@ -179,7 +179,7 @@ def assignment_to_dict(a: EpisodeAssignment) -> dict:
         "title_id": a.title_id, "kind": a.kind.value,
         "show_or_movie_title": a.show_or_movie_title, "year": a.year,
         "season": a.season, "episode": a.episode, "episode_title": a.episode_title,
-        "edition": a.edition, "version": a.version,
+        "edition": a.edition, "version": a.version, "episode_end": a.episode_end,
     }
 
 
@@ -189,6 +189,7 @@ def assignment_from_dict(d: dict) -> EpisodeAssignment:
         show_or_movie_title=d["show_or_movie_title"], year=d.get("year"),
         season=d.get("season"), episode=d.get("episode"), episode_title=d.get("episode_title"),
         edition=d.get("edition"), version=d.get("version"),
+        episode_end=d.get("episode_end"),
     )
 
 

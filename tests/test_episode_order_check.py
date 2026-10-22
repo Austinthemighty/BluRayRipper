@@ -109,6 +109,27 @@ async def test_a_dvd_is_checked_from_its_captions(tmp_path, monkeypatch):
     assert "title 1 was named E02 but matches E03" in str(exc.value)
 
 
+async def test_a_two_parter_matching_its_second_half_is_named_right(tmp_path, monkeypatch):
+    """A title named E02-E03 holds both episodes, so matching E03 best is
+    correct, not a swap — and E03's reference has to be fetched to know."""
+    fetched = []
+    pipe = _pipe(tmp_path, monkeypatch)
+
+    async def gather(client, sid, season, episodes, language="en"):
+        fetched.append(list(episodes))
+        return {ep: _srt(SCRIPTS[ep]) for ep in episodes}
+    monkeypatch.setattr("blurayripper.pipeline.gather_references", gather)
+    job = _job({0: 1, 1: 2})
+    job.assignments[1].episode_end = 3
+    ocr = _ocr(tmp_path, {0: SCRIPTS[1], 1: SCRIPTS[3]})
+    r = _Report()
+
+    await pipe._verify_episode_order(job, ocr, r)           # no raise
+
+    assert fetched == [[1, 2, 3]]
+    assert "title 1: named E02–E03, best match E03" in r.text
+
+
 async def test_correctly_named_titles_pass_and_say_their_scores(tmp_path, monkeypatch):
     """A clean disc must sail through — and still report what it found, so a
     marginal one is visible rather than merely silent."""

@@ -89,6 +89,7 @@ def _serialize(a: EpisodeAssignment) -> dict:
         "year": a.year,
         "season": a.season,
         "episode": a.episode,
+        "episode_end": a.episode_end,
         "episode_title": a.episode_title,
     }
 
@@ -101,5 +102,6 @@ def _deserialize(d: dict) -> EpisodeAssignment:
         year=d.get("year"),
         season=d.get("season"),
         episode=d.get("episode"),
+        episode_end=d.get("episode_end"),
         episode_title=d.get("episode_title"),
     )

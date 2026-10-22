@@ -116,6 +116,18 @@ class EpisodeAssignment:
     # a placed job look unplaced and strand its sidecars beside a name that no
     # longer exists.
     version: str | None = None
+    # The last episode when one title holds more than one: a two-part episode
+    # mastered as a single 43-minute title (HIMYM S8 "The Final Page", E11+E12).
+    # None for the ordinary one-episode title.
+    episode_end: int | None = None
+
+    @property
+    def episodes(self) -> list[int]:
+        """Every episode this title holds, in order."""
+        if self.episode is None:
+            return []
+        end = self.episode_end if (self.episode_end or 0) > self.episode else self.episode
+        return list(range(self.episode, end + 1))
 
 
 @dataclass

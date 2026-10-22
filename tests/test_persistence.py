@@ -49,6 +49,14 @@ def test_the_disc_type_survives_a_restart_and_old_records_load_without_it():
     assert disc_from_dict(saved_before).disc_type is None
 
 
+def test_a_two_episode_title_survives_a_restart_and_old_records_load_without_it():
+    a = EpisodeAssignment(2, MediaKind.TV, "HIMYM", 2005, season=8, episode=11, episode_end=12)
+    assert assignment_from_dict(assignment_to_dict(a)).episodes == [11, 12]
+    old = assignment_to_dict(a)
+    old.pop("episode_end")
+    assert assignment_from_dict(old).episode_end is None
+
+
 def test_assignment_roundtrip():
     a = EpisodeAssignment(3, MediaKind.TV, "The Show", 2010, 1, 9, "Pilot")
     a2 = assignment_from_dict(assignment_to_dict(a))
