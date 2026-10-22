@@ -224,6 +224,67 @@ async def test_a_single_title_disc_is_never_copied_first(tmp_path, monkeypatch):
     assert getattr(job, "_rip_source", None) is None
 
 
+def _already_ripped(job, staging_dir, staging, *tids):
+    """Checkpoint these titles as a previous run would have left them."""
+    for tid in tids:
+        mkv = staging / "rip" / f"t{tid:03d}" / f"t{tid}.mkv"
+        mkv.parent.mkdir(parents=True, exist_ok=True)
+        mkv.write_bytes(b"\x1aE\xdf\xa3")
+        job.checkpoints[tid] = {"ripped_path": str(mkv.relative_to(staging_dir))}
+
+
+async def test_a_resume_with_one_title_left_rips_it_from_the_disc(
+        tmp_path, monkeypatch):
+    """Job 388: three titles selected, two already out from an earlier run. A
+    copy would read the whole 45 GB Blu-ray to make the one that is left."""
+    pipe = _pipe(tmp_path, monkeypatch)
+    job = _job(_titles(*DISC))
+    seen = _wire(pipe, monkeypatch, copy_titles=_titles(*DISC))
+    staging = tmp_path / "job_1"
+    _already_ripped(job, tmp_path, staging, 0, 1)
+    r = _Report()
+
+    await pipe._prepare_disc_once(job, staging, r)
+    for tid in job.selected_title_ids:
+        await pipe._ensure_ripped(job, tid, staging, r)
+
+    assert seen["backups"] == []
+    assert seen["rips"] == [("disc:0", 2)]
+
+
+async def test_a_retry_with_every_title_already_out_reads_nothing(
+        tmp_path, monkeypatch):
+    pipe = _pipe(tmp_path, monkeypatch)
+    job = _job(_titles(*DISC))
+    seen = _wire(pipe, monkeypatch, copy_titles=_titles(*DISC))
+    staging = tmp_path / "job_1"
+    _already_ripped(job, tmp_path, staging, 0, 1, 2)
+
+    await pipe._prepare_disc_once(job, staging, _Report())
+
+    assert seen["backups"] == []
+    assert seen["ejected"] == []
+
+
+async def test_a_copy_left_by_an_earlier_run_is_used_for_the_last_title(
+        tmp_path, monkeypatch):
+    """The other side of counting what is left: when the copy already exists,
+    using it for one title costs nothing, and the disc may be gone by now."""
+    pipe = _pipe(tmp_path, monkeypatch)
+    job = _job(_titles(*DISC))
+    seen = _wire(pipe, monkeypatch, copy_titles=_titles(*DISC))
+    staging = tmp_path / "job_1"
+    (staging / "disc" / "BDMV").mkdir(parents=True)
+    _already_ripped(job, tmp_path, staging, 0, 1)
+    r = _Report()
+
+    await pipe._prepare_disc_once(job, staging, r)
+    await pipe._ensure_ripped(job, 2, staging, r)
+
+    assert seen["backups"] == [], "the copy is already there"
+    assert seen["rips"] == [(f"file:{staging / 'disc'}", 2)]
+
+
 async def test_a_file_job_and_a_disabled_setting_both_skip_the_copy(
         tmp_path, monkeypatch):
     """A job added from an .mkv has no disc to read, and the feature is opt-in."""

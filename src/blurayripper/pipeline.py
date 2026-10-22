@@ -1122,6 +1122,17 @@ class Pipeline:
         job._rip_source = None
         report.on_event("Disc copy removed — every title has been made from it.")
 
+    def _titles_left_to_rip(self, job: Job) -> list[int]:
+        """Selected titles with no ripped file to reuse — the same test
+        ``_ensure_ripped`` applies before it goes to the disc."""
+        staging_dir = self.settings.storage.staging_dir
+        left = []
+        for t in job.selected_title_ids:
+            rel = (job.checkpoints.get(t) or {}).get("ripped_path")
+            if not (rel and _resolve_path(staging_dir, rel).exists()):
+                left.append(t)
+        return left
+
     async def _backup_disc_source(self, job: Job, staging_root: Path,
                                   report) -> str | None:
         """A ``file:`` selector for a verified copy of this disc, or None.
@@ -1136,13 +1147,21 @@ class Pipeline:
             return None
         if job.disc is None:
             return None
-        if len(job.selected_title_ids) <= 1:
+
+        backup_dir = staging_root / "disc"
+        have_copy = backup_dir.is_dir() and any(backup_dir.iterdir())
+        # Counted from what is still to rip, not from what was selected: a job
+        # resumed with one title left would otherwise read a whole Blu-ray to
+        # make that one title, and a retry with everything already out would
+        # read it to make nothing.
+        left = self._titles_left_to_rip(job)
+        if not left:
+            return None
+        if not have_copy and len(left) <= 1:
             # One title gains nothing — the disc is opened once either way — and
             # a backup would additionally read every title that was NOT wanted.
             return None
 
-        backup_dir = staging_root / "disc"
-        have_copy = backup_dir.is_dir() and any(backup_dir.iterdir())
         if not have_copy:
             needed = os_disc_capacity_bytes(job.disc.drive_device)
             if not self._room_for_backup(staging_root, needed, report):
