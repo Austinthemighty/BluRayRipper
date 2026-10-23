@@ -44,3 +44,42 @@ def test_speaker_labels_drive_detection():
     for i in range(0, 60, 6):
         lines[i] = "WOMAN: Over here!"
     assert looks_like_sdh(_srt(lines)) is True
+
+
+# --- closed captions as a sidecar ------------------------------------------------------
+
+from blurayripper.services.subtitles import tidy_captions  # noqa: E402
+
+# The shape MakeMKV writes a DVD's captions in: each line padded to its on-screen
+# column, blank lines left inside and after cues.
+RAW_CAPTIONS = (
+    "1\n00:00:01,869 --> 00:00:03,152\n            SAM:             \n"
+    "     The lights went out again.      \n\n\n"
+    "2\n00:00:03,154 --> 00:00:05,387\n             [THUNDER]              \n\n\n"
+    "3\n00:00:05,389 --> 00:00:07,072\n     <i> ♪ Rain on the window ♪</i>  \n"
+    "   \n"
+    "     Room 20.   \n\n\n"
+)
+
+
+def test_captions_lose_their_padding_but_keep_what_makes_them_sdh():
+    out = tidy_captions(RAW_CAPTIONS)
+
+    assert out == (
+        "1\n00:00:01,869 --> 00:00:03,152\nSAM:\nThe lights went out again.\n\n"
+        "2\n00:00:03,154 --> 00:00:05,387\n[THUNDER]\n\n"
+        "3\n00:00:05,389 --> 00:00:07,072\n<i> ♪ Rain on the window ♪</i>\nRoom 20.\n")
+
+
+def test_a_blank_row_inside_a_caption_does_not_lose_its_second_half():
+    """Splitting on blank lines would have cut "Room 20." off cue 3 and dropped
+    it as a cue with no timecode. A line that is only a number stays text."""
+    out = tidy_captions(RAW_CAPTIONS)
+    assert "Room 20." in out
+    assert tidy_captions("1\n00:00:01,000 --> 00:00:02,000\n  42  \n") == \
+        "1\n00:00:01,000 --> 00:00:02,000\n42\n"
+
+
+def test_captions_with_nothing_in_them_make_no_file():
+    assert tidy_captions("") == ""
+    assert tidy_captions("1\n00:00:01,000 --> 00:00:02,000\n     \n\n") == ""

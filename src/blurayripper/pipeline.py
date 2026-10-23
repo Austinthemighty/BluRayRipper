@@ -16,7 +16,7 @@ import re
 import shutil
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Iterator, Protocol
@@ -31,7 +31,7 @@ from .services.mapping_store import MappingStore
 from .services.metadata import TMDBClient
 from .services.opensubtitles import OpenSubtitlesClient, gather_references
 from .services.sub_match import identify as identify_episodes
-from .services.subtitles import looks_like_sdh
+from .services.subtitles import looks_like_sdh, tidy_captions
 from .version import get_version
 from .tools import discinfo
 from .tools.eject import eject
@@ -405,6 +405,19 @@ class Pipeline:
             extracted[title_id] = await self._extract_title_subs(job, title_id, ripped, sub_dir, report)
         ocr = await self._ocr_all(
             job, [(tid, a, r, sd, extracted[tid]) for tid, a, r, sd in pending], report)
+        # A DVD has no Blu-ray subtitles to OCR, so every DVD episode reached
+        # the library with no subtitles at all. Its closed captions are already
+        # text: they become the sidecar instead. `expected` counts them in, so a
+        # caption extraction that fails is retried like a failed OCR.
+        expected = {tid: list(extracted[tid]) for tid, *_rest in pending}
+        for title_id, _assignment, ripped, sub_dir in pending:
+            found, wanted = await self._caption_sidecar(
+                extracted[title_id], ripped, sub_dir, report)
+            expected[title_id] += [None] * wanted
+            if found:
+                ocr.setdefault(title_id, []).extend(found)
+                report.on_event(f"Title {title_id}: no Blu-ray subtitles — using the "
+                                f"disc's closed captions as its subtitles (SDH).")
         # The OCR text exists now and will not again — check the episode order
         # before any of it is placed under a name.
         await self._verify_episode_order(
@@ -422,7 +435,7 @@ class Pipeline:
                           else None))
             self._cache_subs(video_dest, extracted[title_id])
             self._record_if_complete(job.checkpoints.setdefault(title_id, {}),
-                                     extracted[title_id], ocr.get(title_id, []),
+                                     expected[title_id], ocr.get(title_id, []),
                                      result, report)
         _checkpoint(report)
 
@@ -1114,21 +1127,18 @@ class Pipeline:
                 "apart — they are all the same length — so the naming is what "
                 "needs fixing, not the rip. Nothing was placed.")
 
-    async def _caption_text(self, ripped_mkv: Path, sub_dir: Path, report) -> str | None:
-        """A title's own text subtitles, or None.
+    async def _caption_srt(self, ripped_mkv: Path,
+                           sub_dir: Path) -> tuple[Path, SubtitleTrack] | None:
+        """A title's own text subtitles as an .srt, extracted once, or None
+        when it has none. Raises if listing or extracting them fails.
 
         DVD subtitles are pictures, and only Blu-ray's are OCR'd. But MakeMKV
         turns a US DVD's closed captions into a text (SRT) track — a full
         transcript that needs no OCR. On the HIMYM S9 D2 rips (job 396) every
         title matched its episode at 0.71-0.91, against a runner-up of 0.02 at
-        most. Never raises: this only feeds identification and a check.
+        most.
         """
-        try:
-            tracks = await self.mkvtools.identify_subtitles(ripped_mkv)
-        except Exception as exc:
-            report.on_event(f"Could not list subtitle tracks for captions "
-                            f"({_first_line(exc)}).")
-            return None
+        tracks = await self.mkvtools.identify_subtitles(ripped_mkv)
         text_tracks = [t for t in tracks if t.is_text and not t.forced]
         if not text_tracks:
             return None
@@ -1137,16 +1147,49 @@ class Pipeline:
                       if (t.language or "").lower() == default_lang), text_tracks[0])
         out = sub_dir / f"{ripped_mkv.stem}.t{track.track_id}.{track.language or 'und'}.captions.srt"
         if not (out.is_file() and out.stat().st_size):
-            try:
-                await self.mkvtools.extract_tracks(ripped_mkv, [(track.track_id, out)])
-            except Exception as exc:
-                report.on_event(f"Could not extract the captions ({_first_line(exc)}).")
-                return None
+            await self.mkvtools.extract_tracks(ripped_mkv, [(track.track_id, out)])
+        return out, track
+
+    async def _caption_text(self, ripped_mkv: Path, sub_dir: Path, report) -> str | None:
+        """A title's closed captions as text, or None. Never raises: this only
+        feeds identification and the episode check."""
         try:
-            text = out.read_text(encoding="utf-8", errors="ignore")
+            found = await self._caption_srt(ripped_mkv, sub_dir)
+        except Exception as exc:
+            report.on_event(f"Could not extract the captions ({_first_line(exc)}).")
+            return None
+        if found is None:
+            return None
+        try:
+            text = found[0].read_text(encoding="utf-8", errors="ignore")
         except OSError:
             return None
         return text if text.strip() else None
+
+    async def _caption_sidecar(self, extracted: list, ripped_mkv: Path, sub_dir: Path,
+                               report) -> tuple[list[tuple[Path, SubtitleTrack]], int]:
+        """(the captions to place as a sidecar, how many there should be).
+
+        Only for a title with no Blu-ray subtitles of its own. A failed
+        extraction still counts one expected, so the title is not recorded as
+        done with nothing and a retry tries again."""
+        if extracted:
+            return [], 0
+        try:
+            found = await self._caption_srt(ripped_mkv, sub_dir)
+        except Exception as exc:
+            report.on_event(f"Could not extract the closed captions ({_first_line(exc)}) "
+                            f"— they are tried again on a retry.")
+            return [], 1
+        if found is None or not self.settings.languages.is_kept(found[1].language):
+            return [], 0
+        raw, track = found
+        tidy = raw.with_name(raw.name.replace(".captions.srt", ".captions.sdh.srt"))
+        text = tidy_captions(raw.read_text(encoding="utf-8", errors="ignore"))
+        if not text.strip():
+            return [], 0
+        tidy.write_text(text, encoding="utf-8")
+        return [(tidy, replace(track, sdh=True, name=track.name or "Closed captions"))], 1
 
     async def _show_tmdb_id(self, assignment) -> int | None:
         """The TMDB id for an assignment's show, or None. Never raises: this

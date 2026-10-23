@@ -86,6 +86,9 @@ def test_the_batch_path_records_that_subtitles_are_done(tmp_path, monkeypatch):
     monkeypatch.setattr(p, "_place_title_subs", fake_place)
     monkeypatch.setattr(p, "_cache_subs", lambda *a, **k: None)
 
+    async def no_captions(ripped, sub_dir): return None
+    monkeypatch.setattr(p, "_caption_srt", no_captions)
+
     a = EpisodeAssignment(title_id=0, kind=MediaKind.MOVIE,
                           show_or_movie_title="Movie", year=2020)
     todo = [(0, a, tmp_path / "r.mkv", tmp_path / "sub")]

@@ -38,6 +38,34 @@ def srt_cues(srt_text: str) -> list[str]:
     return cues
 
 
+def tidy_captions(srt_text: str) -> str:
+    """A DVD's closed captions, as MakeMKV writes them, made into a plain sidecar.
+
+    MakeMKV keeps each caption's on-screen column as padding spaces and leaves
+    blank lines inside cues. Both go, and the cues are renumbered. The speaker
+    names, sound cues, lyrics and italics stay: they are what makes captions
+    SDH, and they are what the file is named as.
+
+    Parsed by timecode rather than by blank lines, so a caption with a blank
+    row in the middle keeps its second half.
+    """
+    lines = srt_text.replace("\r\n", "\n").split("\n")
+    cues: list[tuple[str, list[str]]] = []
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if _TIMECODE.search(line):
+            cues.append((line, []))
+        elif not line:
+            continue
+        elif line.isdigit() and i + 1 < len(lines) and _TIMECODE.search(lines[i + 1]):
+            continue                         # the next cue's number
+        elif cues:
+            cues[-1][1].append(line)
+    out = [f"{n}\n{timing}\n" + "\n".join(text)
+           for n, (timing, text) in enumerate((c for c in cues if c[1]), start=1)]
+    return "\n\n".join(out) + "\n" if out else ""
+
+
 def _is_sdh_cue(cue: str) -> bool:
     if _BRACKET.search(cue) or _MUSIC.search(cue):
         return True
