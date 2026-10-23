@@ -60,6 +60,7 @@ from ..tools.makemkv import (
     os_disc_capacity_bytes,
     os_media_snapshot,
 )
+from ..tools.process import DeviceProbe
 from ..version import code_relation, get_version
 
 
@@ -292,6 +293,7 @@ class JobManager:
         # that could hang on an unresponsive drive).
         self._drives_cache: list[Drive] = self._load_drives_cache()
         self._last_disc: dict[int, str] = {}  # drive index -> last auto-opened disc name
+        self._probes = DeviceProbe()          # OS looks at the drives, off the event loop
         self._last_drive_error: str | None = None
         # True once the watcher has enumerated drives successfully at least once,
         # so "not in the cache" can be read as "not attached" rather than "unknown".
@@ -936,7 +938,8 @@ class JobManager:
     async def _watch_drives(self) -> None:
         while not self.closing:
             try:
-                self._media_snapshot = await asyncio.to_thread(os_media_snapshot)
+                self._media_snapshot = await self._probes.ask(
+                    "media", os_media_snapshot, timeout=self._MEDIA_PROBE_TIMEOUT)
                 self._drives_cache = await self.list_drives()
                 self._drives_scanned = True
                 self._last_drive_error = None
@@ -953,6 +956,7 @@ class JobManager:
 
     # How often the cheap OS media probe runs while waiting out the poll interval.
     _MEDIA_PROBE_SECONDS = 2
+    _MEDIA_PROBE_TIMEOUT = 5.0
 
     async def _wait_for_disc_change(self, timeout: float) -> None:
         """Sleep up to ``timeout`` seconds, returning early the moment the OS says a
@@ -967,10 +971,10 @@ class JobManager:
             if remaining <= 0:
                 return
             await asyncio.sleep(min(self._MEDIA_PROBE_SECONDS, remaining))
-            try:
-                snap = await asyncio.to_thread(os_media_snapshot)
-            except Exception:
-                continue  # probe failed — fall back to waiting out the interval
+            # Off the event loop, bounded, and never stacked: a drive stuck in a
+            # USB reset loop holds this for as long as each reset lasts.
+            snap = await self._probes.ask(
+                "media", os_media_snapshot, timeout=self._MEDIA_PROBE_TIMEOUT)
             if snap is None:
                 continue  # can't tell on this platform; keep the regular cadence
             if snap != self._media_snapshot:

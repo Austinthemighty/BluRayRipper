@@ -523,6 +523,11 @@ class MakeMKV:
     def _bin(self) -> str:
         return self._settings.tools.require("makemkvcon")
 
+    # How long one OS-level look at a drive may take before the scan carries on
+    # without it. A drive mid-USB-reset holds open() for as long as the reset.
+    PROBE_TIMEOUT = 5.0
+    _probes = process.DeviceProbe()
+
     async def list_drives(self, *, timeout: float = 60.0) -> list[Drive]:
         """Enumerate optical drives (and any loaded disc) without opening a disc.
 
@@ -538,7 +543,8 @@ class MakeMKV:
         # (shows in File Explorer but came back with an empty disc name).
         for d in drives:
             if not d.disc_name and d.device:
-                label = os_disc_label(d.device)
+                label = await self._probes.ask(("label", d.device), os_disc_label,
+                                               d.device, timeout=self.PROBE_TIMEOUT)
                 if label:
                     d.disc_name = label
                     d.os_detected = True
@@ -546,7 +552,9 @@ class MakeMKV:
         # drive dropped off the bus / "no usable optical drives"). Not rippable
         # until the drive is reset, so it's flagged makemkv_blind (index -1).
         seen = {(d.device or "").rstrip("\\/").upper() for d in drives}
-        for letter, label in os_optical_drives():
+        seen_by_os = await self._probes.ask("optical", os_optical_drives,
+                                            timeout=self.PROBE_TIMEOUT, default=[])
+        for letter, label in seen_by_os:
             if letter.rstrip("\\/").upper() in seen:
                 continue
             drives.append(Drive(index=-1, name="(optical drive)", device=letter,

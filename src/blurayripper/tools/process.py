@@ -89,6 +89,38 @@ async def in_detached_thread(fn, *args):
     return await done
 
 
+class DeviceProbe:
+    """Ask a drive something without letting a stuck drive stop anything else.
+
+    Opening /dev/srN blocks in the kernel while that drive's USB link is being
+    reset, and a drive stuck in a reset loop resets every 30 seconds. Run on
+    the event loop, that froze all of serve (2026-10-22, after the drives' USB
+    cables were swapped). On asyncio.to_thread, each poll took another thread
+    from the default executor and never gave it back, until nothing else that
+    needs one could run, and the interpreter then waits on all of them at exit.
+
+    So each probe runs on a detached thread (in_detached_thread), is waited on
+    for a bounded time, and answers ``default`` past it. While a probe is still
+    stuck, the same probe is not started again: the caller gets the default,
+    and one stuck thread stays one.
+    """
+
+    def __init__(self) -> None:
+        self._pending: dict[object, asyncio.Future] = {}
+
+    async def ask(self, key, fn, *args, timeout: float, default=None):
+        fut = self._pending.get(key)
+        if fut is None or fut.done():
+            fut = asyncio.ensure_future(in_detached_thread(fn, *args))
+            self._pending[key] = fut
+        try:
+            return await asyncio.wait_for(asyncio.shield(fut), timeout)
+        except (asyncio.TimeoutError, TimeoutError):
+            return default
+        except Exception:
+            return default
+
+
 async def _maybe_await(value) -> None:
     if asyncio.iscoroutine(value):
         await value
