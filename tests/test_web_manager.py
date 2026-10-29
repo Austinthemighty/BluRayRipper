@@ -2806,3 +2806,24 @@ async def test_each_title_says_whether_it_was_picked_what_it_is_and_how_far_it_g
     gate.set()
     await _settle()
     assert manager._title_dict(wj)[1]["status"] == "ripped"
+
+
+async def test_a_confirmed_naming_never_shows_the_form_it_left(manager, monkeypatch):
+    """Job 419: confirmed, then waiting for a prep slot, and still reported as
+    awaiting_mapping — so its card put the naming form back up."""
+    gate = asyncio.Event()
+
+    async def waits(job, scheduler, report, job_name=None):
+        await gate.wait()
+        return job
+    monkeypatch.setattr(manager.pipeline, "execute", waits)
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    manager.set_titles(wj.id, [0])
+    wj._pipeline_job.state = JobState.AWAITING_MAPPING     # as the scan leaves it
+
+    manager.set_mapping(wj.id, [EpisodeAssignment(0, MediaKind.MOVIE, "M", 2000)])
+
+    assert manager._live_state(wj) is not JobState.AWAITING_MAPPING
+    gate.set()
+    await _settle()

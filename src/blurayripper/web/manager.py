@@ -3168,7 +3168,15 @@ class JobManager:
         The tail every "this job is now go" path shares — the caller has already
         set the state and any assignments. Keeping it in one place also keeps the
         order consistent (persist before publish, so a client that reacts to the
-        tick can't read state the store hasn't got yet)."""
+        tick can't read state the store hasn't got yet).
+
+        A READY job's pipeline job is set READY too. _live_state reports the
+        pipeline's state once the web job leaves its gate, so a naming that was
+        confirmed but had to wait for a prep slot kept showing the naming form
+        it had left (job 419, renamed on 2026-10-28), inviting a second
+        Confirm."""
+        if wj.state is JobState.READY and wj._pipeline_job is not None:
+            wj._pipeline_job.state = JobState.READY
         self._persist(wj)
         self.bus.publish()
         wj._task = self._spawn(self._run_job(wj))
