@@ -2602,7 +2602,7 @@ def _rip_rig(manager, monkeypatch, *, gate=None, fail=None):
     """Stand in for the pipeline's rip-only step; record what it was asked."""
     ripped = []
 
-    async def rip_titles(job, staging_root, report):
+    async def rip_titles(job, staging_root, report, still_wanted=None):
         ripped.append(list(job.selected_title_ids))
         report.on_progress("Rip t0: Saving to MKV file", 0.5)
         if gate is not None:
@@ -2610,7 +2610,10 @@ def _rip_rig(manager, monkeypatch, *, gate=None, fail=None):
         if fail is not None:
             raise fail
         ripped.append(("at the end", list(job.selected_title_ids)))
-        for tid in job.selected_title_ids:
+        wanted = [t for t in job.selected_title_ids
+                  if still_wanted is None or still_wanted(t)]
+        ripped.append(("ripped", wanted))
+        for tid in wanted:
             job.checkpoints[tid] = {"ripped_path": f"job_x/rip/t{tid:03d}/a.mkv"}
 
     monkeypatch.setattr(manager.pipeline, "rip_titles", rip_titles)
@@ -2633,7 +2636,7 @@ async def test_picking_the_titles_rips_them_while_the_naming_waits(manager, monk
 
     wj = await _at_naming(manager)
 
-    assert ripped == [[0, 1], ("at the end", [0, 1])]
+    assert ripped == [[0, 1], ("at the end", [0, 1]), ("ripped", [0, 1])]
     assert wj.state is JobState.AWAITING_MAPPING          # the form stays up
     assert wj._pipeline_job.state is JobState.AWAITING_MAPPING   # no phantom "ripping"
     assert all(wj._pipeline_job.checkpoints[t]["ripped_path"] for t in (0, 1))
@@ -2656,7 +2659,7 @@ async def test_confirming_mid_rip_waits_for_that_rip_rather_than_starting_anothe
 
     gate.set()
     await _settle()
-    assert ripped == [[0, 1], ("at the end", [0, 1])]   # one rip, not two
+    assert ripped == [[0, 1], ("at the end", [0, 1]), ("ripped", [0, 1])]   # one rip
     assert manager._executed["job"].checkpoints[1]["ripped_path"]
 
 
@@ -2675,7 +2678,9 @@ async def test_naming_fewer_titles_mid_rip_does_not_change_the_list_under_the_ri
     gate.set()
     await _settle()
 
-    assert ripped[-1] == ("at the end", [0, 1])
+    assert ripped[-2] == ("at the end", [0, 1])
+    # ...but a title the naming left out is not ripped (job 423's bonus).
+    assert ripped[-1] == ("ripped", [0])
     assert manager._executed["job"].selected_title_ids == [0]
 
 

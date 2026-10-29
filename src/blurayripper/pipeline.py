@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Iterator, Protocol
+from typing import Callable, Iterator, Protocol
 
 from .config import Settings, ToolNotFoundError
 from .models import (
@@ -1025,6 +1025,7 @@ class Pipeline:
             and title_id == job.selected_title_ids[-1]
             and job.source.split(":", 1)[0] in ("disc", "dev")
             and not getattr(job, "_rip_source", None)
+            and not getattr(job, "_eject_when_done", False)
         ):
             await self._eject_and_notify(job, report)
         return ripped_mkv
@@ -2115,22 +2116,40 @@ class Pipeline:
             if drive.device:
                 job.disc.drive_device = drive.device
 
-    async def rip_titles(self, job: Job, staging_root: Path, report) -> None:
+    async def rip_titles(self, job: Job, staging_root: Path, report,
+                         still_wanted: Callable[[int], bool] | None = None) -> None:
         """Rip every selected title, back to back, and nothing else.
 
         For a disc ripped while it waits to be named: the rip depends only on
         the disc, and the disc is the part that cannot wait. The disc's own art
         is saved first, because the rip ejects the disc and where the art goes
-        is not known until the naming is. Ejects after the last title, as any
-        rip does; prep_phase later finds every title ripped and carries on."""
+        is not known until the naming is. prep_phase later finds every title
+        ripped and carries on.
+
+        ``still_wanted`` is asked before each title: a title dropped while this
+        was running (a bonus picked by mistake, named out at the form — job 423)
+        is not ripped. So the eject comes here, once every wanted title is out,
+        instead of on "the last title of the list", which may be the one dropped.
+        """
         assert job.disc is not None
         job._ripped_this_run = False
         await self._resolve_source_drive(job, report)
         await self._stash_disc_art(job, staging_root, report)
         await self._prepare_disc_once(job, staging_root, report)
-        for title_id in list(job.selected_title_ids):
-            await self._ensure_ripped(job, title_id, staging_root, report)
+        job._eject_when_done = True
+        try:
+            for title_id in list(job.selected_title_ids):
+                if still_wanted is not None and not still_wanted(title_id):
+                    report.on_event(f"Title {title_id} was left out of the naming — "
+                                    f"not ripping it.")
+                    continue
+                await self._ensure_ripped(job, title_id, staging_root, report)
+        finally:
+            job._eject_when_done = False
         self._release_disc_copy(job, staging_root, report)
+        if (job._ripped_this_run and job.source.split(":", 1)[0] in ("disc", "dev")
+                and not getattr(job, "_rip_source", None)):
+            await self._eject_and_notify(job, report)
 
     async def _stash_disc_art(self, job: Job, staging_root: Path, report) -> None:
         """Save the disc's own art to staging, for _place_cover_art to use once

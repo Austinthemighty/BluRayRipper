@@ -426,7 +426,7 @@ async def test_art_saved_before_the_disc_left_is_what_gets_placed(tmp_path, monk
     assert (folder / "fanart.jpg").read_bytes() == b"\xff\xd8saved"
 
 
-# --- the eject after an early rip -------------------------------------------
+# --- a title dropped while the early rip runs; the eject, once ------------------------
 
 def _ripping_rig(tmp_path, monkeypatch):
     pipe = _pipe(tmp_path, monkeypatch, backup_first=False)
@@ -437,6 +437,30 @@ def _ripping_rig(tmp_path, monkeypatch):
     monkeypatch.setattr(pipe, "_resolve_source_drive", nothing)
     monkeypatch.setattr(pipe, "_stash_disc_art", nothing)
     return pipe, job, seen
+
+
+async def test_a_title_left_out_of_the_naming_is_not_ripped_and_the_disc_still_comes_out(
+        tmp_path, monkeypatch):
+    """Job 423: a bonus picked by mistake, named out at the form while the rip
+    ran. It was ripped anyway. And the disc used to eject on the LAST title of
+    the list — the very one now skipped — so it would never have come out."""
+    pipe, job, seen = _ripping_rig(tmp_path, monkeypatch)
+    wanted = {0, 1}
+
+    await pipe.rip_titles(job, tmp_path / "job_1", _Report(),
+                          still_wanted=lambda tid: tid in wanted)
+
+    assert [tid for _src, tid in seen["rips"]] == [0, 1]
+    assert seen["ejected"] == ["/dev/sr0"]
+
+
+async def test_ripping_every_title_ejects_once_not_twice(tmp_path, monkeypatch):
+    pipe, job, seen = _ripping_rig(tmp_path, monkeypatch)
+
+    await pipe.rip_titles(job, tmp_path / "job_1", _Report())
+
+    assert [tid for _src, tid in seen["rips"]] == [0, 1, 2]
+    assert seen["ejected"] == ["/dev/sr0"]
 
 
 async def test_identifying_titles_the_early_rip_already_made_does_not_eject_again(

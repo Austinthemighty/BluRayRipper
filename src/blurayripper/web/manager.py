@@ -1774,7 +1774,11 @@ class JobManager:
             "comes out sooner and doesn't sit in the drive long enough to slow it.")
         try:
             async with self._prep_slot(wj):
-                await self.pipeline.rip_titles(job, staging_root, reporter)
+                # The naming can drop a title while this runs (a bonus picked by
+                # mistake); ask before each one rather than rip it anyway.
+                await self.pipeline.rip_titles(
+                    job, staging_root, reporter,
+                    still_wanted=lambda tid: tid in wj.selected_title_ids)
             reporter.on_event("Every chosen title is ripped — name them whenever you're ready.")
         except asyncio.CancelledError:
             raise
