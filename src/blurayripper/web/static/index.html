@@ -161,6 +161,7 @@
   <button class="sec" id="opensettings" title="Edit server settings (saved to config/settings.local.json; applied on next restart).">⚙ Settings</button>
   <button class="sec" onclick="openHandbrake()" title="Edit the HandBrake encode preset (quality, encoder, speed) used for <=1080p titles.">🎬 HandBrake</button>
   <button class="sec" onclick="openBoxsets()" title="Name TV box-set discs up front with a CSV, so inserting a disc rips it automatically with no mapping form.">📺 TV box sets</button>
+  <button class="sec" onclick="openSeasons()" title="Check every season of a show against TMDB: what's in the library, still queued, missing, or named by two jobs.">✅ Seasons</button>
 </header>
 <div id="stats"></div>
 <div id="bulkbar"></div>
@@ -290,6 +291,27 @@
       <button class="sec" onclick="previewBoxsets()">Check</button>
       <button class="sec" onclick="closeBoxsets()">Close</button>
       <span id="boxset-msg" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<div id="seasons-modal" class="modal" onclick="if(event.target===this)closeSeasons();">
+  <div class="sheet" style="max-width:820px;">
+    <div class="shead"><h2>Seasons: is every episode there?</h2>
+      <div class="muted" style="font-size:12px;margin-top:4px;">
+        Each season of a show against TMDB's episode list: what's in the library,
+        what's still queued, what failed, what no job has (with the box-set disc
+        that should hold it), and any episode two jobs both name — the second one
+        placed would overwrite the first.
+      </div>
+    </div>
+    <div style="padding:10px 0;">
+      <div id="seasons-shows" class="row" style="flex-wrap:wrap;gap:6px;"></div>
+      <div id="seasons-report" style="margin-top:10px;"></div>
+    </div>
+    <div class="sfoot">
+      <button class="sec" onclick="closeSeasons()">Close</button>
+      <span id="seasons-msg" class="muted"></span>
     </div>
   </div>
 </div>
@@ -1669,6 +1691,12 @@ function buildMapping(card, j){
       if (!assignments.length) { alert('Every title is marked Skip — choose an episode for at least one.'); return; }
       const off = seasonMismatch(j.label_season, s);
       if (off && !confirm(`${off}\n\nName these as season ${s} anyway?`)) return;
+      try {
+        const claims = await api('GET', `/api/episode-claims?show=${encodeURIComponent(state.chosen.title)}`
+          + `&season=${s}${state.chosen.year ? '&year=' + state.chosen.year : ''}&exclude=${j.id}`);
+        const warn = claimWarnings(assignments, claims, s);
+        if (warn.length && !confirm(warn.join('\n') + '\n\nName them anyway?')) return;
+      } catch (e) { /* the check is a courtesy: never let it block a naming */ }
       const eps = assignments.flatMap(a => a.episode_end ? [a.episode, a.episode_end] : [a.episode]);
       if (new Set(eps).size !== eps.length && !confirm('Two titles map to the same episode — continue anyway?')) return;
     }
@@ -2086,6 +2114,95 @@ async function doRename(title, year){
     toast(`Renamed to ${title} (${year||'?'}).`);
     closeRename();
   } catch(e){ msg.style.color = '#f85149'; msg.textContent = 'Error: ' + e.message; }
+}
+
+// ---- Seasons: is every episode of a box set accounted for? ----
+// "E09–E12, E16" from [9,10,11,12,16].
+function rangesText(nums){
+  const out = [];
+  [...new Set(nums)].sort((a, b) => a - b).forEach(n => {
+    const last = out[out.length - 1];
+    if (last && n === last[1] + 1) last[1] = n; else out.push([n, n]);
+  });
+  const e = n => 'E' + String(n).padStart(2, '0');
+  return out.map(([a, b]) => a === b ? e(a) : `${e(a)}–${e(b)}`).join(', ');
+}
+const jobLinks = ids => ids.map(id => `<a href="#" data-seasonjob="${id}">#${id}</a>`).join(', ');
+const SEASON_STATUS = {
+  complete: ['✅ complete', '#3fb950'], in_progress: ['⏳ all accounted for, still encoding', '#d29922'],
+  incomplete: ['❌ episodes missing', '#f85149'], not_started: ['— nothing yet', '#8b949e'],
+  unknown: ['? TMDB lists no episodes', '#8b949e'],
+};
+function seasonReportHtml(r){
+  const pad = n => String(n).padStart(2, '0');
+  const rows = (r.seasons || []).map(s => {
+    const [label, color] = SEASON_STATUS[s.status] || [s.status, '#8b949e'];
+    const c = s.counts || {};
+    const lines = [];
+    const ep = n => 'E' + pad(n);
+    if (s.missing && s.missing.length) lines.push('Missing ' + s.missing.map(m =>
+      (m.first === m.last ? ep(m.first) : `${ep(m.first)}–${ep(m.last)}`)
+      + (m.discs && m.discs.length ? ` (box-set plan: ${m.discs.join(', ')})` : '')).join('; '));
+    if (s.failed && s.failed.length) lines.push(`Failed: ${rangesText(s.failed)} — retry or re-rip those jobs`);
+    (s.conflicts || []).forEach(x => lines.push(
+      `⚠ E${pad(x.episode)} is named by jobs ${jobLinks(x.jobs)} — the second one placed overwrites the first`));
+    (s.remakes || []).forEach(x => lines.push(
+      `E${pad(x.episode)} will be re-made by ${jobLinks([x.by])}`));
+    if (s.unexpected && s.unexpected.length) lines.push(
+      `${rangesText(s.unexpected)} isn't on TMDB's list for this season — check the naming`);
+    return `<div style="padding:6px 0;border-top:1px solid #30363d;">`
+      + `<div class="row" style="gap:10px;"><b>Season ${pad(s.season)}</b>`
+      + `<span style="color:${color};">${label}</span>`
+      + `<span class="muted" style="font-size:12px;">${c.library || 0} of ${s.total} in the library`
+      + `${c.queued ? ' · ' + c.queued + ' queued' : ''}${c.failed ? ' · ' + c.failed + ' failed' : ''}</span></div>`
+      + lines.map(l => `<div style="font-size:12px;margin-left:12px;">${l}</div>`).join('') + `</div>`;
+  });
+  return `<div class="muted" style="font-size:12px;">${esc(r.show)}${r.year ? ' (' + r.year + ')' : ''}`
+    + ` · TMDB #${r.tmdb_id}${r.library_note ? ' · ⚠ ' + esc(r.library_note) : ''}</div>` + rows.join('');
+}
+async function openSeasons(){
+  document.getElementById('seasons-modal').classList.add('open');
+  const shows = document.getElementById('seasons-shows');
+  document.getElementById('seasons-report').innerHTML = '';
+  document.getElementById('seasons-msg').textContent = '';
+  shows.innerHTML = '<span class="muted">Loading shows…</span>';
+  try {
+    const r = await api('GET', '/api/seasons');
+    if (!(r.shows || []).length) { shows.innerHTML = '<span class="muted">No TV jobs yet.</span>'; return; }
+    shows.innerHTML = r.shows.map((s, i) =>
+      `<button class="sec" data-seasonshow="${i}">${esc(s.show)}${s.year ? ' (' + s.year + ')' : ''}</button>`).join('');
+    shows.querySelectorAll('[data-seasonshow]').forEach(b =>
+      b.onclick = () => checkSeasons(r.shows[+b.dataset.seasonshow]));
+  } catch (e) { shows.innerHTML = `<span style="color:#f85149;">${esc(e.message)}</span>`; }
+}
+async function checkSeasons(show){
+  const out = document.getElementById('seasons-report');
+  out.innerHTML = '<span class="muted">Checking against TMDB…</span>';
+  try {
+    const r = await api('GET', `/api/seasons/check?show=${encodeURIComponent(show.show)}`
+      + (show.year ? `&year=${show.year}` : ''));
+    out.innerHTML = seasonReportHtml(r);
+    out.querySelectorAll('[data-seasonjob]').forEach(a => a.onclick = (e) => {
+      e.preventDefault(); closeSeasons(); goToJob(+a.dataset.seasonjob);
+    });
+  } catch (e) { out.innerHTML = `<span style="color:#f85149;">${esc(e.message)}</span>`; }
+}
+function closeSeasons(){ document.getElementById('seasons-modal').classList.remove('open'); }
+
+// Episodes this naming would take that another job already names. Job 419's
+// bonus, named S03E01, would have overwritten job 417's real episode.
+function claimWarnings(assignments, claims, season){
+  const pad = n => String(n).padStart(2, '0');
+  const out = [];
+  assignments.forEach(a => {
+    const eps = a.episode_end ? [a.episode, a.episode_end] : [a.episode];
+    eps.forEach(n => (claims[n] || []).filter(c => c.state !== 'failed').forEach(c => {
+      out.push(c.state === 'done'
+        ? `S${pad(season)}E${pad(n)} is already in the library from job #${c.job} — this would replace it.`
+        : `S${pad(season)}E${pad(n)} is already named in job #${c.job} (${c.state.replace(/_/g, ' ')}) — whichever is placed second overwrites the other.`);
+    }));
+  });
+  return out;
 }
 
 // ---- TV box sets (pre-name discs so they rip hands-off) ----

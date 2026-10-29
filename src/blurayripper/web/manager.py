@@ -46,7 +46,7 @@ from ..persistence import (
 from ..pipeline import Job, JobState, Pipeline, _resolve_path
 from ..scheduler import EncodeScheduler
 from .. import boxset_plan, maintenance, mkv_folder, presence
-from ..services import library, naming
+from ..services import library, naming, season_check
 from ..services import aacs_dump
 from ..services.drive_caps import DriveCaps
 from ..services.drive_names import DriveNames
@@ -60,7 +60,7 @@ from ..tools.makemkv import (
     os_disc_capacity_bytes,
     os_media_snapshot,
 )
-from ..tools.process import DeviceProbe
+from ..tools.process import DeviceProbe, in_detached_thread
 from ..version import code_relation, get_version
 
 
@@ -294,6 +294,7 @@ class JobManager:
         self._drives_cache: list[Drive] = self._load_drives_cache()
         self._last_disc: dict[int, str] = {}  # drive index -> last auto-opened disc name
         self._probes = DeviceProbe()          # OS looks at the drives, off the event loop
+        self._tmdb_cache: dict = {}           # season check: (key) -> (when, value)
         self._last_drive_error: str | None = None
         # True once the watcher has enumerated drives successfully at least once,
         # so "not in the cache" can be read as "not attached" rather than "unknown".
@@ -3355,6 +3356,128 @@ class JobManager:
             return "rip" if (task is not None and not task.done()) else "encode"
         # queued / scanning / selecting / ripping / confirming / identifying / awaiting_*
         return "rip"
+
+    # --- is the whole box set accounted for? ------------------------------
+
+    _TMDB_TTL = 6 * 3600         # seasons don't gain episodes mid-afternoon
+    _LIBRARY_TIMEOUT = 20.0      # the library is on the NAS
+
+    def _tv_assignments(self, show: str, year: int | None = None):
+        """(job, assignment) for every TV episode naming of this show."""
+        want = (show or "").strip().casefold()
+        for wj in sorted(self.jobs.values(), key=lambda j: j.id):
+            for a in wj.assignments.values():
+                if (a is None or a.kind is not MediaKind.TV or a.season is None
+                        or (a.show_or_movie_title or "").strip().casefold() != want):
+                    continue
+                if year and a.year and a.year != year:
+                    continue          # the 1968 Hawaii Five-O is not the 2010 one
+                yield wj, a
+
+    def tv_shows(self) -> list[dict]:
+        """Every show some job names episodes of, for the season check."""
+        seen: dict[tuple, dict] = {}
+        for wj in self.jobs.values():
+            for a in wj.assignments.values():
+                if a is None or a.kind is not MediaKind.TV or a.season is None:
+                    continue
+                key = ((a.show_or_movie_title or "").strip().casefold(), a.year)
+                row = seen.setdefault(key, {"show": a.show_or_movie_title.strip(),
+                                            "year": a.year, "jobs": set()})
+                row["jobs"].add(wj.id)
+        return sorted(({**r, "jobs": len(r["jobs"])} for r in seen.values()),
+                      key=lambda r: (r["show"].casefold(), r["year"] or 0))
+
+    def episode_claims(self, show: str, season: int, year: int | None = None,
+                       exclude: int | None = None) -> dict[int, list[dict]]:
+        """{episode: [{job, state, name}]} for jobs already naming this season,
+        so the naming form can say so before a second job takes an episode."""
+        out: dict[int, list[dict]] = {}
+        for wj, a in self._tv_assignments(show, year):
+            if a.season != season or wj.id == exclude:
+                continue
+            for n in a.episodes:
+                out.setdefault(n, []).append(
+                    {"job": wj.id, "state": self._live_state(wj).value,
+                     "name": self._display_name(wj)})
+        return out
+
+    async def _tmdb_cached(self, key, fetch):
+        hit = self._tmdb_cache.get(key)
+        if hit is not None and time.monotonic() - hit[0] < self._TMDB_TTL:
+            return hit[1]
+        value = await fetch()
+        self._tmdb_cache[key] = (time.monotonic(), value)
+        return value
+
+    async def season_check(self, show: str, year: int | None = None) -> dict:
+        """Every season of ``show``: TMDB's episodes against the library and
+        the jobs. See services/season_check for the verdicts."""
+        from ..services.metadata import TMDBClient
+        if not self.settings.tmdb_api_key:
+            raise ValueError("The season check needs a TMDB key: TMDB's episode "
+                             "lists are what a season is checked against.")
+        client = TMDBClient(self.settings.tmdb_api_key, self.settings.metadata_language)
+        pairs = list(self._tv_assignments(show, year))
+        title = pairs[0][1].show_or_movie_title.strip() if pairs else show.strip()
+        tmdb_id = next((wj.show_tmdb_id for wj, _a in pairs if wj.show_tmdb_id), None)
+        if tmdb_id is None:
+            found = await self._tmdb_cached(("search", title.casefold()),
+                                            lambda: client.search_tv(title))
+            same = [c for c in found if (c.name or "").casefold() == title.casefold()]
+            pick = next((c for c in same + found if year and c.year == year), None)
+            pick = pick or (same or found or [None])[0]
+            if pick is None:
+                raise ValueError(f"TMDB has no show called “{title}”.")
+            tmdb_id = pick.tmdb_id
+
+        claims: dict[int, dict[int, list]] = {}
+        for wj, a in pairs:
+            state = self._live_state(wj).value
+            for n in a.episodes:
+                claims.setdefault(a.season, {}).setdefault(n, []).append(
+                    season_check.Claim(wj.id, state))
+
+        show_dir = naming.episode_video_path(
+            self.settings.storage.tv_root, title, year, 1, 1,
+            self.settings.encode.container).parent.parent
+        library_note = None
+        try:
+            on_disk = await asyncio.wait_for(
+                in_detached_thread(season_check.library_episodes, show_dir),
+                self._LIBRARY_TIMEOUT)
+        except (asyncio.TimeoutError, TimeoutError, OSError) as exc:
+            on_disk = {}
+            library_note = (f"Couldn't read the library folder ({type(exc).__name__}); "
+                            "only the jobs were checked.")
+
+        plan: dict[int, dict[int, str]] = {}
+        try:
+            rows = boxset_plan.load_rows(self.settings)
+        except Exception:
+            rows = []
+        for row in rows:
+            if (boxset_plan._norm(row.show) != boxset_plan._norm(title)
+                    or row.season is None or row.first_episode is None
+                    or row.last_episode is None):
+                continue
+            disc = (f"S{row.season:02d} D{row.disc:02d}" if row.disc is not None
+                    else (row.disc_label or f"disc {row.collection}"))
+            for n in range(row.first_episode, row.last_episode + 1):
+                plan.setdefault(row.season, {})[n] = disc
+
+        seasons = await self._tmdb_cached(("seasons", tmdb_id),
+                                          lambda: client.get_show_seasons(tmdb_id))
+        report = []
+        for s in sorted(set(seasons) | set(claims) | set(on_disk)):
+            eps = await self._tmdb_cached(("season", tmdb_id, s),
+                                          lambda s=s: client.get_season(tmdb_id, s))
+            expected = {e.episode_number: e.name for e in eps if e.episode_number}
+            report.append(season_check.check_season(
+                s, expected, on_disk.get(s, set()), claims.get(s, {}), plan.get(s)))
+        return {"show": title, "year": year, "tmdb_id": tmdb_id,
+                "library": str(show_dir), "library_note": library_note,
+                "seasons": report}
 
     def next_episode_for(self, show: str, season: int,
                          disc: int | None = None) -> tuple[int, list[dict]]:

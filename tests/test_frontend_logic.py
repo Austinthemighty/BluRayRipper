@@ -563,3 +563,37 @@ def test_skipping_a_two_parter_moves_the_rest_down_two():
     r = js("renumberAfterSkip([0,1,2,3], {0:9,1:10,2:12,3:13}, {1:11, 3:14}, 1)")
     assert r["assign"] == {"0": 9, "2": 10, "3": 11}
     assert r["ends"] == {"3": 12}                      # a later two-parter keeps its pair
+
+
+# --- the season check view and the naming-time warning ---------------------------------
+
+def test_episode_runs_read_as_ranges():
+    assert js("rangesText([16, 9, 10, 11, 12])") == "E09–E12, E16"
+
+
+def test_a_season_report_names_the_gap_the_disc_and_the_clash():
+    report = json.dumps({"show": "How I Met Your Mother", "year": 2005, "tmdb_id": 1100, "seasons": [
+        {"season": 1, "status": "incomplete", "total": 22,
+         "counts": {"library": 0, "queued": 14, "failed": 0, "missing": 8},
+         "missing": [{"first": 9, "last": 16, "discs": ["S01 D02"]}], "failed": [],
+         "conflicts": [], "remakes": [], "unexpected": []},
+        {"season": 3, "status": "in_progress", "total": 20,
+         "counts": {"library": 0, "queued": 20, "failed": 0, "missing": 0},
+         "missing": [], "failed": [], "conflicts": [{"episode": 1, "jobs": [417, 419]}],
+         "remakes": [], "unexpected": []}]})
+    html = js(f"seasonReportHtml({report})")
+    assert "Missing E09–E16 (box-set plan: S01 D02)" in html
+    assert "❌ episodes missing" in html and "0 of 22 in the library · 14 queued" in html
+    assert "E01 is named by jobs" in html and 'data-seasonjob="419"' in html
+
+
+def test_naming_an_episode_another_job_has_says_so_first():
+    claims = json.dumps({"1": [{"job": 417, "state": "ready"}],
+                         "2": [{"job": 236, "state": "done"}],
+                         "3": [{"job": 9, "state": "failed"}]})
+    assignments = json.dumps([{"episode": 1}, {"episode": 2}, {"episode": 3}])
+    warn = js(f"claimWarnings({assignments}, {claims}, 3)")
+    assert warn == [
+        "S03E01 is already named in job #417 (ready) — whichever is placed second overwrites the other.",
+        "S03E02 is already in the library from job #236 — this would replace it.",
+    ]                                                   # a failed job's claim doesn't count

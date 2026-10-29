@@ -386,6 +386,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             manager.set_titles(job_id, body.title_ids)
         return {"ok": True}
 
+    @app.get("/api/seasons")
+    async def seasons_list():
+        """The shows jobs have named episodes of, for the season check."""
+        return {"shows": manager.tv_shows()}
+
+    @app.get("/api/seasons/check")
+    async def seasons_check(show: str, year: int | None = None):
+        """Every season of a show against TMDB's episode lists: what is in the
+        library, still queued, failed, missing (with the box-set disc that should
+        hold it), or named by two jobs."""
+        try:
+            return await manager.season_check(show, year)
+        except (ValueError, MetadataError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"TMDB request failed: {type(exc).__name__}: {exc}")
+
+    @app.get("/api/episode-claims")
+    async def episode_claims(show: str, season: int, year: int | None = None,
+                             exclude: int | None = None):
+        """Which jobs already name episodes of this season, so the naming form
+        can warn before a second job takes one (job 419's bonus, named S03E01)."""
+        return manager.episode_claims(show, season, year, exclude)
+
     @app.get("/api/next-episode")
     async def next_episode(show: str, season: int, disc: int | None = None):
         """Where the next disc of a box set should start numbering.

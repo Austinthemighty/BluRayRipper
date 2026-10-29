@@ -205,6 +205,12 @@ class TMDBClient:
         _replace_bytes(dest, resp.content)
         return True
 
+    async def get_show_seasons(self, tv_id: int) -> list[int]:
+        """The season numbers TMDB lists for a show, specials (season 0) left out."""
+        data = await self._get(f"/tv/{tv_id}", {})
+        return sorted(n for s in data.get("seasons", [])
+                      if (n := s.get("season_number")) and n > 0)
+
     async def get_season(self, tv_id: int, season_number: int) -> list[Episode]:
         data = await self._get(f"/tv/{tv_id}/season/{season_number}", {})
         return [

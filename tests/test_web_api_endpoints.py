@@ -1674,3 +1674,24 @@ async def test_a_second_eject_is_refused_while_the_first_is_still_stuck(app, mon
                 break
         else:
             raise AssertionError("the slot never reopened after the drive answered")
+
+
+# --- the season check ---------------------------------------------------------------
+
+def test_the_season_endpoints_list_shows_and_claims(client, manager):
+    wj = _job(manager, 417, state=JobState.READY)
+    wj.assignments = {0: EpisodeAssignment(0, MediaKind.TV, "HIMYM", 2005, season=3, episode=1)}
+    other = _job(manager, 419, state=JobState.AWAITING_MAPPING)
+
+    assert client.get("/api/seasons").json() == {"shows": [{"show": "HIMYM", "year": 2005, "jobs": 1}]}
+    claims = client.get("/api/episode-claims",
+                        params={"show": "HIMYM", "season": 3, "year": 2005, "exclude": other.id}).json()
+    assert [c["job"] for c in claims["1"]] == [417]
+    assert client.get("/api/episode-claims",
+                      params={"show": "HIMYM", "season": 3, "exclude": 417}).json() == {}
+
+
+def test_the_season_check_without_a_tmdb_key_is_a_400_that_says_why(client, manager):
+    manager.settings.tmdb_api_key = None
+    r = client.get("/api/seasons/check", params={"show": "HIMYM"})
+    assert r.status_code == 400 and "TMDB key" in r.json()["detail"]
