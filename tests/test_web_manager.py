@@ -2963,3 +2963,67 @@ async def test_a_ready_job_with_nothing_running_here_still_follows_its_worker(ma
     assert wj.state is JobState.ENCODING
     assert wj.stage == "Encode: working · 3 fps"
     assert wj.log == ["[2026-10-29 01:00:00] claimed by handbreak01"]
+
+
+# --- a recognised disc, named wrongly -----------------------------------------
+
+async def _until(cond, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while not cond():
+        assert time.monotonic() < deadline, "timed out waiting"
+        await asyncio.sleep(0.01)
+
+
+class _Log:
+    def __init__(self):
+        self.lines = []
+
+    def on_event(self, message):
+        self.lines.append(message)
+
+
+def _s9(title_id, episode):
+    return EpisodeAssignment(title_id, MediaKind.TV, "How I Met Your Mother", 2005,
+                             season=9, episode=episode)
+
+
+async def test_correcting_a_recognised_disc_replaces_its_saved_mapping(
+        manager, monkeypatch):
+    """Job 427. Season 9 disc 3 had once been confirmed as E09-E16, so every rip
+    of it was recognised and named that way without stopping at the form. Fixing
+    it through remap was never saved: auto_mapped stayed set, _persist_mapping
+    skips those, and the disc came back as E09-E16 on the next rip."""
+    import types
+    from blurayripper.pipeline import Pipeline
+    from blurayripper.tools.discinfo import disc_fingerprint
+
+    manager.settings.cluster.use_workers = True       # the rip box's own path
+
+    async def no_prep(job, staging_root, report, include_subs=True):
+        pass
+
+    async def makemkv_scan(source, on_message=None):
+        return _fake_disc()
+
+    monkeypatch.setattr(manager.pipeline, "prep_phase", no_prep)
+    monkeypatch.setattr(manager.pipeline.makemkv, "scan", makemkv_scan)
+    # The real scan, so the disc is recognised the way 427's was.
+    monkeypatch.setattr(manager.pipeline, "scan_disc",
+                        types.MethodType(Pipeline.scan_disc, manager.pipeline))
+    fp = disc_fingerprint(_fake_disc())
+    manager.pipeline.mapping_store.save(fp, "WarGames", [_s9(t, 9 + t) for t in (0, 1, 2)])
+
+    wj = manager.add_disc("disc:0")
+    await _until(lambda: wj.state is JobState.READY and not manager._task_alive(wj))
+    assert any("Recognized disc from a previous rip" in line for line in wj.log)
+    assert sorted(a.episode for a in wj.assignments.values()) == [9, 10, 11]
+
+    manager.remap(wj.id)
+    manager.set_mapping(wj.id, [_s9(t, 17 + t) for t in (0, 1, 2)], disc_number=3)
+    await _until(lambda: not manager._task_alive(wj))
+
+    assert sorted(a.episode for a in manager.pipeline.mapping_store.get(fp)) == [17, 18, 19]
+    # ...which is what the next rip of this disc is given.
+    again = await manager.pipeline.scan_disc("disc:0", _Log())
+    assert again.auto_mapped
+    assert sorted(a.episode for a in again.assignments.values()) == [17, 18, 19]

@@ -1852,6 +1852,14 @@ class JobManager:
             wj.disc_scope = disc_scope
         wj.grain_mode = grain_mode
         wj.tune_grain = tune_grain
+        # A naming confirmed here is a person's, even on a disc recognised from
+        # a saved mapping — and there it is a CORRECTION, the one that most
+        # needs saving. auto_mapped tells _persist_mapping "this came from the
+        # store, don't write it back", and nothing cleared it through a remap,
+        # so the correction was thrown away and the disc came back with the old
+        # numbers on every later rip (427: S9 disc 3 kept arriving as E09–E16).
+        if wj._pipeline_job is not None:
+            wj._pipeline_job.auto_mapped = False
         wj.state = JobState.READY
         self._start_job(wj)
 
