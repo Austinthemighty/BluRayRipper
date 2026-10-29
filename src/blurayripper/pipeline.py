@@ -764,6 +764,11 @@ class Pipeline:
         disc's closed captions, which need no OCR at all."""
         assert job.disc is not None
         default_lang = self.settings.languages.default.lower()
+        # Per run, as in prep_phase. Left over from the rip that ran while the
+        # job waited to be named, it made this phase eject AGAIN on reusing the
+        # last title (job 418: ejected at 21:46:28 and again at 21:46:30), which
+        # opens the tray on whatever disc went in next.
+        job._ripped_this_run = False
 
         # Phase 1 — rip every title back-to-back. With a disc copy the disc
         # is ejected before the first title rather than after the last,

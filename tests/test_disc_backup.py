@@ -424,3 +424,35 @@ async def test_art_saved_before_the_disc_left_is_what_gets_placed(tmp_path, monk
     await pipe._place_cover_art(job, _Report(), staging)
 
     assert (folder / "fanart.jpg").read_bytes() == b"\xff\xd8saved"
+
+
+# --- the eject after an early rip -------------------------------------------
+
+def _ripping_rig(tmp_path, monkeypatch):
+    pipe = _pipe(tmp_path, monkeypatch, backup_first=False)
+    job = _job(_titles(*DISC))
+    seen = _wire(pipe, monkeypatch, copy_titles=_titles(*DISC))
+
+    async def nothing(*a): return None
+    monkeypatch.setattr(pipe, "_resolve_source_drive", nothing)
+    monkeypatch.setattr(pipe, "_stash_disc_art", nothing)
+    return pipe, job, seen
+
+
+async def test_identifying_titles_the_early_rip_already_made_does_not_eject_again(
+        tmp_path, monkeypatch):
+    """Job 418: the early rip ejected at 21:46:28, then auto-identify reused the
+    rips and ejected again at 21:46:30 — opening the tray on whatever went in
+    next."""
+    pipe, job, seen = _ripping_rig(tmp_path, monkeypatch)
+    await pipe.rip_titles(job, tmp_path / "job_1", _Report())
+    assert seen["ejected"] == ["/dev/sr0"]
+
+    async def no_subs(ripped, sub_dir, report): return []
+    async def no_captions(ripped, sub_dir, report): return None
+    monkeypatch.setattr(pipe, "_extract_subs", no_subs)
+    monkeypatch.setattr(pipe, "_caption_text", no_captions)
+
+    await pipe.identify_phase(job, tmp_path / "job_1", _Report())
+
+    assert seen["ejected"] == ["/dev/sr0"], "ejected a second time"
