@@ -15,9 +15,41 @@
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
   body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: #0e1116; color: #e6edf3; }
-  header { padding: 14px 20px; background: #161b22; border-bottom: 1px solid #30363d; display:flex; align-items:center; gap:12px;}
-  header h1 { font-size: 18px; margin: 0; }
+  /* The top bar is pinned at every width, so search and the actions stay in
+     reach down a long queue. --head-h is its live height (set from script: a
+     narrow window wraps its buttons), so the sidebar and anything scrolled to
+     land below the bar instead of underneath it. The safe-area inset keeps it
+     clear of the status bar when the page runs as a home-screen app. */
+  header { position: sticky; top: 0; z-index: 100; padding: 14px 20px;
+           padding-top: max(14px, env(safe-area-inset-top, 0px));
+           background: #161b22; border-bottom: 1px solid #30363d; display:flex; align-items:center; gap:12px;}
+  header h1 { font-size: 18px; margin: 0; order: -2; }
   header .cap { color:#8b949e; font-size:12px; }
+  html { scroll-padding-top: calc(var(--head-h, 0px) + 8px); }
+  #jobsearch { margin-left: auto; min-width: 220px; }
+  /* On a wide screen the ☰ menu's contents sit in the bar itself, with the
+     version and uptime next to the title. */
+  #headmenu { display: none; }
+  .head-actions { display: contents; }
+  #ver, #uptime, #cap { order: -1; }
+  /* Phone (or a short landscape screen): a slim bar of title, search and ☰.
+     The version and actions open from ☰ as a panel under the bar; the full bar
+     wraps to about 260px on a phone, a third of the screen. */
+  @media (max-width: 760px), (max-height: 500px) {
+    header { gap: 8px; padding: 8px 10px; padding-top: max(8px, env(safe-area-inset-top, 0px)); }
+    header h1 { font-size: 17px; white-space: nowrap; }
+    #jobsearch { flex: 1 1 auto; min-width: 0; margin-left: 0; }
+    #headmenu { display: block; flex-shrink: 0; padding: 6px 12px; font-size: 17px; }
+    .head-actions { display: none; }
+    header.menu-open .head-actions {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+      position: absolute; top: 100%; left: 0; right: 0; padding: 10px 12px 12px;
+      background: #161b22; border-bottom: 1px solid #30363d; box-shadow: 0 10px 20px rgba(1,4,9,.6);
+      max-height: calc(100vh - var(--head-h, 0px)); overflow: auto; }
+    #cap:empty { display: none; }
+    /* Actions: evenly split two to a row so they're easy to tap. */
+    .head-actions button { flex: 1 1 40%; }
+  }
   .wrap { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 16px; padding: 16px 20px; }
   /* minmax(0,…) + min-width:0 let the columns shrink below their content's
      intrinsic width, so a nowrap job title ellipsizes instead of forcing the
@@ -28,14 +60,7 @@
   /* Pin the sidebar so it stays in view while a long Queue scrolls. align-self:
      start keeps it as tall as its content (not stretched to the Queue's height,
      which would defeat sticky); it scrolls internally if taller than the viewport. */
-  html { scroll-padding-top: 8px; }
   @media (min-width: 761px) {
-    /* Pin the top bar too, so search and the actions stay in reach down a long
-       queue. --head-h is its live height (set from script: a narrow window wraps
-       its buttons and makes it taller), so the sidebar and anything scrolled to
-       land below the bar instead of underneath it. */
-    header { position: sticky; top: 0; z-index: 100; }
-    html { scroll-padding-top: calc(var(--head-h, 0px) + 8px); }
     .side { position: sticky; top: calc(var(--head-h, 0px) + 16px); align-self: start;
             max-height: calc(100vh - var(--head-h, 0px) - 32px); overflow: auto; }
   }
@@ -92,9 +117,6 @@
     .phead { cursor: pointer; }
     .panel.collapsed .chev { transform: rotate(-90deg); }
     .panel.collapsed .pbody { display: none; }
-    header { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
-    header h1 { font-size: 20px; }
-    #redoall { margin-left: 0 !important; }
     #stats, #bulkbar:not(:empty) { padding: 8px 10px; }
     .panel { padding: 12px; }
     .job { padding: 10px; }
@@ -102,8 +124,6 @@
     .log { max-height: 78px; font-size: 10px; line-height: 1.45; }
     button, button.sec { padding: 9px 14px; font-size: 14px; }  /* easier taps */
     .thumb { height: 38px; }
-    /* Header actions: full-width, evenly split so they're easy to tap. */
-    header #redoall, header #refreshart, header #opensettings { flex: 1 1 40%; }
   }
   /* Top summary strip: at-a-glance counts across all jobs. */
   #stats { display:flex; flex-wrap:wrap; gap:8px; padding:10px 16px; border-bottom:1px solid #21262d; }
@@ -157,12 +177,13 @@
 <body>
 <header>
   <h1>BluRayRipper</h1>
+  <input id="jobsearch" type="search" placeholder="Search jobs — title, disc, path, #id"
+         title="Filter the queue. Matches the name, disc label, source path and job id; several words must all match.">
+  <button class="sec" id="headmenu" aria-expanded="false" aria-controls="headactions" title="Version and actions">☰</button>
+  <div class="head-actions" id="headactions">
   <span class="cap" id="ver" title="Running version (git commit count + hash). Compare across machines to spot stale code."></span>
   <span class="cap" id="uptime" title="How long this server process has been running. Restart from ⚙ Settings to pick up pulled code."></span>
   <span class="cap" id="cap"></span>
-  <input id="jobsearch" type="search" placeholder="Search jobs — title, disc, path, #id"
-         title="Filter the queue. Matches the name, disc label, source path and job id; several words must all match."
-         style="margin-left:auto;min-width:220px;">
   <button class="sec" id="redoall" title="Re-OCR subtitles for every job that has names assigned (uses staged/cached subs; no re-encode).">Re-OCR all subtitles</button>
   <button class="sec" id="refreshart" title="Re-fetch the real poster + backdrop from TMDB for every named job, overwriting wrong/generic art in each folder.">Refresh artwork</button>
   <label class="cap"><input type="checkbox" id="autoconfirm"> Auto-confirm single matches</label>
@@ -170,6 +191,7 @@
   <button class="sec" onclick="openHandbrake()" title="Edit the HandBrake encode preset (quality, encoder, speed) used for <=1080p titles.">🎬 HandBrake</button>
   <button class="sec" onclick="openBoxsets()" title="Name TV box-set discs up front with a CSV, so inserting a disc rips it automatically with no mapping form.">📺 TV box sets</button>
   <button class="sec" onclick="openSeasons()" title="Check every season of a show against TMDB: what's in the library, still queued, missing, or named by two jobs.">✅ Seasons</button>
+  </div>
 </header>
 <div id="stats"></div>
 <div id="bulkbar"></div>
@@ -416,13 +438,33 @@ function togglePanel(id){
   try { localStorage.setItem('brr_collapse_'+id, el.classList.contains('collapsed') ? '1' : '0'); } catch(e){}
 }
 // Publish the pinned top bar's height as --head-h for the CSS that has to clear
-// it. It changes when a narrow window wraps the header's buttons.
+// it. It changes when a narrow window wraps the header's buttons, and when the
+// window crosses into the slim phone bar.
 function trackHeaderHeight(){
   const head = document.querySelector('header');
   if (!head || !window.ResizeObserver) return;
   new ResizeObserver(() => {
     document.documentElement.style.setProperty('--head-h', head.offsetHeight + 'px');
-  }).observe(head);
+  }).observe(head, {box: 'border-box'});
+}
+// The slim bar's ☰ opens the version and actions as a panel under it. Picking
+// an action, tapping anywhere else or Escape closes it again.
+function setHeadMenu(open){
+  const head = document.querySelector('header'), btn = document.getElementById('headmenu');
+  if (!head || !btn) return;
+  head.classList.toggle('menu-open', open);
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+function wireHeadMenu(){
+  const btn = document.getElementById('headmenu');
+  btn.onclick = () => setHeadMenu(btn.getAttribute('aria-expanded') !== 'true');
+  document.getElementById('headactions').addEventListener('click', (e) => {
+    if (e.target.closest('button')) setHeadMenu(false);
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#headactions, #headmenu')) setHeadMenu(false);   // the search box too
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setHeadMenu(false); });
 }
 function restorePanelCollapse(){
   for (const id of ['drives-panel','workers-panel']) {
@@ -2650,6 +2692,7 @@ const ev = new EventSource('/api/events');
 ev.onmessage = (m) => { try { renderJobs(JSON.parse(m.data)); } catch (e) { /* ignore a partial/empty frame */ } };
 restorePanelCollapse();
 trackHeaderHeight();
+wireHeadMenu();
 loadDrives();
 setInterval(loadDrives, 10000);   // keep the drive list / loaded discs current
 refreshMaintenance();

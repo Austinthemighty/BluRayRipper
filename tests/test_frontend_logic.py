@@ -114,6 +114,22 @@ def test_the_pinned_top_bar_does_not_cover_what_scrolls_to_the_top():
     helper = src.split("const toPageTop")[1].split("};")[0]
     assert "scrollIntoView({block: 'start'" in helper, "a raw scrollTo ignores scroll-padding"
 
+
+def test_on_a_phone_the_pinned_bar_is_slim_with_the_actions_behind_a_menu():
+    """The full bar wraps to about 260px on a phone, a third of the screen, so
+    pinned it is only the title, search and a menu button. Everything else sits
+    in the menu, which must stay a plain part of the bar on a wide screen."""
+    src = INDEX.read_text()
+    head = src.split("<header>")[1].split("</header>")[0]
+    bar, menu = head.split('<div class="head-actions" id="headactions">')
+    assert 'id="jobsearch"' in bar and 'id="headmenu"' in bar
+    for piece in ('id="ver"', 'id="uptime"', 'id="redoall"', 'id="opensettings"',
+                  'id="autoconfirm"', "openSeasons()"):
+        assert piece in menu, piece
+    assert ".head-actions { display: contents; }" in src
+    assert "header.menu-open .head-actions {" in src
+    assert "wireHeadMenu();" in src
+
 def test_a_job_that_merely_moved_onto_this_page_is_not_treated_as_new():
     """The "new job" set was the ids on the CURRENT PAGE, so deleting a job —
     which pulls the next one up from page 2 — made that job look new and scrolled
