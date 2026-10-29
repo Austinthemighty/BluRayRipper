@@ -680,6 +680,23 @@ function identifyEpisodes(titles, first){
   return out;
 }
 
+// A title skipped as "not an episode" (job 423: a bonus picked by mistake)
+// leaves a gap: every title after it moves down by the episodes it held — two
+// for a two-parter. Titles before it, and anything already skipped, keep theirs.
+function renumberAfterSkip(order, assign, ends, skipped){
+  const span = ends[skipped] != null ? 2 : 1;
+  const out = {...assign}, outEnds = {...ends};
+  delete out[skipped]; delete outEnds[skipped];
+  let after = false;
+  for (const id of order) {
+    if (id === skipped) { after = true; continue; }
+    if (!after || out[id] == null) continue;
+    out[id] -= span;
+    if (outEnds[id] != null) outEnds[id] -= span;
+  }
+  return {assign: out, ends: outEnds};
+}
+
 // Number titles in disc order from `start`. A double-length title takes two
 // episodes, so the titles after it stay in step instead of each being one short.
 function fillInOrder(titles, start){
@@ -1506,24 +1523,48 @@ function buildMapping(card, j){
       warnSeason();
       tv.querySelector('[data-discno]').addEventListener('change', continueFromPreviousDiscs);
       continueFromPreviousDiscs();
-      const epOptions = (num) => state.episodes.map(e=>
-        `<option value="${e.episode}" ${e.episode===num?'selected':''}>E${pad(e.episode)} — ${e.name||'?'}${e.runtime?' · '+e.runtime+'m':''}</option>`).join('');
+      state.skipped = new Set();          // titles marked "not an episode"
+      const live = () => sel().filter(t => !state.skipped.has(t.id));
+      const epOptions = (num, skipped) =>
+        `<option value="skip" ${skipped?'selected':''}>— Skip: not an episode —</option>`
+        + state.episodes.map(e=>
+        `<option value="${e.episode}" ${!skipped && e.episode===num?'selected':''}>E${pad(e.episode)} — ${e.name||'?'}${e.runtime?' · '+e.runtime+'m':''}</option>`).join('');
+      // What the rows say right now. A skipped row keeps its "+ next episode"
+      // tick here, so skipping a two-parter moves the rest down by two.
+      const current = () => {
+        const assign = {}, ends = {};
+        tv.querySelectorAll('select[data-ep]').forEach(s => {
+          const id = +s.dataset.ep, dbl = tv.querySelector(`[data-epdouble="${id}"]`);
+          if (s.value !== 'skip') assign[id] = +s.value;
+          if (dbl && dbl.checked) ends[id] = (s.value !== 'skip' ? +s.value : 0) + 1;
+        });
+        return {assign, ends};
+      };
       const render = (assign, flags, ends) => {
         const s=+tv.querySelector('[data-season]').value;
+        state.flags = flags;
         tv.querySelector('[data-eps]').innerHTML = sel().map(t=>
           `<div class="row">Title ${t.id} <span class="muted">${t.duration}</span> → S${pad(s)}
-            <select data-ep="${t.id}" style="max-width:360px;">${epOptions(assign[t.id])}</select>
+            <select data-ep="${t.id}" style="max-width:360px;">${epOptions(assign[t.id], state.skipped.has(t.id))}</select>
             <label class="muted" style="font-size:12px;" title="This title holds two episodes: a two-part episode put on the disc as one, about twice the usual length. It is saved as S01E11-E12, which Plex shows as both."><input type="checkbox" data-epdouble="${t.id}" ${ends&&ends[t.id]?'checked':''}> + next episode</label>
             ${flags&&flags.has(t.id)?'<span title="Several episodes share this runtime, so runtime cannot tell them apart — verify this one." style="color:#d29922;">⚠ ambiguous</span>':''}</div>`).join('');
+        tv.querySelectorAll('select[data-ep]').forEach(s => s.onchange = () => {
+          const id = +s.dataset.ep;
+          if (s.value !== 'skip') { state.skipped.delete(id); return; }
+          const now = current();
+          state.skipped.add(id);
+          const r = renumberAfterSkip(sel().map(t => t.id), now.assign, now.ends, id);
+          render(r.assign, state.flags, r.ends);
+        });
         body.querySelector('[data-confirm]').disabled=false;
       };
-      const inOrder = () => fillInOrder(sel(), +tv.querySelector('[data-firstep]').value||1);
+      const inOrder = () => fillInOrder(live(), +tv.querySelector('[data-firstep]').value||1);
       const byRuntime = () => {
         // Greedy nearest-runtime, with a tie flag: a title is "ambiguous" when
         // more than one episode sits within ~90s of its duration, since runtime
         // can't separate same-length episodes.
         const used=new Set(), a={}, flags=new Set();
-        sel().forEach(t=>{
+        live().forEach(t=>{
           let best=null, bd=Infinity;
           state.episodes.forEach(e=>{ if(used.has(e.episode)) return; const er=(e.runtime||0)*60; const d=er?Math.abs(er-(t.seconds||0)):Infinity; if(d<bd){bd=d;best=e.episode;} });
           if(best==null) best=state.episodes.map(e=>e.episode).find(n=>!used.has(n));
@@ -1550,8 +1591,9 @@ function buildMapping(card, j){
       tv.querySelector('[data-identify]').onclick = async () => {
         const season=+tv.querySelector('[data-season]').value;
         const first=+tv.querySelector('[data-firstep]').value||1;
-        const ids=sel().map(t=>t.id);
-        const episodes=identifyEpisodes(sel(), first);  // the episodes on this disc
+        const ids=live().map(t=>t.id);
+        const episodes=identifyEpisodes(live(), first);  // the episodes on this disc
+        if(!ids.length){ alert('Every title is marked Skip — choose an episode for at least one.'); return; }
         const gmode = body.querySelector(`input[name=g${j.id}]:checked`).value;
         const tune_grain = gmode==='on'?true:(gmode==='off'?false:null);
         const off = seasonMismatch(j.label_season, season);
@@ -1613,7 +1655,9 @@ function buildMapping(card, j){
     } else {
       const s=+body.querySelector('[data-season]').value;
       const byNum=state.byNum||{};
-      assignments = [...body.querySelectorAll('select[data-ep]')].map(sel=>{
+      assignments = [...body.querySelectorAll('select[data-ep]')]
+          .filter(sel => sel.value !== 'skip')     // "not an episode": left out
+          .map(sel=>{
         const ep = +sel.value;
         const dbl = body.querySelector(`[data-epdouble="${sel.dataset.ep}"]`);
         const end = dbl && dbl.checked ? ep + 1 : null;
@@ -1622,6 +1666,7 @@ function buildMapping(card, j){
           year:state.chosen.year, season:s, episode:ep, episode_end:end,
           episode_title: names.every(Boolean) ? names.join(' & ') : null};
       });
+      if (!assignments.length) { alert('Every title is marked Skip — choose an episode for at least one.'); return; }
       const off = seasonMismatch(j.label_season, s);
       if (off && !confirm(`${off}\n\nName these as season ${s} anyway?`)) return;
       const eps = assignments.flatMap(a => a.episode_end ? [a.episode, a.episode_end] : [a.episode]);

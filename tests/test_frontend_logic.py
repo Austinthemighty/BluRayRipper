@@ -544,3 +544,22 @@ def test_auto_identify_searches_every_episode_a_two_parter_adds():
     assert js(f"identifyEpisodes({_lengths(1296, 1298, 1300)}, 1)") == [1, 2, 3]
     # The two-parter last on the disc, as a season finale often is.
     assert js(f"identifyEpisodes({_lengths(1296, 1298, 2595)}, 22)") == [22, 23, 24, 25]
+
+
+# --- skipping a title that is not an episode --------------------------------------------
+
+def test_skipping_the_last_title_leaves_the_episodes_alone():
+    """Job 423: titles 0-5 were E17-E22 and the bonus came last."""
+    r = js("renumberAfterSkip([0,1,2,3,4,5,6], {0:17,1:18,2:19,3:20,4:21,5:22,6:23}, {}, 6)")
+    assert r["assign"] == {"0": 17, "1": 18, "2": 19, "3": 20, "4": 21, "5": 22}
+
+
+def test_skipping_a_title_in_the_middle_moves_the_rest_down_one():
+    r = js("renumberAfterSkip([0,1,2,3], {0:1,1:2,2:3,3:4}, {}, 1)")
+    assert r["assign"] == {"0": 1, "2": 2, "3": 3}
+
+
+def test_skipping_a_two_parter_moves_the_rest_down_two():
+    r = js("renumberAfterSkip([0,1,2,3], {0:9,1:10,2:12,3:13}, {1:11, 3:14}, 1)")
+    assert r["assign"] == {"0": 9, "2": 10, "3": 11}
+    assert r["ends"] == {"3": 12}                      # a later two-parter keeps its pair
