@@ -28,8 +28,16 @@
   /* Pin the sidebar so it stays in view while a long Queue scrolls. align-self:
      start keeps it as tall as its content (not stretched to the Queue's height,
      which would defeat sticky); it scrolls internally if taller than the viewport. */
+  html { scroll-padding-top: 8px; }
   @media (min-width: 761px) {
-    .side { position: sticky; top: 16px; align-self: start; max-height: calc(100vh - 32px); overflow: auto; }
+    /* Pin the top bar too, so search and the actions stay in reach down a long
+       queue. --head-h is its live height (set from script: a narrow window wraps
+       its buttons and makes it taller), so the sidebar and anything scrolled to
+       land below the bar instead of underneath it. */
+    header { position: sticky; top: 0; z-index: 100; }
+    html { scroll-padding-top: calc(var(--head-h, 0px) + 8px); }
+    .side { position: sticky; top: calc(var(--head-h, 0px) + 16px); align-self: start;
+            max-height: calc(100vh - var(--head-h, 0px) - 32px); overflow: auto; }
   }
   .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }
   /* Collapsible panel header (the collapse only takes effect on mobile). */
@@ -406,6 +414,15 @@ function togglePanel(id){
   if (!el) return;
   el.classList.toggle('collapsed');
   try { localStorage.setItem('brr_collapse_'+id, el.classList.contains('collapsed') ? '1' : '0'); } catch(e){}
+}
+// Publish the pinned top bar's height as --head-h for the CSS that has to clear
+// it. It changes when a narrow window wraps the header's buttons.
+function trackHeaderHeight(){
+  const head = document.querySelector('header');
+  if (!head || !window.ResizeObserver) return;
+  new ResizeObserver(() => {
+    document.documentElement.style.setProperty('--head-h', head.offsetHeight + 'px');
+  }).observe(head);
 }
 function restorePanelCollapse(){
   for (const id of ['drives-panel','workers-panel']) {
@@ -1062,8 +1079,8 @@ function renderPager(total, per, totalPages){
     // arrived — you were left wherever the now-shorter page clamped you (a
     // 50-card page becomes a 9-card page, and the browser clamps to the new
     // maximum). Landing directly is also what a page turn should feel like.
-    const top = Math.max(0, list.getBoundingClientRect().top + window.scrollY - 8);
-    window.scrollTo({top, behavior: 'auto'});
+    // The html scroll-padding keeps the list's top clear of the pinned bar.
+    list.scrollIntoView({block: 'start', behavior: 'auto'});
   };
   const prev = el.querySelector('[data-prev]');
   if (prev) prev.onclick = () => { curPage = Math.max(0, curPage - 1); go(); toPageTop(); };
@@ -2632,6 +2649,7 @@ async function restartServer(force, pull){
 const ev = new EventSource('/api/events');
 ev.onmessage = (m) => { try { renderJobs(JSON.parse(m.data)); } catch (e) { /* ignore a partial/empty frame */ } };
 restorePanelCollapse();
+trackHeaderHeight();
 loadDrives();
 setInterval(loadDrives, 10000);   // keep the drive list / loaded discs current
 refreshMaintenance();

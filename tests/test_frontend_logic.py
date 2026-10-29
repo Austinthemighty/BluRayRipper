@@ -101,6 +101,19 @@ def test_the_page_turn_scroll_is_instant_because_a_re_render_cancels_a_smooth_on
     assert "smooth" not in code, code
 
 
+
+def test_the_pinned_top_bar_does_not_cover_what_scrolls_to_the_top():
+    """With the top bar pinned, a page turn or a jump to a job puts its target
+    at the top of the window, which is under the bar. The root's scroll-padding
+    has to clear the bar's live height, and the sidebar has to stick below it."""
+    src = INDEX.read_text()
+    assert "header { position: sticky; top: 0;" in src
+    assert "scroll-padding-top: calc(var(--head-h, 0px) + 8px)" in src
+    assert ".side { position: sticky; top: calc(var(--head-h, 0px) + 16px)" in src
+    assert "trackHeaderHeight();" in src
+    helper = src.split("const toPageTop")[1].split("};")[0]
+    assert "scrollIntoView({block: 'start'" in helper, "a raw scrollTo ignores scroll-padding"
+
 def test_a_job_that_merely_moved_onto_this_page_is_not_treated_as_new():
     """The "new job" set was the ids on the CURRENT PAGE, so deleting a job —
     which pulls the next one up from page 2 — made that job look new and scrolled
