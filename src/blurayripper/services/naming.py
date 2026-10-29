@@ -64,10 +64,16 @@ def _normalize_separators(query: str) -> str:
     handed to TMDB. Underscores are never part of a real title, so they always
     become spaces. Dots are only a separator when the label has no spaces at all
     (``Some.Show.S01.D02``); otherwise they're real punctuation (*Mrs. Doubtfire*).
+
+    A season and disc run together with no separator at all
+    (``HOW_I_MET_YOUR_MOTHER_S3D1``) are split apart too. As one token, neither
+    edge between them is a ``\\b``, so both were missed — no season, no disc, no
+    box-set plan row — and "S3D1" stayed on the TMDB search.
     """
     q = (query or "").strip().replace("_", " ")
     if "." in q and " " not in q:
         q = q.replace(".", " ")
+    q = re.sub(r"\b(s0*\d{1,2})(d0*\d{1,2})\b", r"\1 \2", q, flags=re.IGNORECASE)
     return re.sub(r"\s{2,}", " ", q).strip()
 
 
@@ -94,6 +100,10 @@ _ORDINAL_WORD_RE = "|".join(_ORDINAL_WORDS)
 # Disc/side descriptor: "Disc 2", "D2", "Disc2". The bare "d" form only counts
 # when it's a standalone token, so a title word can't be read as a disc number.
 _DISC_RE = re.compile(r"\b(?:disc|disk)\s*0*(\d{1,2})\b|\bd\s*0*(\d{1,2})\b", re.IGNORECASE)
+
+# Market/region tags a label carries after its disc number
+# (HOW_I_MET_YOUR_MOTHER_S2_D1_US): country codes and DVD region codes.
+_REGION_TAGS = r"us|usa|uk|gb|ca|au|nz|eu|r[0-8]"
 
 
 def disc_number(query: str) -> int | None:
@@ -218,9 +228,19 @@ def clean_tmdb_query(query: str, kind: str = "movie") -> tuple[str, int | None, 
         rf"[\s:_.\-]*[(\[]?\s*\b(?:{words})\b\s*(?:\d+|{_NUMBER_WORD_RE})?"
         rf"\s*[)\]]?\s*$",
         re.IGNORECASE)
+    # A region tag after the disc number (HOW_I_MET_YOUR_MOTHER_S2_D1_US) stopped
+    # the loop the way NTSC did, so "S2 D1 US" reached TMDB and no plan row
+    # matched the show. Unlike NTSC/PAL it is only peeled straight after a disc
+    # descriptor: these are ordinary words at the end of a title — *This Is Us*
+    # — and there they are part of the name.
+    disc_words = r"disc|disk|d" if kind == "tv" else r"disc|disk"
+    region = re.compile(
+        rf"(\b(?:{disc_words})\s*0*\d{{1,2}})[\s:_.\-]+(?:{_REGION_TAGS})\s*$",
+        re.IGNORECASE)
     prev = None
     while prev != q:  # repeat for stacked descriptors ("Season 2 Disc 1")
         prev = q
+        q = region.sub(r"\1", q)
         q = tail.sub("", q).strip()
 
     if kind == "tv":  # set-level descriptors TMDB doesn't want

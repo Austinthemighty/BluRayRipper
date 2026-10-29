@@ -159,6 +159,55 @@ def test_strips_the_ntsc_pal_video_standard_from_disc_labels():
     assert clean_tmdb_query("SOME_MOVIE_PAL", "movie")[0] == "SOME MOVIE"
 
 
+def test_a_season_and_disc_run_together_are_both_read():
+    """HOW I MET YOUR MOTHER season 3 is labelled HOW_I_MET_YOUR_MOTHER_S3D1.
+    As one token neither edge is a word boundary, so the season and the disc were
+    both missed and "S3D1" went to TMDB as part of the show's name."""
+    from blurayripper.services.naming import clean_tmdb_query, disc_number
+
+    assert clean_tmdb_query("HOW_I_MET_YOUR_MOTHER_S3D1", "tv") == \
+        ("HOW I MET YOUR MOTHER", None, 3)
+    assert disc_number("HOW_I_MET_YOUR_MOTHER_S3D1") == 1
+    assert clean_tmdb_query("HOW_I_MET_YOUR_MOTHER_S03D02", "tv")[2] == 3
+    assert disc_number("HOW_I_MET_YOUR_MOTHER_S03D02") == 2
+    assert disc_number("how.i.met.your.mother.s3d3") == 3
+    # A "3D" that isn't a season+disc pair is left alone.
+    assert clean_tmdb_query("AVATAR_3D", "movie")[0] == "AVATAR 3D"
+    assert disc_number("AVATAR_3D") is None
+
+
+def test_a_region_tag_after_the_disc_number_is_peeled():
+    """HOW_I_MET_YOUR_MOTHER_S2_D1_US: the season and disc were read, but "US"
+    stopped the tail loop, so "S2 D1 US" stayed on the title and no box-set plan
+    row could match the show."""
+    from blurayripper.services.naming import clean_tmdb_query, disc_number
+
+    assert clean_tmdb_query("HOW_I_MET_YOUR_MOTHER_S2_D1_US", "tv") == \
+        ("HOW I MET YOUR MOTHER", None, 2)
+    assert disc_number("HOW_I_MET_YOUR_MOTHER_S2_D1_US") == 1
+    assert clean_tmdb_query("THE_OFFICE_S3_D2_UK", "tv")[0] == "THE OFFICE"
+    assert clean_tmdb_query("SOME_SHOW_S1_D2_R1", "tv")[0] == "SOME SHOW"
+    # Stacked with the video standard, in either order of peeling.
+    assert clean_tmdb_query("HAWAII_FIVE_0_S4_D5_US_NTSC", "tv") == ("HAWAII FIVE 0", None, 4)
+    assert clean_tmdb_query("SOME_MOVIE_DISC_1_US", "movie")[0] == "SOME MOVIE"
+
+
+def test_a_title_ending_in_a_region_word_keeps_it():
+    """"Us" is only a tag straight after a disc number. Anywhere else it is a
+    word, and at the end of a title it is part of the name: This Is Us."""
+    from blurayripper.services.naming import clean_tmdb_query
+
+    assert clean_tmdb_query("This Is Us", "tv")[0] == "This Is Us"
+    assert clean_tmdb_query("THIS_IS_US", "tv")[0] == "THIS IS US"
+    assert clean_tmdb_query("THIS_IS_US_S1_D1", "tv") == ("THIS IS US", None, 1)
+    assert clean_tmdb_query("THIS_IS_US_S2D3", "tv") == ("THIS IS US", None, 2)
+    assert clean_tmdb_query("This Is Us Season 2 Disc 1", "tv")[0] == "This Is Us"
+    assert clean_tmdb_query("THIS_IS_US_D1_US", "tv")[0] == "THIS IS US"
+    assert clean_tmdb_query("Us", "movie")[0] == "Us"
+    # With no disc number before it, a trailing "US" can't be told from a title.
+    assert clean_tmdb_query("SOME_SHOW_US", "tv")[0] == "SOME SHOW US"
+
+
 def test_ntsc_pal_stripping_does_not_eat_real_titles():
     """Only a TRAILING standard is peeled, and a label that is nothing else keeps
     its text — so the common cases can't be destroyed by the rule above."""

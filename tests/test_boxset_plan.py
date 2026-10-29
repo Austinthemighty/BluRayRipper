@@ -298,6 +298,26 @@ def test_a_label_that_states_the_season_and_disc_needs_no_disc_label_column():
     assert bp.match_label_parts(rows, "How I Met Your Mother S9 D1") is first
 
 
+def test_the_other_ways_one_box_set_labels_its_discs_still_find_their_rows():
+    """The same HIMYM set labels season 2 HOW_I_MET_YOUR_MOTHER_S2_D1_US and
+    season 3 HOW_I_MET_YOUR_MOTHER_S3D1. Both state the season and disc, and
+    neither matched its row, so five discs had to be named by hand."""
+    import blurayripper.boxset_plan as bp
+
+    rows, _ = parse_csv(
+        "show,season,disc,episodes\n"
+        "How I Met Your Mother,2,1,8\n"
+        "How I Met Your Mother,2,2,8\n"
+        "How I Met Your Mother,3,1,6\n"
+        "How I Met Your Mother,3,2,7\n")
+
+    us = bp.match_label_parts(rows, "HOW_I_MET_YOUR_MOTHER_S2_D2_US")
+    assert (us.season, us.disc, us.first_episode, us.last_episode) == (2, 2, 9, 16)
+    joined = bp.match_label_parts(rows, "HOW_I_MET_YOUR_MOTHER_S3D2")
+    assert (joined.season, joined.disc, joined.first_episode, joined.last_episode) == \
+        (3, 2, 7, 13)
+
+
 def test_a_label_missing_the_disc_number_is_not_guessed_at():
     """A label that states only the season cannot pick between that season's
     discs, and picking wrong names a whole disc's worth of episodes as the wrong
