@@ -2827,3 +2827,82 @@ async def test_a_confirmed_naming_never_shows_the_form_it_left(manager, monkeypa
     assert manager._live_state(wj) is not JobState.AWAITING_MAPPING
     gate.set()
     await _settle()
+
+
+def _rip_that_marks_itself(manager, monkeypatch, gate):
+    """Like _rip_rig, but sets RIPPING the way _ensure_ripped does — once, at the
+    start of the title — which is what a confirmed naming used to overwrite."""
+    async def rip_titles(job, staging_root, report, still_wanted=None):
+        job.state = JobState.RIPPING
+        report.on_progress("Rip t1: Saving to MKV file", 0.2)
+        await gate.wait()
+        for tid in job.selected_title_ids:
+            job.checkpoints[tid] = {"ripped_path": f"job_x/rip/t{tid:03d}/a.mkv"}
+
+    monkeypatch.setattr(manager.pipeline, "rip_titles", rip_titles)
+
+
+async def _named_mid_rip(manager, monkeypatch):
+    gate = asyncio.Event()
+    _rip_that_marks_itself(manager, monkeypatch, gate)
+    wj = await _at_naming(manager, titles=(0,))
+    manager.set_mapping(wj.id, [EpisodeAssignment(0, MediaKind.MOVIE, "Coraline", 2009)])
+    await _settle()
+    return wj, gate
+
+
+async def test_a_job_named_mid_rip_is_still_ripping(manager, monkeypatch):
+    """Job 425: confirmed while its title was ripping, it reported "ready" for the
+    rest of the rip, so the Ripping chip read 0 and the queue filed it under
+    "Rip queue" while the drive panel showed it reading."""
+    wj, gate = await _named_mid_rip(manager, monkeypatch)
+
+    assert wj.state is JobState.READY                  # the naming is behind it
+    assert manager._job_dict(wj)["state"] == "ripping"
+    assert manager._job_dict(wj)["lane"] == "rip"
+
+    gate.set()
+    await _settle()
+    assert manager._live_state(wj) is JobState.DONE    # no phantom rip afterwards
+
+
+async def test_a_job_named_mid_rip_is_not_taken_over_by_the_store_refresh(
+        manager, monkeypatch):
+    """READY is a worker-owned state, so the refresh replaced the job with its
+    database row every tick — including the log, which is why 425's stopped at
+    the minute it was named, and _run_job's own line never stayed visible."""
+    wj, gate = await _named_mid_rip(manager, monkeypatch)
+    assert any("already being ripped" in line for line in wj.log)
+
+    manager.settings.cluster.worker_poll_seconds = 0
+    real = manager.store.list_workers
+
+    def one_tick():
+        manager.closing = True
+        return real()
+    manager.store.list_workers = one_tick
+    await manager._refresh_from_store()
+
+    assert any("already being ripped" in line for line in wj.log)
+    assert manager._live_state(wj) is JobState.RIPPING
+    manager.closing = False
+    gate.set()
+    await _settle()
+
+
+async def test_a_rip_that_wedges_after_naming_is_flagged_and_requeue_frees_it(
+        manager, monkeypatch):
+    """Once it reads as ripping the watchdog sees it, so Requeue is offered — and
+    Requeue has to stop the early rip itself. Cancelling only the run that waits
+    on it would leave makemkvcon wedged and the re-run waiting on it forever."""
+    wj, _gate = await _named_mid_rip(manager, monkeypatch)    # never released
+    early = wj._early_rip
+
+    wj._activity_at -= manager.settings.rip_stall_after_seconds + 1
+    assert manager._is_stalled(wj, manager._live_state(wj)) is True
+
+    manager.requeue(wj.id)
+    await _settle()
+
+    assert early.cancelled()
+    assert "job" in manager._executed                 # the re-run got past it

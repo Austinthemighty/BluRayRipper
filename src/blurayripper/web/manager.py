@@ -639,6 +639,11 @@ class JobManager:
         """Whether this job is reading its disc this moment, not just holding it."""
         if self._live_state(wj) in (JobState.SCANNING, JobState.RIPPING):
             return True
+        return self._early_ripping(wj)
+
+    @staticmethod
+    def _early_ripping(wj: WebJob) -> bool:
+        """Whether the rip started at the naming gate is still running."""
         return wj._early_rip is not None and not wj._early_rip.done()
 
     def job_reading_device(self, device: str | None) -> WebJob | None:
@@ -1669,10 +1674,17 @@ class JobManager:
         """Cancel a wedged local rip task (which kills makemkvcon and frees the
         drive) and wait for it to actually die before re-running — otherwise the
         fresh rip races the old subprocess for the same drive."""
-        if old_task is not None and not old_task.done():
-            old_task.cancel()
+        # A job named mid-rip has two tasks: the early rip, which holds the drive
+        # and makemkvcon, and the run waiting on it. Cancelling only the run left
+        # the wedged rip where it was, for the re-run to wait on all over again.
+        # Cancel both before awaiting either, so the waiting run can't wake up
+        # into a rip of its own in between.
+        stuck = [t for t in (wj._early_rip, old_task) if t is not None and not t.done()]
+        for t in stuck:
+            t.cancel()
+        for t in stuck:
             try:
-                await old_task
+                await t
             except BaseException:
                 pass  # cancelled (or whatever it was stuck on) — drive is released now
         if rescan:
@@ -3334,7 +3346,17 @@ class JobManager:
         # The pipeline mutates its Job.state during execute; surface it unless
         # the web job is at a parked gate (which the pipeline doesn't know about).
         if wj._pipeline_job is not None and wj.state not in self._PARKED:
-            return getattr(wj._pipeline_job, "state", wj.state)
+            state = getattr(wj._pipeline_job, "state", wj.state)
+            # Named while its titles were still ripping (job 425). _start_job
+            # sets the pipeline job READY so a confirmed naming can't keep
+            # showing its form (419), but that also overwrote the RIPPING the
+            # early rip had set, and nothing sets it again until the next title.
+            # READY is a worker-owned state, so from then on the Ripping count
+            # read 0, the store refresh replaced the job's log from the database
+            # every tick, and the stall watchdog stopped looking at it at all.
+            if state is JobState.READY and self._early_ripping(wj):
+                return JobState.RIPPING
+            return state
         return wj.state
 
     def _lane(self, wj: WebJob, live_state: JobState) -> str | None:
