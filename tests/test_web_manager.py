@@ -2842,6 +2842,23 @@ def _rip_that_marks_itself(manager, monkeypatch, gate):
     monkeypatch.setattr(manager.pipeline, "rip_titles", rip_titles)
 
 
+async def _one_refresh_tick(manager):
+    """Run the store refresh exactly once, as the clustered serve box does on
+    every tick."""
+    manager.settings.cluster.worker_poll_seconds = 0
+    real = manager.store.list_workers
+
+    def stop_after_this():
+        manager.closing = True
+        return real()
+    manager.store.list_workers = stop_after_this
+    try:
+        await manager._refresh_from_store()
+    finally:
+        manager.store.list_workers = real
+        manager.closing = False
+
+
 async def _named_mid_rip(manager, monkeypatch):
     gate = asyncio.Event()
     _rip_that_marks_itself(manager, monkeypatch, gate)
@@ -2874,18 +2891,10 @@ async def test_a_job_named_mid_rip_is_not_taken_over_by_the_store_refresh(
     wj, gate = await _named_mid_rip(manager, monkeypatch)
     assert any("already being ripped" in line for line in wj.log)
 
-    manager.settings.cluster.worker_poll_seconds = 0
-    real = manager.store.list_workers
-
-    def one_tick():
-        manager.closing = True
-        return real()
-    manager.store.list_workers = one_tick
-    await manager._refresh_from_store()
+    await _one_refresh_tick(manager)
 
     assert any("already being ripped" in line for line in wj.log)
     assert manager._live_state(wj) is JobState.RIPPING
-    manager.closing = False
     gate.set()
     await _settle()
 
@@ -2906,3 +2915,51 @@ async def test_a_rip_that_wedges_after_naming_is_flagged_and_requeue_frees_it(
 
     assert early.cancelled()
     assert "job" in manager._executed                 # the re-run got past it
+
+
+def _ready_job(manager, job_id):
+    wj = WebJob(id=job_id, source="disc:0", state=JobState.READY)
+    wj.disc = _fake_disc()
+    wj._pipeline_job = Job(source="disc:0")
+    wj._pipeline_job.disc = wj.disc
+    wj._pipeline_job.state = JobState.READY           # as every path to READY leaves it
+    manager.jobs[job_id] = wj
+    return wj
+
+
+async def test_a_job_waiting_for_its_drive_keeps_saying_so(manager):
+    """A READY job queued here behind another disc logged why it was waiting, and
+    the next store refresh replaced its log with the row saved before it started
+    — so the line was gone within seconds and the job just sat there, silent."""
+    lock = manager._drive_locks.setdefault("disc:0", asyncio.Lock())
+    await lock.acquire()                              # another job is reading disc:0
+    wj = _ready_job(manager, 90)
+    wj.log = ["[2026-10-29 00:10:00] Found 3 titles (disc: X)."]   # a real job has its scan
+    manager._start_job(wj)                            # saves READY, then queues for it
+    await _settle()
+    assert any("another job is using that drive" in line for line in wj.log)
+
+    await _one_refresh_tick(manager)
+
+    assert any("another job is using that drive" in line for line in wj.log)
+    assert manager._live_state(wj) is JobState.READY
+    lock.release()
+    await _settle()
+    assert "job" in manager._executed                 # and it went on to run
+
+
+async def test_a_ready_job_with_nothing_running_here_still_follows_its_worker(manager):
+    """The other half of READY: ripped and handed over. The refresh is how a
+    worker's claim and progress reach this box, so that must still come through."""
+    wj = _ready_job(manager, 91)
+    manager._persist(wj)
+    rec = {r.id: r for r in manager.store.load_all()}[91]
+    rec.state, rec.stage = "encoding", "Encode: working · 3 fps"
+    rec.log = ["[2026-10-29 01:00:00] claimed by handbreak01"]
+    manager.store.save(rec)                           # what a worker writes
+
+    await _one_refresh_tick(manager)
+
+    assert wj.state is JobState.ENCODING
+    assert wj.stage == "Encode: working · 3 fps"
+    assert wj.log == ["[2026-10-29 01:00:00] claimed by handbreak01"]

@@ -642,6 +642,12 @@ class JobManager:
         return self._early_ripping(wj)
 
     @staticmethod
+    def _task_alive(wj: WebJob) -> bool:
+        """Whether this box is still running something for the job."""
+        task = getattr(wj, "_task", None)
+        return task is not None and not task.done()
+
+    @staticmethod
     def _early_ripping(wj: WebJob) -> bool:
         """Whether the rip started at the naming gate is still running."""
         return wj._early_rip is not None and not wj._early_rip.done()
@@ -873,8 +879,18 @@ class JobManager:
                 changed = False
                 for wj in list(self.jobs.values()):
                     rec = records.get(wj.id)
-                    if rec is None or self._live_state(wj) not in self._WORKER_OWNED:
+                    live = self._live_state(wj)
+                    if rec is None or live not in self._WORKER_OWNED:
                         continue  # locally-owned (ripping/awaiting) — don't clobber
+                    if live is JobState.READY and self._task_alive(wj):
+                        # READY is overloaded (see _lane): with a live task here
+                        # it is still this box's job, queued for a prep slot or a
+                        # drive, and its row holds only what was saved when it
+                        # was started. Copying that back every tick wiped all it
+                        # had logged since — "Waiting for disc:0 — another job is
+                        # using that drive" included, so a job held up behind
+                        # another disc never got to say why.
+                        continue
                     try:
                         new_state = JobState(rec.state)
                     except ValueError:
@@ -3374,8 +3390,7 @@ class JobManager:
         if s is JobState.READY:
             # READY is overloaded: pre-prep (a live local rip task is queued or
             # running here) vs post-prep (ripped, waiting for an encode worker).
-            task = getattr(wj, "_task", None)
-            return "rip" if (task is not None and not task.done()) else "encode"
+            return "rip" if self._task_alive(wj) else "encode"
         # queued / scanning / selecting / ripping / confirming / identifying / awaiting_*
         return "rip"
 
