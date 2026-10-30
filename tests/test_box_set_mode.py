@@ -483,3 +483,35 @@ async def test_a_failed_job_naming_the_episode_does_not_hold_it(box):
     failed.assignments = {0: EpisodeAssignment(0, MediaKind.TV, "How I Met Your Mother", 2005, 1, 5)}
     wj = await box.insert(_disc("HOW_I_MET_YOUR_MOTHER_S1_D2"), {0: 4, 1: 5, 2: 6})
     assert wj.state is JobState.DONE, _log(wj)
+
+
+async def test_with_the_quota_short_the_disc_in_hand_still_gets_its_episodes(box, monkeypatch):
+    """Three downloads left, twelve episodes in the season: disc 3's own three
+    are fetched first, so it is named today rather than tomorrow."""
+    box.osub.allowance = 3
+
+    async def sleep(seconds):
+        raise AssertionError("waited for a quota this disc didn't need")
+    monkeypatch.setattr(box.manager, "_quota_sleep", sleep)
+
+    wj = await box.insert(_disc("HOW_I_MET_YOUR_MOTHER_S1_D3"), {0: 7, 1: 8, 2: 9})
+    assert wj.state is JobState.DONE, _log(wj)
+    assert [e for _t, _s, e in box.osub.downloads] == [7, 8, 9]
+
+
+async def test_without_a_disc_number_it_starts_after_what_is_already_named(box, monkeypatch):
+    """LANDMAN_SEASON2-style labels say no disc number. Discs go in in order,
+    so the episodes after the ones already named come first."""
+    box.osub.allowance = 3
+
+    async def sleep(seconds):
+        raise AssertionError("waited for a quota this disc didn't need")
+    monkeypatch.setattr(box.manager, "_quota_sleep", sleep)
+    earlier = _named_by_hand(box, 95, "HOW_I_MET_YOUR_MOTHER_S1", "How I Met Your Mother",
+                             2005, 1100)
+    earlier.assignments = {t: EpisodeAssignment(t, MediaKind.TV, "How I Met Your Mother", 2005,
+                                                1, t + 4) for t in range(3)}   # E04-E06
+
+    wj = await box.insert(_disc("HOW_I_MET_YOUR_MOTHER_S1"), {0: 7, 1: 8, 2: 9})
+    assert wj.state is JobState.DONE, _log(wj)
+    assert [e for _t, _s, e in box.osub.downloads] == [7, 8, 9]   # not E01 onwards

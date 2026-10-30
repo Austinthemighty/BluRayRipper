@@ -337,3 +337,17 @@ def test_a_label_of_nothing_but_descriptors_names_no_show():
         assert naming.label_stem(label) is None, label
     assert naming.label_stem("24_SEASON_1_DISC_1") == "24"   # a show that is a number
     assert naming.label_stem("LANDMAN") == "landman"         # nothing to peel at all
+
+
+# --- which references to fetch first ----------------------------------------------------
+
+def test_a_discs_own_episodes_are_fetched_first_then_outward_then_the_claimed():
+    order = naming.likely_episode_order(list(range(1, 13)), 7, 3, claimed={1, 2, 3})
+    assert order[:3] == [7, 8, 9]                       # disc 3 of three-per-disc
+    assert order[3:7] == [10, 6, 11, 5]                 # outward, later first
+    assert order[-3:] == [1, 2, 3]                      # already named elsewhere
+    assert sorted(order) == list(range(1, 13))          # nothing lost
+
+
+def test_without_a_likely_window_the_order_is_numeric_with_the_claimed_last():
+    assert naming.likely_episode_order([3, 1, 2, 4, 2], None, 3, claimed={2}) == [1, 3, 4, 2]

@@ -134,6 +134,30 @@ def episode_span(disc: int | None, count: int) -> tuple[int, int] | None:
     return first, first + count - 1
 
 
+def likely_episode_order(episodes: list[int], first: int | None, count: int,
+                         claimed=()) -> list[int]:
+    """The order to fetch a season's references in, likeliest for this disc
+    first: the episodes it probably holds (``first`` onwards, ``count`` of
+    them), then outward from there (later before earlier, as discs usually go
+    in order), and episodes other jobs already name last.
+
+    The total is the same either way. The order decides which disc still gets
+    named when the download quota runs out partway through a season."""
+    claimed = set(claimed)
+    last = (first + max(count, 1) - 1) if first else None
+
+    def key(e: int):
+        if e in claimed:
+            return (2, e)
+        if first is None:
+            return (1, e)
+        if first <= e <= last:
+            return (0, 0, e)
+        return (1, e - last if e > last else first - e, e < first, e)
+
+    return sorted(dict.fromkeys(episodes), key=key)
+
+
 # Straight and curly double quotes — phones autocorrect " into “ ”, and a search
 # typed on one shouldn't silently behave differently. Single quotes are NOT a
 # delimiter: apostrophes start real titles (*'Salem's Lot*).

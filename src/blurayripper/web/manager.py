@@ -2393,7 +2393,7 @@ class JobManager:
             cut = None
             try:
                 refs = await gather_references(
-                    self.osub, wj.show_tmdb_id, wj.season, wj.candidate_episodes,
+                    self.osub, wj.show_tmdb_id, wj.season, self._fetch_order(wj),
                     self.settings.languages.default, stop_on_quota=True,
                 )
             except QuotaExhausted as exc:
@@ -2492,6 +2492,19 @@ class JobManager:
             wj.selected_title_ids = [t for t in wanted if t in wj.assignments]
             return True
         return False
+
+    def _fetch_order(self, wj: WebJob) -> list[int]:
+        """The candidate episodes, this disc's likely ones first: from its
+        disc number on the label when it has one, else continuing from the
+        episodes already named (next_episode_for)."""
+        label = ((wj.disc.volume_label or wj.disc.disc_name) if wj.disc else None) or ""
+        count = len(wj.selected_title_ids)
+        span = naming.episode_span(naming.disc_number(label), count)
+        first = span[0] if span else None
+        if first is None and wj.show_title and wj.season is not None:
+            first = self.next_episode_for(wj.show_title, wj.season)[0]
+        return naming.likely_episode_order(wj.candidate_episodes, first, count,
+                                           self._claimed_elsewhere(wj))
 
     def _claimed_elsewhere(self, wj: WebJob) -> dict[int, int]:
         """{episode: job} for this season's episodes another live job names."""
