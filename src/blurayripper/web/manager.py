@@ -52,7 +52,9 @@ from ..services.drive_caps import DriveCaps
 from ..services.drive_names import DriveNames
 from ..services.notify import click_link, notify
 from ..services.opensubtitles import OpenSubtitlesClient, QuotaExhausted, gather_references
-from ..services.sub_match import identify, identify_two_parts
+from ..services.sub_match import (
+    dialogue_size, identify, identify_two_parts, judge, score_matrix,
+)
 from ..tools import discinfo
 from ..tools.makemkv import (
     UHD_CAPACITY_FLOOR_BYTES,
@@ -2425,7 +2427,9 @@ class JobManager:
     def _match_titles(self, wj: WebJob, rips: dict[int, str], refs: dict[int, str],
                       reporter) -> bool:
         """Match the rips against the references and record a proposal per
-        title. True, with the job's naming set, when every title is confident."""
+        title. True, with the job's naming set, when the disc can be named
+        without asking (sub_match.judge): every title confident or, in box-set
+        mode, confident apart from extras that match no episode at all."""
         # A title about twice the usual length may be a two-parter mastered as
         # one, holding two episodes. Those are matched against consecutive
         # pairs first, and everything else against the episodes left over.
@@ -2438,42 +2442,64 @@ class JobManager:
         matches = two_parts + identify(
             {t: text for t, text in rips.items() if t not in paired},
             {e: text for e, text in refs.items() if e not in taken})
+        wanted = list(wj.selected_title_ids)
+        # Scored against EVERY reference, including the ones a two-parter took:
+        # "matches nothing" has to mean nothing on the whole list.
+        elsewhere = self._claimed_elsewhere(wj)
+        verdict = judge(
+            wanted, matches, score_matrix(rips, refs),
+            dialogue={t: dialogue_size(text) for t, text in rips.items()},
+            skip_unmatched=wj.box_set,
+            # A reference missing for an episode another job already has costs
+            # nothing: this disc's extra can't be that episode's only copy.
+            missing=[e for e in wj.candidate_episodes if e not in refs and e not in elsewhere],
+            taken_elsewhere=elsewhere, season=wj.season)
         # Every title asked about gets a row, matched or not. A title with no
         # subtitles never reaches identify(), and dropping it here would drop it
         # from the job too — unnamed, unencoded, and with nothing said.
         by_title = {m.title_id: m for m in matches}
-        wanted = list(wj.selected_title_ids)
         wj.match_candidates = []
         for tid in wanted:
             m = by_title.get(tid)
-            if m is None:
-                wj.match_candidates.append(
-                    {"title_id": tid, "episode": None, "score": 0.0, "runner_up": None,
-                     "runner_up_score": 0.0, "confident": False})
+            why = verdict.unsure.get(tid) or verdict.skipped.get(tid)
+            row = ({"title_id": tid, "episode": None, "score": 0.0, "runner_up": None,
+                    "runner_up_score": 0.0, "confident": False} if m is None else
+                   {"title_id": m.title_id, "episode": m.episode, "score": round(m.score, 3),
+                    "runner_up": m.runner_up, "runner_up_score": round(m.runner_up_score, 3),
+                    "confident": m.confident, "episode_end": m.episode_end})
+            row.update(skip=tid in verdict.skipped or tid in verdict.propose_skip, why=why)
+            wj.match_candidates.append(row)
+            if tid in verdict.skipped:
+                reporter.on_event(f"title {tid} {why} — skipping it as an extra; every "
+                                  "other title matched confidently.")
+            elif m is None:
                 reporter.on_event(f"title {tid} -> no subtitles to match — needs confirmation")
-                continue
-            wj.match_candidates.append(
-                {"title_id": m.title_id, "episode": m.episode, "score": round(m.score, 3),
-                 "runner_up": m.runner_up, "runner_up_score": round(m.runner_up_score, 3),
-                 "confident": m.confident, "episode_end": m.episode_end})
-            span = f"E{m.episode}" + (f"–E{m.episode_end}" if m.episode_end else "")
-            reporter.on_event(
-                f"title {m.title_id} -> {span} (score {m.score:.2f}"
-                + (f", runner-up E{m.runner_up} {m.runner_up_score:.2f}" if m.runner_up else "")
-                + (")" if m.confident else ") — needs confirmation"))
-        sure = [by_title.get(tid) for tid in wanted]
-        if wanted and all(m is not None and m.confident and m.episode is not None
-                          for m in sure):
+            else:
+                span = f"E{m.episode}" + (f"–E{m.episode_end}" if m.episode_end else "")
+                reporter.on_event(
+                    f"title {m.title_id} -> {span} (score {m.score:.2f}"
+                    + (f", runner-up E{m.runner_up} {m.runner_up_score:.2f}" if m.runner_up else "")
+                    + (f") — needs confirmation: {why}" if tid in verdict.unsure else ")"))
+        if verdict.clean:
             wj.assignments = {
                 m.title_id: EpisodeAssignment(
                     title_id=m.title_id, kind=MediaKind.TV,
                     show_or_movie_title=wj.show_title or "", year=wj.show_year,
                     season=wj.season, episode=m.episode, episode_end=m.episode_end,
                 )
-                for m in sure
+                for m in verdict.named
             }
+            wj.selected_title_ids = [t for t in wanted if t in wj.assignments]
             return True
         return False
+
+    def _claimed_elsewhere(self, wj: WebJob) -> dict[int, int]:
+        """{episode: job} for this season's episodes another live job names."""
+        if not wj.show_title or wj.season is None:
+            return {}
+        claims = self.episode_claims(wj.show_title, wj.season, wj.show_year, exclude=wj.id)
+        return {ep: live[0]["job"] for ep, rows in claims.items()
+                if (live := [r for r in rows if r["state"] != JobState.FAILED.value])}
 
     async def _title_episodes(self, wj: WebJob) -> None:
         """Best-effort: TMDB's names for the episodes the dialogue found, for

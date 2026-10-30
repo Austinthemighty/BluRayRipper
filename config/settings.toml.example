@@ -118,7 +118,8 @@ auto_open = true                        # auto-scan a disc when inserted; known 
 poll_seconds = 15                       # how often the drive watcher checks for inserted/ejected discs
 # Box-set mode: a TV disc labelled with its show and season (HIMYM_S1_D3) rips
 # straight away and each title is named by its dialogue (OpenSubtitles), against
-# the whole season. Unsure titles still stop for you; a plan row still wins.
+# the whole season. Extras that match no episode are skipped; unsure titles
+# still stop for you; a plan row still wins.
 box_set_mode = false
 # Copy the disc's own cover art (Blu-ray BDMV/META or DVD JACKET_P) to the movie
 # folder as poster.jpg for Plex, read before ripping (disc still in the drive).

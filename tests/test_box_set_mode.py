@@ -54,15 +54,36 @@ HIMYM = _show(1100, "How I Met Your Mother", 2005)
 SEASON = {n: f"Episode name {n}" for n in range(1, 13)}
 
 
+# A featurette: plenty of talk, none of it any episode's.
+EXTRA = [f"on set the director explains why the {w} scene took {i} takes"
+         for i, w in enumerate(["camera", "crane", "rain", "dolly"] * 15)]
+
+
 class _Osub:
     configured = True
 
     def __init__(self):
         self.downloads = []
+        self.lacking: set[int] = set()     # episodes OpenSubtitles has nothing for
+        self.allowance: int | None = None  # downloads left today; None = plenty
+        self.cache: dict = {}
 
     async def fetch_episode_srt(self, tmdb_id, season, episode, lang):
+        from blurayripper.services.opensubtitles import QuotaExhausted
+        if (tmdb_id, season, episode) in self.cache:
+            return self.cache[(tmdb_id, season, episode)]
+        if episode in self.lacking or episode not in DIALOGUE:
+            return None
+        if self.allowance is not None:
+            if self.allowance <= 0:
+                raise QuotaExhausted("quota", status=406)
+            self.allowance -= 1
         self.downloads.append((tmdb_id, season, episode))
-        return _srt(DIALOGUE[episode]) if episode in DIALOGUE else None
+        text = self.cache[(tmdb_id, season, episode)] = _srt(DIALOGUE[episode])
+        return text
+
+    def cached_episode_srt(self, tmdb_id, season, episode, lang):
+        return self.cache.get((tmdb_id, season, episode))
 
 
 class _Box:
@@ -109,8 +130,9 @@ class _Box:
             return job
 
         async def identify(job, staging_root, report):
-            return {tid: _srt(DIALOGUE[ep]) if ep else "" for tid, ep in self.dialogue.items()
-                    if tid in job.selected_title_ids}
+            # Each title's dialogue: an episode's, or lines of its own.
+            return {tid: _srt(DIALOGUE[said] if isinstance(said, int) else said)
+                    for tid, said in self.dialogue.items() if tid in job.selected_title_ids}
 
         async def execute(job, scheduler, report, job_name=None):
             self.encoded.append(job)
@@ -356,3 +378,108 @@ def test_same_show_returns_every_show_of_the_name_and_honours_a_year():
     assert [c.tmdb_id for c in metadata.same_show(shows, "HAWAII FIVE 0")] == [4556, 379]
     assert [c.tmdb_id for c in metadata.same_show(shows, "HAWAII FIVE 0", 1968)] == [379]
     assert metadata.same_show(shows, "Five-O") == []
+
+
+# --- extras ---------------------------------------------------------------------------
+
+def _rows(wj):
+    return {c["title_id"]: c for c in wj.match_candidates}
+
+
+async def test_an_extra_among_the_episodes_is_skipped_and_the_disc_goes_on(box):
+    wj = await box.insert(_disc("HOW_I_MET_YOUR_MOTHER_S1_D2", titles=4),
+                          {0: 4, 1: 5, 2: 6, 3: EXTRA})
+    assert wj.state is JobState.DONE, _log(wj)
+    assert _named(wj) == {0: [4], 1: [5], 2: [6]}
+    assert wj.selected_title_ids == [0, 1, 2]
+    assert box.encoded[-1].selected_title_ids == [0, 1, 2]        # not ripped/encoded on
+    assert "title 3 matches no episode of season 1 (best E" in _log(wj)
+    assert ("— skipping it as an extra; every other title matched confidently."
+            in _log(wj))
+
+
+async def test_an_extra_waits_for_you_when_another_title_is_unsure(box):
+    blend = DIALOGUE[6][:18] + DIALOGUE[7][:18]       # could be E06 or E07
+    wj = await box.insert(_disc("HOW_I_MET_YOUR_MOTHER_S1_D2", titles=4),
+                          {0: 4, 1: 5, 2: blend, 3: EXTRA})
+    assert wj.state is JobState.AWAITING_MATCH, _log(wj)
+    rows = _rows(wj)
+    assert rows[3]["skip"] is True and "not skipped while title 2 is unsure" in rows[3]["why"]
+    assert rows[2]["skip"] is False and rows[2]["why"]
+    assert rows[0]["skip"] is False and rows[0]["why"] is None
+
+
+async def test_an_extra_waits_for_you_when_an_episode_had_no_reference(box):
+    """OpenSubtitles had nothing for E12, so title 3 could be E12."""
+    box.osub.lacking = {12}
+    wj = await box.insert(_disc("HOW_I_MET_YOUR_MOTHER_S1_D2", titles=4),
+                          {0: 4, 1: 5, 2: 6, 3: EXTRA})
+    assert wj.state is JobState.AWAITING_MATCH
+    assert "no reference for E12" in _rows(wj)[3]["why"]
+
+
+async def test_a_missing_reference_for_an_episode_another_job_has_does_not_block(box):
+    box.osub.lacking = {12}
+    done = _named_by_hand(box, 90, "HOW_I_MET_YOUR_MOTHER_S1_D4", "How I Met Your Mother", 2005, 1100)
+    done.assignments = {0: EpisodeAssignment(0, MediaKind.TV, "How I Met Your Mother", 2005, 1, 12)}
+    wj = await box.insert(_disc("HOW_I_MET_YOUR_MOTHER_S1_D2", titles=4),
+                          {0: 4, 1: 5, 2: 6, 3: EXTRA})
+    assert wj.state is JobState.DONE, _log(wj)
+
+
+async def test_an_episode_already_in_another_job_is_asked_about(box):
+    """Re-ripping a damaged disc: confirm, and the new rip replaces the old."""
+    earlier = _named_by_hand(box, 91, "HOW_I_MET_YOUR_MOTHER_S1_D2", "How I Met Your Mother",
+                             2005, 1100)
+    earlier.assignments = {0: EpisodeAssignment(0, MediaKind.TV, "How I Met Your Mother", 2005, 1, 5)}
+    wj = await box.insert(_disc("HOW_I_MET_YOUR_MOTHER_S1_D2"), {0: 4, 1: 5, 2: 6})
+    assert wj.state is JobState.AWAITING_MATCH
+    assert "job #91 already names E05" in _rows(wj)[1]["why"]
+
+    box.manager.confirm_match(wj.id, {0: 4, 1: 5, 2: 6})
+    for _ in range(40):
+        await asyncio.sleep(0)
+    assert wj.state is JobState.DONE and _named(wj) == {0: [4], 1: [5], 2: [6]}
+
+
+async def test_an_extra_is_not_skipped_when_identified_by_hand(box):
+    """Auto-identify started from the form: you picked the titles, so one
+    matching nothing is more likely a wrong pick than an extra."""
+    box.settings.box_set_mode = False
+    wj = await box.insert(_disc("HOW_I_MET_YOUR_MOTHER_S1_D2", titles=4),
+                          {0: 4, 1: 5, 2: 6, 3: EXTRA})
+    box.manager.set_auto_identify(wj.id, "How I Met Your Mother", 2005, 1100, 1,
+                                  list(range(1, 13)), [0, 1, 2, 3])
+    for _ in range(80):
+        await asyncio.sleep(0)
+    assert wj.state is JobState.AWAITING_MATCH
+    assert _rows(wj)[3]["skip"] is True and _rows(wj)[3]["why"].endswith("an extra?")
+
+
+async def test_a_spent_quota_holds_the_skip_until_every_reference_is_in(box, monkeypatch):
+    """With references missing, the extra could be one of the missing
+    episodes. After the reset they arrive, and the extra is skipped."""
+    box.osub.allowance = 5
+    slept = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+        box.osub.allowance = 99
+    monkeypatch.setattr(box.manager, "_quota_sleep", sleep)
+
+    wj = await box.insert(_disc("HOW_I_MET_YOUR_MOTHER_S1_D2", titles=4),
+                          {0: 4, 1: 5, 2: 6, 3: EXTRA})
+    assert len(slept) == 1
+    assert wj.state is JobState.DONE, _log(wj)
+    assert _named(wj) == {0: [4], 1: [5], 2: [6]}
+    assert sorted(e for _t, _s, e in box.osub.downloads) == list(range(1, 13))  # each once
+
+
+async def test_a_failed_job_naming_the_episode_does_not_hold_it(box):
+    """It never placed a file, so there is nothing to replace."""
+    failed = _named_by_hand(box, 92, "HOW_I_MET_YOUR_MOTHER_S1_D2", "How I Met Your Mother",
+                            2005, 1100)
+    failed.state = JobState.FAILED
+    failed.assignments = {0: EpisodeAssignment(0, MediaKind.TV, "How I Met Your Mother", 2005, 1, 5)}
+    wj = await box.insert(_disc("HOW_I_MET_YOUR_MOTHER_S1_D2"), {0: 4, 1: 5, 2: 6})
+    assert wj.state is JobState.DONE, _log(wj)
