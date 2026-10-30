@@ -17,8 +17,10 @@ from blurayripper.services import os_upload
 from blurayripper.services.opensubtitles import (
     OpenSubtitlesClient,
     OpenSubtitlesError,
+    QuotaExhausted,
     best_file_id,
     gather_references,
+    quota_reset_at,
 )
 from blurayripper.services.sub_match import identify, similarity
 
@@ -380,6 +382,130 @@ async def test_http_429_with_an_unparseable_body_still_records_exhaustion(monkey
     with pytest.raises(OpenSubtitlesError):
         await client.fetch_episode_srt(1043, 2, 6, "en")
     assert client.last_known_quota() == {"remaining": 0}
+
+
+# --- when the quota comes back --------------------------------------------------------
+
+def _utc(text):
+    from datetime import datetime, timezone
+    return datetime.fromisoformat(text).replace(tzinfo=timezone.utc)
+
+
+def test_the_reset_time_reads_with_or_without_milliseconds():
+    assert quota_reset_at({"reset_time_utc": "2026-08-22T04:10:00Z"}) == _utc("2026-08-22T04:10:00")
+    assert quota_reset_at({"reset_time_utc": "2026-08-22T04:10:00.000Z"}) == _utc("2026-08-22T04:10:00")
+    assert quota_reset_at({"reset_time_utc": "2026-08-22T04:10:00"}) == _utc("2026-08-22T04:10:00")
+    for unreadable in (None, {}, {"reset_time_utc": None}, {"reset_time_utc": "soon"},
+                       {"reset_time_utc": 5}):
+        assert quota_reset_at(unreadable) is None
+
+
+async def test_a_spent_quota_says_when_it_comes_back(monkeypatch):
+    """Waiting is the only cure, so the error has to say until when. Without it a
+    disc identified by its dialogue failed and retried every few minutes for the
+    rest of the day."""
+    body = {"message": "You have downloaded your allowed 100 subtitles for 24 hours.",
+            "reset_time_utc": "2026-08-22T04:10:00Z"}
+    _install(monkeypatch, _routes(**{"/download": _json(200, body)}))
+    with pytest.raises(QuotaExhausted) as ei:
+        await OpenSubtitlesClient("key").fetch_episode_srt(1043, 2, 6, "en")
+    assert ei.value.reset_at == _utc("2026-08-22T04:10:00") and ei.value.fatal is True
+
+    _install(monkeypatch, _routes(**{"/download": _json(
+        406, {"reset_time_utc": "2026-08-23T01:00:00.000Z"})}))
+    with pytest.raises(QuotaExhausted) as ei:
+        await OpenSubtitlesClient("key").fetch_episode_srt(1043, 2, 6, "en")
+    assert ei.value.reset_at == _utc("2026-08-23T01:00:00") and ei.value.status == 406
+
+
+async def test_a_406_without_a_reset_time_uses_the_one_an_earlier_download_gave(monkeypatch):
+    replies = iter([_json(200, {"link": LINK, "remaining": 1,
+                                "reset_time_utc": "2026-08-22T04:10:00Z"}),
+                    _text(406, "<html>quota</html>")])
+    _install(monkeypatch, _routes(**{"/download": lambda call: next(replies)}))
+    client = OpenSubtitlesClient("key")
+    await client.fetch_episode_srt(1043, 2, 6, "en")
+    with pytest.raises(QuotaExhausted) as ei:
+        await client.fetch_episode_srt(1043, 2, 7, "en")
+    assert ei.value.reset_at == _utc("2026-08-22T04:10:00")
+
+
+async def test_a_bare_429_does_not_borrow_the_daily_reset(monkeypatch):
+    """A 429 with no reset time can be the per-second rate limit. Taking the
+    daily reset from an earlier download would wait hours for a pause of
+    seconds."""
+    replies = iter([_json(200, {"link": LINK, "remaining": 5,
+                                "reset_time_utc": "2026-08-22T04:10:00Z"}),
+                    _text(429, "<html>Too Many Requests</html>")])
+    _install(monkeypatch, _routes(**{"/download": lambda call: next(replies)}))
+    client = OpenSubtitlesClient("key")
+    await client.fetch_episode_srt(1043, 2, 6, "en")
+    with pytest.raises(QuotaExhausted) as ei:
+        await client.fetch_episode_srt(1043, 2, 7, "en")
+    assert ei.value.reset_at is None and ei.value.status == 429
+
+
+def test_only_the_quota_statuses_are_quota_errors():
+    def err(code):
+        return httpx.HTTPStatusError("x", request=_REQ, response=_text(code, ""))
+    assert isinstance(OpenSubtitlesClient._classify_http_error(err(406)), QuotaExhausted)
+    assert isinstance(OpenSubtitlesClient._classify_http_error(err(429)), QuotaExhausted)
+    for code in (401, 403, 500):
+        assert not isinstance(OpenSubtitlesClient._classify_http_error(err(code)),
+                              QuotaExhausted)
+
+
+def test_a_cached_reference_is_read_without_any_request(monkeypatch, tmp_path):
+    monkeypatch.setattr(OS.httpx, "AsyncClient", _NoNetwork)
+    client = OpenSubtitlesClient("key", cache_dir=tmp_path)
+    (tmp_path / "1043_s02e06_en.srt").write_text(SRT_BODY)
+    assert client.cached_episode_srt(1043, 2, 6, "eng") == SRT_BODY   # 639-2 normalised
+    assert client.cached_episode_srt(1043, 2, 7, "en") is None
+    assert OpenSubtitlesClient("key").cached_episode_srt(1043, 2, 6, "en") is None
+
+
+class _QuotaAt:
+    """Downloads until episode ``spent_at``, then the quota is gone. Some later
+    episodes are already in the cache from another day."""
+
+    def __init__(self, spent_at, cached=()):
+        self.spent_at, self.cached, self.asked = spent_at, set(cached), []
+
+    async def fetch_episode_srt(self, tmdb, season, ep, lang):
+        self.asked.append(ep)
+        if ep in self.cached:
+            return f"ref {ep}"
+        if ep >= self.spent_at:
+            raise QuotaExhausted("quota", reset_at=_utc("2026-08-22T04:10:00"), status=406)
+        return f"ref {ep}"
+
+    def cached_episode_srt(self, tmdb, season, ep, lang):
+        return f"ref {ep}" if ep in self.cached else None
+
+
+async def test_after_the_quota_runs_out_cached_references_are_still_read():
+    """Stopping at the first quota error threw away references downloaded on an
+    earlier day for the episodes after it."""
+    client = _QuotaAt(spent_at=3, cached={5})
+    refs = await gather_references(client, 1100, 1, [1, 2, 3, 4, 5, 6], "en")
+    assert refs == {1: "ref 1", 2: "ref 2", 5: "ref 5"}
+    assert client.asked == [1, 2, 3]          # nothing asked of the API after the cut
+
+
+async def test_stop_on_quota_hands_back_what_it_got_and_what_it_could_not():
+    client = _QuotaAt(spent_at=3, cached={5})
+    with pytest.raises(QuotaExhausted) as ei:
+        await gather_references(client, 1100, 1, [1, 2, 3, 4, 5, 6], "en",
+                                stop_on_quota=True)
+    assert ei.value.partial == {1: "ref 1", 2: "ref 2", 5: "ref 5"}
+    assert ei.value.untried == [3, 4, 6]
+    assert ei.value.reset_at == _utc("2026-08-22T04:10:00")
+
+
+async def test_a_quota_cut_before_anything_was_got_still_raises_by_default():
+    with pytest.raises(QuotaExhausted) as ei:
+        await gather_references(_QuotaAt(spent_at=1), 1100, 1, [1, 2], "en")
+    assert ei.value.fatal is True and ei.value.untried == [1, 2]
 
 
 async def test_http_401_is_fatal_and_leaves_the_quota_snapshot_untouched(monkeypatch):

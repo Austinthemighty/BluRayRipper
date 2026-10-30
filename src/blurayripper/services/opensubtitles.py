@@ -10,6 +10,7 @@ optional username/password raise the daily download quota.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -28,19 +29,74 @@ class OpenSubtitlesError(RuntimeError):
         self.fatal = fatal
 
 
+class QuotaExhausted(OpenSubtitlesError):
+    """The download quota ran out (or the request rate did).
+
+    Nothing cures that but waiting, so it says how long: ``reset_at`` is when
+    OpenSubtitles said the quota resets (aware UTC), or None when the reply
+    didn't say. ``status`` is the HTTP status; a 429 with no reset time is the
+    per-second rate limit, over in moments rather than hours.
+
+    Raised from gather_references it also carries the references fetched or
+    read from the cache (``partial``) and the episodes it could not get
+    (``untried``)."""
+
+    def __init__(self, message: str, *, reset_at: datetime | None = None,
+                 status: int | None = None) -> None:
+        super().__init__(message, fatal=True)
+        self.reset_at = reset_at
+        self.status = status
+        self.partial: dict[int, str] = {}
+        self.untried: list[int] = []
+
+
+def quota_reset_at(snapshot: dict | None) -> datetime | None:
+    """When the quota resets, from a /download reply or a quota snapshot:
+    ``reset_time_utc`` ("2026-08-22T04:10:00Z" or "…:00.000Z"), as aware UTC."""
+    value = (snapshot or {}).get("reset_time_utc")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        when = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
 async def gather_references(
-    client, show_tmdb_id: int, season: int, episodes: list[int], language: str = "en"
+    client, show_tmdb_id: int, season: int, episodes: list[int], language: str = "en",
+    *, stop_on_quota: bool = False,
 ) -> dict[int, str]:
     """Fetch reference SRT text for each candidate episode.
 
     A per-episode miss (no subs for that episode) is omitted so matching degrades
     gracefully. But if NOTHING could be fetched, raise the real reason (quota /
-    bad key / no results) instead of returning an empty dict that hides why."""
+    bad key / no results) instead of returning an empty dict that hides why.
+
+    When the quota runs out the rest are still read from the cache, which costs
+    nothing; stopping outright there threw away references downloaded on an
+    earlier day. With ``stop_on_quota`` a quota cut that left episodes untried
+    raises QuotaExhausted carrying what was got, so the caller can tell "not on
+    OpenSubtitles" from "not fetched yet" and wait for the reset."""
     refs: dict[int, str] = {}
     last_error: Exception | None = None
+    quota: QuotaExhausted | None = None
+    untried: list[int] = []
     for ep in episodes:
+        if quota is not None:
+            cached = getattr(client, "cached_episode_srt", None)
+            text = cached(show_tmdb_id, season, ep, language) if cached else None
+            if text:
+                refs[ep] = text
+            else:
+                untried.append(ep)
+            continue
         try:
             text = await client.fetch_episode_srt(show_tmdb_id, season, ep, language)
+        except QuotaExhausted as exc:
+            last_error = quota = exc
+            untried.append(ep)
+            continue
         except OpenSubtitlesError as exc:
             last_error = exc
             text = None
@@ -51,6 +107,9 @@ async def gather_references(
             text = None
         if text:
             refs[ep] = text
+    if quota is not None and (stop_on_quota or not refs):
+        quota.partial, quota.untried = refs, untried
+        raise quota
     if not refs and last_error is not None:
         raise OpenSubtitlesError(str(last_error), fatal=getattr(last_error, "fatal", False))
     return refs
@@ -104,6 +163,16 @@ class OpenSubtitlesClient:
         if not self._cache_dir:
             return None
         return self._cache_dir / f"{tmdb_id}_s{season:02d}e{episode:02d}_{language}.srt"
+
+    def cached_episode_srt(self, parent_tmdb_id: int, season: int, episode: int,
+                           language: str = "en") -> str | None:
+        """The reference already downloaded for this episode, or None. Never
+        touches the network, so it works with the quota spent."""
+        path = self._cache_path(parent_tmdb_id, season, episode,
+                                subtitle_lang_suffix(language))
+        if path and path.exists():
+            return path.read_text(encoding="utf-8", errors="replace")
+        return None
 
     @property
     def configured(self) -> bool:
@@ -181,9 +250,10 @@ class OpenSubtitlesClient:
         # response's language field; our config uses 639-2/B (eng, pol). Passing
         # "eng" returns nothing / filters everything out. Normalise to "en".
         language = subtitle_lang_suffix(language)
+        cached = self.cached_episode_srt(parent_tmdb_id, season, episode, language)
+        if cached is not None:
+            return cached
         cache_path = self._cache_path(parent_tmdb_id, season, episode, language)
-        if cache_path and cache_path.exists():
-            return cache_path.read_text(encoding="utf-8", errors="replace")
         try:
             # follow_redirects: OpenSubtitles' download link (and some endpoints)
             # 301/302-redirect; without this httpx raises instead of following.
@@ -216,9 +286,9 @@ class OpenSubtitlesClient:
                     msg = (body.get("message") or "").lower()
                     if "download" in msg or "quota" in msg:
                         self._remember_quota(body, exhausted=True)
-                        raise OpenSubtitlesError(
+                        raise QuotaExhausted(
                             f"OpenSubtitles download quota reached: {body.get('message')}",
-                            fatal=True)
+                            reset_at=quota_reset_at(self._last_quota), status=200)
                     return None
                 srt = await client.get(link, headers={"User-Agent": _UA})
                 srt.raise_for_status()
@@ -227,12 +297,24 @@ class OpenSubtitlesClient:
                     cache_path.write_text(srt.text, encoding="utf-8")
                 return srt.text
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code in (406, 429):  # quota — capture the reset time
+            code = exc.response.status_code
+            reset_at, earlier = None, quota_reset_at(self._last_quota)
+            if code in (406, 429):  # quota — capture the reset time
                 try:
-                    self._remember_quota(exc.response.json(), exhausted=True)
+                    body = exc.response.json()
+                    self._remember_quota(body, exhausted=True)
+                    reset_at = quota_reset_at(body)
                 except Exception:
                     self._last_quota = {"remaining": 0}
-            raise self._classify_http_error(exc) from exc
+                # A 406 is the daily quota, so the reset an earlier download
+                # reported still holds. A bare 429 may be the rate limit, which
+                # resets in moments; borrowing the daily reset would wait hours.
+                if reset_at is None and code == 406:
+                    reset_at = quota_reset_at(self._last_quota) or earlier
+            err = self._classify_http_error(exc)
+            if isinstance(err, QuotaExhausted):
+                err.reset_at = reset_at
+            raise err from exc
 
     def _remember_quota(self, body: dict, *, exhausted: bool = False) -> None:
         """Record the download-quota fields OpenSubtitles returns on /download, so
@@ -286,8 +368,8 @@ class OpenSubtitlesClient:
                 "OPENSUBTITLES_API_KEY (and username/password) in secrets.env.",
                 fatal=True)
         if code in (406, 429):
-            return OpenSubtitlesError(
+            return QuotaExhausted(
                 f"OpenSubtitles daily download quota exhausted (HTTP {code}) — it "
                 "resets each day. The titles are ripped; retry later or map episodes "
-                "manually.", fatal=True)
+                "manually.", status=code)
         return OpenSubtitlesError(f"OpenSubtitles request failed (HTTP {code}).")
