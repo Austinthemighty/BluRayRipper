@@ -2084,11 +2084,15 @@ class JobManager:
     def confirm_match(self, job_id: int, mapping: dict[int, int],
                       ends: dict[int, int] | None = None) -> None:
         """Resolve an AWAITING_MATCH job: ``mapping`` is title_id -> episode for
-        every selected title, and ``ends`` the last episode of any title that
-        holds two. Builds assignments and resumes to encode/place."""
+        each title that is an episode, and ``ends`` the last episode of any title
+        that holds two. A title left out is skipped as not an episode (a bonus
+        feature). Builds assignments and resumes to encode/place."""
         wj = self.jobs[job_id]
         if wj.state is not JobState.AWAITING_MATCH:
             raise ValueError(f"Job {job_id} is not awaiting match confirmation.")
+        if not mapping:
+            self._finish_without_episodes(wj)
+            return
         ends = ends or {}
         assignments = {
             tid: EpisodeAssignment(
@@ -2098,11 +2102,39 @@ class JobManager:
             for tid, ep in mapping.items()
         }
         self._refuse_colliding_assignments(list(assignments.values()))
+        skipped = [t for t in wj.selected_title_ids if t not in mapping]
+        if skipped:
+            wj.log.append(stamp_log(
+                f"Skipped as not an episode: title{'s' if len(skipped) > 1 else ''} "
+                + ", ".join(str(t) for t in skipped) + "."))
         wj.assignments = assignments
         wj.selected_title_ids = list(mapping.keys())
         wj.match_candidates = []
         wj.state = JobState.READY
         self._start_job(wj)
+
+    def _finish_without_episodes(self, wj: WebJob) -> None:
+        """Every title was skipped at the confirm screen: a disc of extras.
+
+        There is nothing to encode or place. Sent on like any confirmed job,
+        _run_job would find an auto-identify job with no naming and identify
+        the disc again, and land back at the same screen every time."""
+        library.cleanup(self.settings.storage.staging_dir / f"job_{wj.id}")
+        wj.auto_identify = False
+        wj.match_candidates = []
+        wj.assignments = {}
+        wj.selected_title_ids = []
+        wj.state = JobState.DONE
+        wj.progress = 1.0
+        if wj._pipeline_job is not None:
+            wj._pipeline_job.state = JobState.DONE
+            wj._pipeline_job.selected_title_ids = []
+            wj._pipeline_job.assignments = {}
+        wj.log.append(stamp_log(
+            "Every title was skipped as not an episode — nothing to encode or "
+            "place. The rip has been deleted."))
+        self._persist(wj)
+        self.bus.publish()
 
     async def _auto_identify(self, wj: WebJob, reporter) -> bool:
         """Rip + OCR the selected titles, fetch references, and match. Sets

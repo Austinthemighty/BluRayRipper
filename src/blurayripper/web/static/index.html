@@ -2006,18 +2006,36 @@ function buildResting(card, j){
   }
 }
 
+// The confirm screen's rows -> what to send. A row set to Skip is left out of
+// the mapping, which the server reads as "not an episode" (a bonus feature).
+// rows: [{id, value: episode number or 'skip', double: holds the next one too}]
+function matchMapping(rows){
+  const mapping = {}, ends = {}, skipped = [];
+  for (const r of rows){
+    if (r.value === 'skip'){ skipped.push(r.id); continue; }
+    mapping[r.id] = +r.value;
+    if (r.double) ends[r.id] = +r.value + 1;
+  }
+  const eps = [...Object.values(mapping), ...Object.values(ends)];
+  return {mapping, ends, skipped, duplicate: new Set(eps).size !== eps.length};
+}
+
 function buildMatch(card, j){
   const body = card.querySelector('[data-body]');
   const m = j.match;
   if(!m){ body.innerHTML='<div class="muted">Identifying…</div>'; return; }
   const pad = n => String(n).padStart(2,'0');
-  const opts = (numSel) => m.episodes.map(e=>`<option value="${e}" ${e===numSel?'selected':''}>E${pad(e)}</option>`).join('');
-  body.innerHTML = `<div class="muted" style="font-size:12px;">Subtitle match for <b>${m.show}</b> S${pad(m.season)} — confirm each title's episode. ⚠ = runtime/subs couldn't decide confidently.</div>`
-    + m.candidates.map(c=>`<div class="row">Title ${c.title_id} →
-        <select data-mep="${c.title_id}">${opts(c.episode)}</select>
+  const byId = Object.fromEntries((j.titles||[]).map(t=>[t.id, t]));
+  const opts = (numSel, skip) =>
+    `<option value="skip" ${skip?'selected':''}>— Skip: not an episode —</option>`
+    + m.episodes.map(e=>`<option value="${e}" ${!skip && e===numSel?'selected':''}>E${pad(e)}</option>`).join('');
+  body.innerHTML = `<div class="muted" style="font-size:12px;">Subtitle match for <b>${esc(m.show)}</b> S${pad(m.season)} — confirm each title's episode. ⚠ = runtime/subs couldn't decide confidently.</div>`
+    + m.candidates.map(c=>`<div class="row">Title ${c.title_id}${byId[c.title_id]?` <span class="muted">${esc(byId[c.title_id].duration||'')}</span>`:''} →
+        <select data-mep="${c.title_id}">${opts(c.episode, c.skip)}</select>
         <label class="muted" style="font-size:12px;" title="This title holds two episodes — a two-parter put on the disc as one."><input type="checkbox" data-mepdouble="${c.title_id}" ${c.episode_end?'checked':''}> + next episode</label>
         <span class="muted">score ${c.score}${c.runner_up!=null?` · next E${pad(c.runner_up)} ${c.runner_up_score}`:''}</span>
-        ${c.confident?'<span style="color:#3fb950;">✓</span>':'<span style="color:#d29922;">⚠</span>'}</div>`).join('')
+        ${c.confident?'<span style="color:#3fb950;">✓</span>':'<span style="color:#d29922;">⚠</span>'}
+        ${c.why?`<div class="muted" style="font-size:12px;flex-basis:100%;">${esc(c.why)}</div>`:''}</div>`).join('')
     + `<div class="row"><button data-confirmmatch>Confirm episodes</button>`
     + `<button class="sec" data-rematch title="Searched the wrong show, season or episodes? Go back to the naming form — the rip is kept.">✎ Change show/season</button>`
     + `<span data-msg class="muted"></span></div>`;
@@ -2030,14 +2048,14 @@ function buildMatch(card, j){
   body.querySelector('[data-confirmmatch]').onclick = async (ev) => {
     const mbtn = ev.currentTarget;
     if (mbtn.disabled) return;          // a click is already in flight
-    const mapping={}, ends={};
-    body.querySelectorAll('select[data-mep]').forEach(s=>{
-      mapping[+s.dataset.mep]=+s.value;
+    const rows = [...body.querySelectorAll('select[data-mep]')].map(s => {
       const dbl = body.querySelector(`[data-mepdouble="${s.dataset.mep}"]`);
-      if (dbl && dbl.checked) ends[+s.dataset.mep] = +s.value + 1;
+      return {id: +s.dataset.mep, value: s.value, double: !!(dbl && dbl.checked)};
     });
-    const eps=[...Object.values(mapping), ...Object.values(ends)];
-    if(new Set(eps).size!==eps.length && !confirm('Two titles map to the same episode — continue anyway?')) return;
+    const {mapping, ends, skipped, duplicate} = matchMapping(rows);
+    if(duplicate && !confirm('Two titles map to the same episode — continue anyway?')) return;
+    if(!Object.keys(mapping).length && !confirm(
+        `Skip all ${skipped.length} title${skipped.length===1?'':'s'}? Nothing from this disc is encoded, and the rip is deleted.`)) return;
     body.querySelector('[data-msg]').textContent='Saving…';
     mbtn.disabled = true;
     try { await api('POST',`/api/jobs/${j.id}/confirm-match`,{mapping, ends}); }

@@ -645,6 +645,48 @@ def test_skipping_a_two_parter_moves_the_rest_down_two():
     assert r["ends"] == {"3": 12}                      # a later two-parter keeps its pair
 
 
+# --- the confirm screen after a subtitle match -------------------------------------------
+
+def test_a_title_set_to_skip_is_left_out_of_the_confirmed_mapping():
+    """The server reads a missing title as "not an episode"; one sent with an
+    episode would be encoded and placed as that episode."""
+    r = js("matchMapping([{id:2, value:'5', double:false}, {id:3, value:'skip', double:true},"
+           " {id:4, value:'6', double:true}])")
+    assert r["mapping"] == {"2": 5, "4": 6}
+    assert r["ends"] == {"4": 7}           # the skipped row's tick is ignored
+    assert r["skipped"] == [3]
+    assert r["duplicate"] is False
+
+
+def test_two_skipped_titles_are_not_two_titles_on_one_episode():
+    r = js("matchMapping([{id:1, value:'skip'}, {id:2, value:'skip'}, {id:3, value:'4'}])")
+    assert r["duplicate"] is False
+    assert js("matchMapping([{id:1, value:'4'}, {id:2, value:'3', double:true}]).duplicate") is True
+
+
+def _confirm_screen(candidates):
+    job = json.dumps({"id": 7, "titles": [{"id": 2, "duration": "0:21:40"},
+                                          {"id": 3, "duration": "0:04:12"}],
+                      "match": {"show": "How I Met Your Mother", "season": 1,
+                                "episodes": [1, 2, 3], "candidates": candidates}})
+    return js("(() => { const body = {innerHTML: '', querySelector: () => ({})};"
+              f" buildMatch({{querySelector: () => body}}, {job}); return body.innerHTML; }})()")
+
+
+def test_the_confirm_screen_preselects_skip_for_a_proposed_extra_and_says_why():
+    html = _confirm_screen([
+        {"title_id": 2, "episode": 2, "score": 0.8, "confident": True},
+        {"title_id": 3, "episode": 3, "score": 0.02, "confident": False, "skip": True,
+         "why": "matches no episode of season 1"}])
+    row2, row3 = html.split('data-mep="2"')[1], html.split('data-mep="3"')[1]
+    assert '<option value="skip" >' in row2.split("</select>")[0]
+    assert '<option value="2" selected>' in row2.split("</select>")[0]
+    assert '<option value="skip" selected>' in row3.split("</select>")[0]
+    assert '<option value="3" >' in row3.split("</select>")[0]   # not also selected
+    assert "matches no episode of season 1" in row3
+    assert "0:04:12" in html                     # the runtime that gives an extra away
+
+
 # --- the season check view and the naming-time warning ---------------------------------
 
 def test_episode_runs_read_as_ranges():

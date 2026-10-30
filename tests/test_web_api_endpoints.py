@@ -488,6 +488,38 @@ def test_confirm_match_turns_json_string_keys_back_into_title_ids(client, manage
     assert wj.assignments[4].kind is MediaKind.TV
 
 
+def test_confirm_match_can_leave_out_a_title_that_is_not_an_episode(client, manager):
+    """A bonus feature among the episodes: Skip on the confirm screen leaves it
+    out of the mapping, and it is neither encoded nor placed."""
+    wj = _scanned_job(manager, 12, JobState.AWAITING_MATCH)
+    wj.show_title, wj.season, wj.selected_title_ids = "HIMYM", 1, [2, 3, 7]
+    r = client.post("/api/jobs/12/confirm-match", json={"mapping": {"2": 1, "3": 2}})
+    assert r.json() == {"ok": True}
+    assert sorted(wj.assignments) == [2, 3]
+    assert wj.selected_title_ids == [2, 3]
+    assert any("Skipped as not an episode: title 7." in line for line in wj.log)
+
+
+def test_confirming_with_every_title_skipped_finishes_the_job(client, manager):
+    """A disc of extras. Sent on with no naming, the job would identify the disc
+    again and come back to the same screen, forever."""
+    wj = _scanned_job(manager, 13, JobState.AWAITING_MATCH)
+    wj.show_title, wj.season, wj.selected_title_ids = "HIMYM", 1, [5, 6]
+    wj.auto_identify = True
+    wj.match_candidates = [{"title_id": 5}, {"title_id": 6}]
+    rip = manager.settings.storage.staging_dir / "job_13" / "rip" / "t005.mkv"
+    rip.parent.mkdir(parents=True)
+    rip.write_bytes(b"x")
+    r = client.post("/api/jobs/13/confirm-match", json={"mapping": {}})
+    assert r.json() == {"ok": True}
+    assert wj.state is JobState.DONE and wj._pipeline_job.state is JobState.DONE
+    assert wj.assignments == {} and wj.selected_title_ids == []
+    assert wj.auto_identify is False and wj.match_candidates == []
+    assert wj._task is None                       # nothing was started
+    assert not rip.parent.parent.exists()         # the rip is gone
+    assert "nothing to encode" in wj.log[-1]
+
+
 # --------------------------------------------------------------------------
 # job actions
 # --------------------------------------------------------------------------
