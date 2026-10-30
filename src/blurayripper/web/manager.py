@@ -218,6 +218,15 @@ class _Reporter:
         the panel doesn't keep showing it and the next disc reads as new."""
         self._m.note_disc_ejected(device=device, index=_drive_index(self._wj.source))
 
+    def ripped(self) -> None:
+        """Every title is ripped; what follows (OCR, references, the match)
+        reads only the ripped files. Give the drive back, so the next disc in
+        it can rip while this one is identified."""
+        release = getattr(self._wj, "_release_drive", None)
+        if release is not None:
+            release()
+            self.on_event("Rip finished — drive released while this identifies the episodes.")
+
     async def resolve_grain(self, job, preview) -> bool:
         """Park the job at the grain gate with preview assets; wait for the pick."""
         wj = self._wj
@@ -2142,7 +2151,11 @@ class JobManager:
         identified (caller proceeds), False if it parked at AWAITING_MATCH."""
         job = wj._pipeline_job
         staging_root = self.settings.storage.staging_dir / f"job_{wj.id}"
-        rips = await self.pipeline.identify_phase(job, staging_root, reporter)
+        # The slot covers the rip and the OCR, the heavy part; the drive in it
+        # is handed back as soon as the rip is done (_Reporter.ripped). The
+        # reference downloads and the match hold nothing.
+        async with self._prep_slot(wj):
+            rips = await self.pipeline.identify_phase(job, staging_root, reporter)
         if not rips:
             # Nothing to match with: no Blu-ray (PGS) subtitles to OCR and no
             # closed captions — a DVD from outside the US, say. Fetching
@@ -2660,8 +2673,7 @@ class JobManager:
             if wj.auto_identify and not wj.assignments:
                 # Rip + OCR + subtitle-match against the disc's candidate episodes.
                 # Parks at AWAITING_MATCH if any title is uncertain.
-                async with self._prep_slot(wj):
-                    ok = await self._auto_identify(wj, reporter)
+                ok = await self._auto_identify(wj, reporter)
                 if not ok:
                     self._persist(wj)
                     self.bus.publish()

@@ -790,6 +790,7 @@ class Pipeline:
                 job, title_id, staging_root, report)
 
         self._release_disc_copy(job, staging_root, report)
+        _emit_ripped(report)
 
         # Phase 2 — OCR each title's main track (no disc needed now).
         job.state = JobState.IDENTIFYING
@@ -2480,6 +2481,15 @@ def _emit_ejected(report, device: str | None) -> None:
     fn = getattr(report, "ejected", None)
     if fn is not None:
         fn(device)
+
+
+def _emit_ripped(report) -> None:
+    """Tell the reporter every title is ripped and the disc is no longer needed,
+    if it cares. The web _Reporter gives the drive back, so the next disc can
+    rip while this one is still being identified."""
+    fn = getattr(report, "ripped", None)
+    if fn is not None:
+        fn()
 
 
 def _emit_notify(report, title: str, message: str) -> None:

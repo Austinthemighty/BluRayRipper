@@ -42,9 +42,15 @@ async def test_identify_rips_all_before_any_ocr(tmp_path, monkeypatch):
     monkeypatch.setattr(pipe, "_extract_subs", fake_extract)
     monkeypatch.setattr(pipe.subtitleedit, "ocr_to_srt", fake_ocr)
 
-    rips = await pipe.identify_phase(job, tmp_path / "job_1", _R())
+    class _Hands(_R):
+        def ripped(self): order.append(("ripped",))
+
+    rips = await pipe.identify_phase(job, tmp_path / "job_1", _Hands())
 
     assert set(rips) == {0, 1, 2}
+    # The drive is handed back between the last rip and the first OCR.
+    assert order.index(("ripped",)) == 3 and order[4] == ("ocr",)
+    order.remove(("ripped",))
     rip_positions = [i for i, e in enumerate(order) if e[0] == "rip"]
     ocr_positions = [i for i, e in enumerate(order) if e[0] == "ocr"]
     # every rip happens before every OCR (drive stays busy, then OCR)
@@ -85,8 +91,11 @@ async def test_identify_saves_the_disc_art_before_its_rip_ejects_the_disc(
     monkeypatch.setattr(pipe, "_extract_subs", no_subs)
     monkeypatch.setattr(pipe, "_caption_text", no_captions)
 
-    await pipe.identify_phase(job, tmp_path / "job_1", _R())
-    assert order == ["resolve", "stash", ("rip", 0), ("rip", 1)]
+    class _Hands(_R):
+        def ripped(self): order.append("ripped")
+
+    await pipe.identify_phase(job, tmp_path / "job_1", _Hands())
+    assert order == ["resolve", "stash", ("rip", 0), ("rip", 1), "ripped"]
 
     # Identified again later (a restart), everything already ripped: the
     # drive belongs to whichever disc is in it now, so it is not read.

@@ -147,3 +147,63 @@ def test_confirming_a_two_parter_over_its_neighbour_is_refused(tmp_path, monkeyp
     with _pytest.raises(ValueError, match="both include S01E12"):
         m.confirm_match(1, {0: 10, 1: 11, 2: 12}, ends={1: 12})
     assert wj.state is JobState.AWAITING_MATCH
+
+
+async def test_the_next_disc_rips_while_this_one_is_still_being_identified(
+        tmp_path, monkeypatch):
+    """The OCR, the reference downloads and the match read the ripped files.
+    Holding the drive through them kept the next disc in that drive waiting
+    for all of it; on a Blu-ray box set the OCR alone is minutes a title."""
+    rips = {0: _srt(EP[10]), 1: _srt(EP[11]), 2: _srt(EP[12])}
+    m, wj, executed = _make_manager(tmp_path, monkeypatch, rips)
+    ocr_running, ocr_may_finish = asyncio.Event(), asyncio.Event()
+
+    async def identify(job, staging_root, report):
+        report.ripped()                     # what identify_phase does after its rips
+        ocr_running.set()
+        await ocr_may_finish.wait()
+        return rips
+    monkeypatch.setattr(m.pipeline, "identify_phase", identify)
+
+    m.set_auto_identify(1, "Show", 2020, 999, 1, [10, 11, 12], [0, 1, 2])
+    await asyncio.wait_for(ocr_running.wait(), 5)
+    assert any("drive released" in line for line in wj.log)
+
+    next_disc = WebJob(id=2, source="disc:0", state=JobState.READY)
+    async def rip_next_disc():
+        async with m._prep_slot(next_disc):
+            return True
+    assert await asyncio.wait_for(rip_next_disc(), 1)
+
+    ocr_may_finish.set()
+    await _settle()
+    assert wj.state is JobState.DONE
+
+
+async def test_waiting_on_reference_downloads_holds_no_prep_slot(tmp_path, monkeypatch):
+    """The downloads are network waits, not work. Inside a prep slot they kept
+    another disc's rip or OCR from starting."""
+    rips = {0: _srt(EP[10]), 1: _srt(EP[11]), 2: _srt(EP[12])}
+    m, wj, executed = _make_manager(tmp_path, monkeypatch, rips)
+    m._prep_sem = asyncio.Semaphore(1)
+    downloading, may_answer = asyncio.Event(), asyncio.Event()
+
+    class SlowOsub(_FakeOsub):
+        async def fetch_episode_srt(self, tmdb_id, season, episode, lang):
+            downloading.set()
+            await may_answer.wait()
+            return await super().fetch_episode_srt(tmdb_id, season, episode, lang)
+    m.osub = SlowOsub()
+
+    m.set_auto_identify(1, "Show", 2020, 999, 1, [10, 11, 12], [0, 1, 2])
+    await asyncio.wait_for(downloading.wait(), 5)
+
+    other = WebJob(id=2, source="/media/other.mkv", state=JobState.READY)
+    async def prep_other():
+        async with m._prep_slot(other):
+            return True
+    assert await asyncio.wait_for(prep_other(), 1)
+
+    may_answer.set()
+    await _settle()
+    assert wj.state is JobState.DONE
