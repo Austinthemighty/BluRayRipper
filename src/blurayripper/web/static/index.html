@@ -1316,7 +1316,7 @@ function cardHtml(j){
   return `<div class="top">
       <div style="display:flex;gap:8px;align-items:center;min-width:0;">
         <img class="thumb" loading="lazy" src="/api/jobs/${j.id}/artwork?t=${j.state}&v=${ARTV}" onerror="this.remove()" alt="">
-        <div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><b data-name>${j.display_name || j.disc_name || j.source}</b> <span class="muted">#${j.id}</span></div>
+        <div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><b data-name>${j.display_name || j.disc_name || j.source}</b> <span class="muted">#${j.id}</span>${j.box_set ? ' <span class="muted" title="Box-set mode: the show and season came from the disc label, the episodes from each title&#39;s dialogue.">📦 box set</span>' : ''}</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-shrink:0;">
         <span class="badge ${badgeClass(j.state)}" data-badge>${j.state.replace(/_/g,' ')}</span>

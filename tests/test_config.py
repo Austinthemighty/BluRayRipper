@@ -121,3 +121,10 @@ def test_ui_payload_flags_env_shadowed_fields(tmp_path):
              if g["title"] == "Tools" for f in g["fields"]}
     assert tools["ffmpeg"]["env_value"] == "/from/env/ffmpeg"
     assert tools["mkvmerge"]["env_value"] is None
+
+
+def test_box_set_mode_is_off_unless_the_disc_section_turns_it_on(tmp_path):
+    _write(tmp_path / "settings.toml", "")
+    assert load_settings(tmp_path).box_set_mode is False
+    _write(tmp_path / "settings.toml", "[disc]\nbox_set_mode = true\n")
+    assert load_settings(tmp_path).box_set_mode is True

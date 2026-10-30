@@ -306,6 +306,10 @@ class Settings:
     # disc with exactly ONE exact-name TMDB match, confirm + rip it automatically.
     # Anything ambiguous (e.g. "Dumbo" -> 1941 + 2019) or multi-title still parks.
     auto_rip: bool = False
+    # Box-set mode: a TV disc whose label names the show and season (HIMYM_S1_D3)
+    # rips straight away, and each title is named by matching its dialogue
+    # against that whole season on OpenSubtitles. Anything unsure still stops.
+    box_set_mode: bool = False
     drive_poll_seconds: int = 15    # how often the drive watcher checks
     # Flag a rip/scan as stalled when it hasn't emitted any progress or log line for
     # this many seconds — makemkvcon can hang indefinitely on a bad sector or an
@@ -628,6 +632,7 @@ def load_settings(config_dir: Path | None = None, extra_overlay: dict | None = N
         auto_eject=bool(disc_cfg.get("auto_eject", True)),
         auto_open=bool(disc_cfg.get("auto_open", True)),
         auto_rip=bool(disc_cfg.get("auto_rip", False)),
+        box_set_mode=bool(disc_cfg.get("box_set_mode", False)),
         drive_poll_seconds=int(disc_cfg.get("poll_seconds", 15)),
         rip_stall_after_seconds=int(disc_cfg.get("rip_stall_after_seconds", 900)),
         extract_cover_art=bool(disc_cfg.get("extract_cover_art", True)),

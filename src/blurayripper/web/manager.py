@@ -160,6 +160,9 @@ class WebJob:
     show_title: str | None = None
     show_year: int | None = None
     match_candidates: list = field(default_factory=list)  # proposals for AWAITING_MATCH
+    # Started by box-set mode: show and season from the label, episodes from
+    # the dialogue, with nobody at the naming form.
+    box_set: bool = False
     preview_off: object = None  # Path to grain-off still (poster / fallback)
     preview_on: object = None   # Path to grain-on still
     preview_off_clip: object = None  # Path to grain-off playable clip (mp4)
@@ -413,6 +416,7 @@ class JobManager:
             season=wj.season,
             candidate_episodes=list(wj.candidate_episodes),
             match_candidates=list(wj.match_candidates),
+            box_set=wj.box_set,
             aacs_dump=wj.aacs_dump,
             show_title=wj.show_title,
             show_year=wj.show_year,
@@ -434,6 +438,7 @@ class JobManager:
         wj.show_tmdb_id, wj.season = rec.show_tmdb_id, rec.season
         wj.candidate_episodes = list(rec.candidate_episodes)
         wj.match_candidates = list(rec.match_candidates or [])
+        wj.box_set = bool(rec.box_set)
         wj.show_title, wj.show_year = rec.show_title, rec.show_year
         wj.aacs_dump = getattr(rec, 'aacs_dump', None)
         job = Job(source=rec.source)
@@ -1283,7 +1288,8 @@ class JobManager:
         if not rows:
             # Say so rather than silently falling through: "the CSV isn't working"
             # is otherwise indistinguishable from "no row matched this disc".
-            if label:
+            # With box-set mode on, no plan is the normal case, not news.
+            if label and not self.settings.box_set_mode:
                 reporter.on_event(
                     "Box-set plan: no rows loaded from "
                     f"{boxset_plan.plan_path(self.settings)} — naming this one manually.")
@@ -1302,7 +1308,10 @@ class JobManager:
         if row is None:
             reporter.on_event(
                 f"Box-set plan: {len(rows)} row(s) loaded but none match the disc "
-                f"label “{label}” — naming this one manually. (Either give the row "
+                f"label “{label}” — "
+                + ("trying box-set mode. " if self.settings.box_set_mode
+                   else "naming this one manually. ")
+                + "(Either give the row "
                 "a disc_label — a trailing * covers a whole set — or, if the label "
                 "states the season and disc like SHOW_S9_D1, give the row that "
                 "show, season and disc number.)")
@@ -1360,6 +1369,183 @@ class JobManager:
                      job_id=wj.id)
         self._start_job(wj)
         return True
+
+    # --- box-set mode: the label says the show, the dialogue the episodes ---
+
+    async def _try_box_set(self, wj: WebJob, job, reporter) -> bool:
+        """Name a TV disc with nobody at the form: the show and season from its
+        label, each title's episode from its dialogue, matched against the whole
+        season on OpenSubtitles (auto-identify, started here instead of from
+        the form). Returns True if it took over.
+
+        Every way this can be unsure hands the disc to the naming form, saying
+        why: no season on the label, a show TMDB can't pin to one, earlier discs
+        of the set that disagree. A wrong guess here would name a whole disc of
+        episodes wrongly, and the form costs only a few clicks."""
+        if not self.settings.box_set_mode or job.disc is None:
+            return False
+        if discinfo.guess_kind(job.disc) is not MediaKind.TV:
+            return False
+        label = (job.disc.volume_label or job.disc.disc_name or "").strip()
+        if self._plan_row_for(label) is not None:
+            return False  # the plan said what this disc is; that wins
+        why = None
+        stem = naming.label_stem(label)
+        _query, _year, season = naming.clean_tmdb_query(label, "tv")
+        titles = [t.title_id for t in discinfo.episode_candidate_titles(job.disc)]
+        if not (self.osub.configured and self.settings.tmdb_api_key):
+            why = "it needs both an OpenSubtitles and a TMDB key"
+        elif stem is None:
+            why = f"the label “{label}” doesn't name a show"
+        elif season is None:
+            why = f"the label “{label}” doesn't say which season"
+        elif not titles:
+            why = "no title on the disc is episode-length"
+        show = None
+        if why is None:
+            show = await self._box_set_show(wj, stem, label, reporter)
+            if show is None:
+                why = "it couldn't tell which show this is (see above)"
+        episodes: list[int] = []
+        if why is None:
+            title, year, tmdb_id = show
+            try:
+                from ..services.metadata import TMDBClient
+                client = TMDBClient(self.settings.tmdb_api_key, self.settings.metadata_language)
+                eps = await self._tmdb_cached(("season", tmdb_id, season),
+                                              lambda: client.get_season(tmdb_id, season))
+                episodes = sorted(e.episode_number for e in eps if e.episode_number)
+            except Exception as exc:
+                why = f"TMDB's episode list for season {season} didn't load ({type(exc).__name__})"
+            else:
+                if not episodes:
+                    why = f"TMDB lists no episodes for season {season} of {title}"
+        if why is not None:
+            reporter.on_event(f"Box set: {why} — name this one.")
+            return False
+        disc_no = naming.disc_number(label)
+        reporter.on_event(
+            f"Box set: {title}{f' ({year})' if year else ''} season {season}"
+            + (f", disc {disc_no}" if disc_no else "")
+            + f" — ripping {len(titles)} episode-length title"
+            + ("s" if len(titles) != 1 else "")
+            + f" and identifying them by their dialogue against all {len(episodes)} "
+            "episodes.")
+        self._begin_auto_identify(wj, title, year, tmdb_id, season, episodes, titles,
+                                  wj.grain_mode, wj.tune_grain, box_set=True)
+        job.state = JobState.READY
+        self._notify(f"📦 Box set: {title} S{season:02d}",
+                     f"Job #{wj.id} — ripping, then naming the episodes by their "
+                     "dialogue.", job_id=wj.id)
+        return True
+
+    def _plan_row_for(self, label: str):
+        """The box-set plan row for this label, or None (a plan that can't be
+        read counts as none). Box-set mode never second-guesses a row, even one
+        that didn't apply: the row is what you said the disc is."""
+        try:
+            rows = boxset_plan.load_rows(self.settings)
+        except Exception:
+            return None
+        if not rows:
+            return None
+        return boxset_plan.match(rows, label) or boxset_plan.match_label_parts(rows, label)
+
+    @staticmethod
+    def _show_identity(o: WebJob) -> tuple[str, int | None] | None:
+        """(show, year) a job names, from its TV naming, else the show a
+        subtitle identification is running against."""
+        tv = next((a for a in o.assignments.values()
+                   if a is not None and a.kind is MediaKind.TV
+                   and (a.show_or_movie_title or "").strip()), None)
+        if tv is not None:
+            return tv.show_or_movie_title.strip(), tv.year
+        if (o.show_title or "").strip():
+            return o.show_title.strip(), o.show_year
+        return None
+
+    async def _box_set_show(self, wj: WebJob, stem: str, label: str,
+                            reporter) -> tuple[str, int | None, int] | None:
+        """(show, year, TMDB id) for a box-set disc, or None to ask.
+
+        The earlier discs of the set come first: what they were named is your
+        own answer, it settles a name two shows share (Hawaii Five-O, 1968 or
+        2010), and it covers labels TMDB can't read at all (HIMYM). Only with
+        no earlier disc is the label searched on TMDB, and then only a single
+        show of exactly that name is taken, never the search's best guess."""
+        from ..services.metadata import TMDBClient, loose_name, same_show
+        client = TMDBClient(self.settings.tmdb_api_key, self.settings.metadata_language)
+
+        async def search(name: str):
+            return await self._tmdb_cached(("search", name.casefold()),
+                                           lambda: client.search_tv(name))
+
+        siblings = [o for o in sorted(self.jobs.values(), key=lambda j: j.id)
+                    if o.id != wj.id and o.disc is not None
+                    and naming.label_stem(o.disc.volume_label or o.disc.disc_name) == stem]
+        named = [(o, ident) for o in siblings
+                 if (ident := self._show_identity(o)) is not None]
+        kinds = {(loose_name(t), y) for _o, (t, y) in named}
+        if len(kinds) > 1:
+            listed = "; ".join(sorted({f"{t}{f' ({y})' if y else ''} (job {o.id})"
+                                       for o, (t, y) in named}))
+            reporter.on_event(
+                f"Box set: earlier discs labelled like this one were named as "
+                f"different shows ({listed}).")
+            return None
+        if named:
+            last, (title, year) = named[-1]
+            tmdb_id = next((o.show_tmdb_id for o, ident in named if o.show_tmdb_id), None)
+            if tmdb_id is None:
+                try:
+                    same = same_show(await search(title), title, year)
+                except Exception:
+                    same = []
+                if len(same) != 1:
+                    reporter.on_event(
+                        f"Box set: the set's earlier discs are {title}"
+                        f"{f' ({year})' if year else ''}, but TMDB has "
+                        f"{'no' if not same else len(same)} show"
+                        f"{'s' if len(same) != 1 else ''} of that name to fetch "
+                        "subtitles by.")
+                    return None
+                tmdb_id = same[0].tmdb_id
+            reporter.on_event(
+                f"Box set: the same show as job {last.id}, an earlier disc of the set.")
+            return title, year, tmdb_id
+
+        query, year, _season = naming.clean_tmdb_query(label, "tv")
+        try:
+            found = await search(query)
+        except Exception as exc:
+            reporter.on_event(f"Box set: the TMDB search failed ({type(exc).__name__}).")
+            return None
+        same = same_show(found, query, year)
+        if len(same) != 1:
+            near = ", ".join(f"{c.name}{f' ({c.year})' if c.year else ''}"
+                             for c in (same or found)[:4])
+            reporter.on_event(
+                f"Box set: TMDB has "
+                + (f"{len(same)} shows called “{query}”" if same
+                   else f"no show called exactly “{query}”")
+                + (f" ({near})" if near else "") + ".")
+            return None
+        title, year = self._library_spelling(same[0].name, same[0].year)
+        return title, year, same[0].tmdb_id
+
+    def _library_spelling(self, name: str, year: int | None) -> tuple[str, int | None]:
+        """The spelling earlier jobs already gave this show, when they agree on
+        one. TMDB's "How I Met Your Mother (2005)" beside earlier discs named
+        "How I Met Your Mother" would split the show into two Plex folders."""
+        from ..services.metadata import loose_name
+        want = loose_name(name)
+        spellings = {
+            (a.show_or_movie_title.strip(), a.year)
+            for o in self.jobs.values() for a in o.assignments.values()
+            if a is not None and a.kind is MediaKind.TV
+            and loose_name(a.show_or_movie_title) == want and a.year in (year, None)
+        }
+        return next(iter(spellings)) if len(spellings) == 1 else (name, year)
 
     async def _fill_episode_titles(self, assignments, row, season: int | None,
                                    reporter=None) -> int | None:
@@ -2017,6 +2203,7 @@ class JobManager:
         # would just park at the same match gate, so hand naming back to the user.
         wj.auto_identify = False
         wj.match_candidates = []
+        wj.box_set = False
         wj.error = None
         wj.progress = 0.0
         target = (JobState.AWAITING_MAPPING if wj.selected_title_ids
@@ -2090,12 +2277,22 @@ class JobManager:
                 "identification. Set OPENSUBTITLES_API_KEY in config/secrets.env.")
         if not episodes:
             raise ValueError("No candidate episodes given for this disc.")
+        self._begin_auto_identify(wj, show_title, show_year, show_tmdb_id, season,
+                                  episodes, title_ids, grain_mode, tune_grain)
+
+    def _begin_auto_identify(
+        self, wj: WebJob, show_title: str, show_year: int | None, show_tmdb_id: int,
+        season: int, episodes: list[int], title_ids: list[int],
+        grain_mode: str = "auto", tune_grain: bool | None = None, *, box_set: bool = False,
+    ) -> None:
         wj.auto_identify = True
+        wj.box_set = box_set
         wj.show_title, wj.show_year = show_title, show_year
         wj.show_tmdb_id, wj.season = show_tmdb_id, season
         wj.candidate_episodes = list(episodes)
         wj.selected_title_ids = list(title_ids)
         wj.assignments = {}
+        wj.match_candidates = []
         wj.grain_mode, wj.tune_grain = grain_mode, tune_grain
         wj.state = JobState.READY
         self._start_job(wj)
@@ -2209,6 +2406,7 @@ class JobManager:
                     "The show/season may be mismatched, or these episodes aren't on "
                     "OpenSubtitles — fix the show or map episodes manually.")
             if refs and self._match_titles(wj, rips, refs, reporter):
+                await self._title_episodes(wj)
                 return True
             if cut is None:
                 break
@@ -2276,6 +2474,26 @@ class JobManager:
             }
             return True
         return False
+
+    async def _title_episodes(self, wj: WebJob) -> None:
+        """Best-effort: TMDB's names for the episodes the dialogue found, for
+        the card and the NFO, as a plan row or the naming form gives them.
+        Numbers alone name the files correctly, so any failure here is quiet."""
+        if not (self.settings.tmdb_api_key and wj.show_tmdb_id and wj.season is not None):
+            return
+        try:
+            from ..services.metadata import TMDBClient
+            client = TMDBClient(self.settings.tmdb_api_key, self.settings.metadata_language)
+            eps = await self._tmdb_cached(
+                ("season", wj.show_tmdb_id, wj.season),
+                lambda: client.get_season(wj.show_tmdb_id, wj.season))
+        except Exception:
+            return
+        by_num = {e.episode_number: e.name for e in eps}
+        for a in wj.assignments.values():
+            names = [by_num.get(n) for n in a.episodes]
+            if names and all(names) and not a.episode_title:
+                a.episode_title = " & ".join(names)
 
     # Bounds on a quota wait: never spin, never sleep past the next day's reset.
     _QUOTA_WAIT_MIN, _QUOTA_WAIT_MAX = 60.0, 24 * 3600.0
@@ -2561,6 +2779,10 @@ class JobManager:
                         "or dirty disc, a drive that can't read it, or a protection "
                         "MakeMKV couldn't handle — see the log above for its reason. "
                         "Clean the disc, or use another drive and Retry.")
+                # Box-set mode: the label names the show and season, and the
+                # titles' dialogue names the episodes.
+                if await self._try_box_set(wj, job, reporter):
+                    return  # identifying (set READY + spawned the run)
                 suggested = self._suggested_titles(job.disc)
                 if len(suggested) == 1:
                     tid = next(iter(suggested))
@@ -3772,6 +3994,7 @@ class JobManager:
             **dict(zip(("stall_kind", "stall_detail"),
                        self._stall_info(wj, live_state, stalled))),
             "lane": self._lane(wj, live_state),  # 'rip' | 'encode' | None (resting)
+            "box_set": wj.box_set,
             # Set while it sleeps until OpenSubtitles' quota resets.
             "waiting_until": (wj._wait_until.isoformat()
                               if getattr(wj, "_wait_until", None) else None),

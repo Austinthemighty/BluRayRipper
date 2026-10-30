@@ -99,6 +99,7 @@ class JobRecord:
     # the confirm screen had nothing to show, and the only way on was to
     # identify the disc all over again.
     match_candidates: list = field(default_factory=list)
+    box_set: bool = False          # named by box-set mode from its label and dialogue
     aacs_dump: str | None = None   # kept dump for a disc with no known key
 
     def to_json(self) -> dict:

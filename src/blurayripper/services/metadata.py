@@ -8,7 +8,9 @@ must be entered fully by hand.
 from __future__ import annotations
 
 import os
+import re
 import stat
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -83,6 +85,27 @@ class Episode:
     name: str
     runtime: int | None  # minutes, often absent on TMDB
     overview: str
+
+
+def loose_name(name: str | None) -> str:
+    """A show name folded for comparing two spellings of it: case, accents,
+    "&" against "and", a leading "The", punctuation, and a lone O against a
+    zero (Hawaii Five-O on TMDB, HAWAII_FIVE_0 on the disc)."""
+    s = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode()
+    s = re.sub(r"[^0-9a-z]+", " ", s.casefold().replace("&", " and ")).strip()
+    s = re.sub(r"^the ", "", s)
+    return re.sub(r"\bo\b", "0", s)
+
+
+def same_show(candidates: list[ShowCandidate], name: str,
+              year: int | None = None) -> list[ShowCandidate]:
+    """The candidates that ARE this show by name (and year, when given), not
+    merely what TMDB's search ranked near it. More than one means the name is
+    shared (Hawaii Five-O 1968 and 2010), and nothing here may pick between
+    them."""
+    want = loose_name(name)
+    return [c for c in candidates
+            if loose_name(c.name) == want and (year is None or c.year == year)]
 
 
 def _year_from(date: str | None) -> int | None:
