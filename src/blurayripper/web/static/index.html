@@ -26,29 +26,56 @@
   header h1 { font-size: 18px; margin: 0; order: -2; }
   header .cap { color:#8b949e; font-size:12px; }
   html { scroll-padding-top: calc(var(--head-h, 0px) + 8px); }
-  #jobsearch { margin-left: auto; min-width: 220px; }
-  /* On a wide screen the ☰ menu's contents sit in the bar itself, with the
-     version and uptime next to the title. */
+  /* On a wide screen the ☰ panel's contents sit in the bar itself: version and
+     uptime by the title, then search, the two tools, and a Settings menu that
+     holds the occasional settings and the site-wide maintenance actions. Nine
+     equal buttons made the bar read as a wall. */
   #headmenu { display: none; }
   .head-actions { display: contents; }
-  #ver, #uptime, #cap { order: -1; }
-  /* Phone (or a short landscape screen): a slim bar of title, search and ☰.
-     The version and actions open from ☰ as a panel under the bar; the full bar
-     wraps to about 260px on a phone, a third of the screen. */
-  @media (max-width: 760px), (max-height: 500px) {
+  .head-meta { order: -1; display: flex; gap: 10px; }
+  header button, .head-meta { white-space: nowrap; }
+  /* Just above the slim bar there is no room for the full version string; it
+     is still in the ☰ panel below this and in each worker's row. */
+  @media (min-width: 901px) and (max-width: 1100px) and (min-height: 501px) {
+    #ver { display: none; }
+  }
+  #jobsearch { margin-left: auto; flex: 0 1 360px; min-width: 200px; }
+  .menu-wrap { position: relative; }
+  .menu { display: none; position: absolute; right: 0; top: calc(100% + 6px); min-width: 250px;
+          padding: 6px; background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+          box-shadow: 0 12px 28px rgba(1,4,9,.6); }
+  .menu.open { display: block; }
+  .menu-h { padding: 8px 10px 4px; font-size: 11px; text-transform: uppercase;
+            letter-spacing: .05em; color: #8b949e; }
+  .menu-h ~ .menu-h { margin-top: 4px; padding-top: 10px; border-top: 1px solid #21262d; }
+  .menu button, .menu label { display: flex; align-items: center; gap: 8px; width: 100%;
+          padding: 7px 10px; background: none; color: #e6edf3; border-radius: 6px;
+          font-size: 13px; text-align: left; cursor: pointer; }
+  .menu button:hover, .menu label:hover { background: #21262d; }
+  /* Phone, narrow window or short landscape screen: a slim bar of title,
+     search and ☰. The version and actions open from ☰ as a panel under the
+     bar; the full bar wraps to about 260px on a phone, a third of the screen,
+     and below 900px its buttons no longer fit on one line. */
+  @media (max-width: 900px), (max-height: 500px) {
     header { gap: 8px; padding: 8px 10px; padding-top: max(8px, env(safe-area-inset-top, 0px)); }
     header h1 { font-size: 17px; white-space: nowrap; }
     #jobsearch { flex: 1 1 auto; min-width: 0; margin-left: 0; }
     #headmenu { display: block; flex-shrink: 0; padding: 6px 12px; font-size: 17px; }
     .head-actions { display: none; }
-    header.menu-open .head-actions {
+    .head-actions.open {
       display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
       position: absolute; top: 100%; left: 0; right: 0; padding: 10px 12px 12px;
       background: #161b22; border-bottom: 1px solid #30363d; box-shadow: 0 10px 20px rgba(1,4,9,.6);
       max-height: calc(100vh - var(--head-h, 0px)); overflow: auto; }
-    #cap:empty { display: none; }
-    /* Actions: evenly split two to a row so they're easy to tap. */
-    .head-actions button { flex: 1 1 40%; }
+    .head-meta { flex-basis: 100%; }
+    /* The two tools split a row so they're easy to tap; the Settings menu is
+       laid out open beneath them as a list. */
+    .head-actions > button { flex: 1 1 40%; }
+    #settingsmenu { display: none; }
+    .menu-wrap { flex-basis: 100%; }
+    .menu { display: block; position: static; min-width: 0; padding: 0;
+            background: none; border: 0; box-shadow: none; }
+    .menu button, .menu label { padding: 10px; font-size: 14px; }
   }
   .wrap { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 16px; padding: 16px 20px; }
   /* minmax(0,…) + min-width:0 let the columns shrink below their content's
@@ -183,18 +210,26 @@
   <h1>BluRayRipper</h1>
   <input id="jobsearch" type="search" placeholder="Search jobs — title, disc, path, #id"
          title="Filter the queue. Matches the name, disc label, source path and job id; several words must all match.">
-  <button class="sec" id="headmenu" aria-expanded="false" aria-controls="headactions" title="Version and actions">☰</button>
+  <button class="sec" id="headmenu" aria-expanded="false" aria-controls="headactions" title="Version, tools and settings">☰</button>
   <div class="head-actions" id="headactions">
-  <span class="cap" id="ver" title="Running version (git commit count + hash). Compare across machines to spot stale code."></span>
-  <span class="cap" id="uptime" title="How long this server process has been running. Restart from ⚙ Settings to pick up pulled code."></span>
-  <span class="cap" id="cap"></span>
-  <button class="sec" id="redoall" title="Re-OCR subtitles for every job that has names assigned (uses staged/cached subs; no re-encode).">Re-OCR all subtitles</button>
-  <button class="sec" id="refreshart" title="Re-fetch the real poster + backdrop from TMDB for every named job, overwriting wrong/generic art in each folder.">Refresh artwork</button>
-  <label class="cap"><input type="checkbox" id="autoconfirm"> Auto-confirm single matches</label>
-  <button class="sec" id="opensettings" title="Edit server settings (saved to config/settings.local.json; applied on next restart).">⚙ Settings</button>
-  <button class="sec" onclick="openHandbrake()" title="Edit the HandBrake encode preset (quality, encoder, speed) used for <=1080p titles.">🎬 HandBrake</button>
-  <button class="sec" onclick="openBoxsets()" title="Name TV box-set discs up front with a CSV, so inserting a disc rips it automatically with no mapping form.">📺 TV box sets</button>
-  <button class="sec" onclick="openSeasons()" title="Check every season of a show against TMDB: what's in the library, still queued, missing, or named by two jobs.">✅ Seasons</button>
+    <div class="head-meta">
+      <span class="cap" id="ver" title="Running version (git commit count + hash). Compare across machines to spot stale code."></span>
+      <span class="cap" id="uptime" title="How long this server process has been running. Restart from ⚙ Settings to pick up pulled code."></span>
+    </div>
+    <button class="sec" onclick="openBoxsets()" title="Name TV box-set discs up front with a CSV, so inserting a disc rips it automatically with no mapping form.">TV box sets</button>
+    <button class="sec" onclick="openSeasons()" title="Check every season of a show against TMDB: what's in the library, still queued, missing, or named by two jobs.">Seasons</button>
+    <div class="menu-wrap">
+      <button class="sec" id="settingsmenu" aria-haspopup="true" aria-expanded="false" aria-controls="settingspanel">⚙ Settings ▾</button>
+      <div class="menu" id="settingspanel">
+        <div class="menu-h">Settings</div>
+        <button id="opensettings" title="Edit server settings (saved to config/settings.local.json; applied on next restart).">Server settings…</button>
+        <button onclick="openHandbrake()" title="Edit the HandBrake encode preset (quality, encoder, speed) used for <=1080p titles.">HandBrake preset…</button>
+        <label title="When a movie search finds exactly one TMDB match, confirm it without waiting for you."><input type="checkbox" id="autoconfirm"> Auto-confirm single matches</label>
+        <div class="menu-h">Maintenance</div>
+        <button id="redoall" data-stay title="Re-OCR subtitles for every job that has names assigned (uses staged/cached subs; no re-encode).">Re-OCR all subtitles</button>
+        <button id="refreshart" data-stay title="Re-fetch the real poster + backdrop from TMDB for every named job, overwriting wrong/generic art in each folder.">Refresh artwork</button>
+      </div>
+    </div>
   </div>
 </header>
 <div id="stats"></div>
@@ -451,24 +486,31 @@ function trackHeaderHeight(){
     document.documentElement.style.setProperty('--head-h', head.offsetHeight + 'px');
   }).observe(head, {box: 'border-box'});
 }
-// The slim bar's ☰ opens the version and actions as a panel under it. Picking
-// an action, tapping anywhere else or Escape closes it again.
-function setHeadMenu(open){
-  const head = document.querySelector('header'), btn = document.getElementById('headmenu');
-  if (!head || !btn) return;
-  head.classList.toggle('menu-open', open);
+// The header's two menus: ☰ on the slim phone bar (the whole panel) and
+// ⚙ Settings on a wide screen. Picking an action closes them, except the two
+// maintenance actions (data-stay), whose buttons report the result in their own
+// label. A tap anywhere outside, the search box included, or Escape closes them.
+function setMenu(btnId, open){
+  const btn = document.getElementById(btnId);
+  const panel = btn && document.getElementById(btn.getAttribute('aria-controls'));
+  if (!panel) return;
+  panel.classList.toggle('open', open);
   btn.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
+function closeHeadMenus(){ setMenu('headmenu', false); setMenu('settingsmenu', false); }
 function wireHeadMenu(){
-  const btn = document.getElementById('headmenu');
-  btn.onclick = () => setHeadMenu(btn.getAttribute('aria-expanded') !== 'true');
+  for (const id of ['headmenu', 'settingsmenu']) {
+    const btn = document.getElementById(id);
+    btn.onclick = () => setMenu(id, btn.getAttribute('aria-expanded') !== 'true');
+  }
   document.getElementById('headactions').addEventListener('click', (e) => {
-    if (e.target.closest('button')) setHeadMenu(false);
+    const b = e.target.closest('button');
+    if (b && b.id !== 'settingsmenu' && !b.hasAttribute('data-stay')) closeHeadMenus();
   });
   document.addEventListener('click', (e) => {
-    if (!e.target.closest('#headactions, #headmenu')) setHeadMenu(false);   // the search box too
+    if (!e.target.closest('#headactions, #headmenu')) closeHeadMenus();
   });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setHeadMenu(false); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeHeadMenus(); });
 }
 function restorePanelCollapse(){
   for (const id of ['drives-panel','workers-panel']) {

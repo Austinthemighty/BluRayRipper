@@ -127,8 +127,28 @@ def test_on_a_phone_the_pinned_bar_is_slim_with_the_actions_behind_a_menu():
                   'id="autoconfirm"', "openSeasons()"):
         assert piece in menu, piece
     assert ".head-actions { display: contents; }" in src
-    assert "header.menu-open .head-actions {" in src
+    assert ".head-actions.open {" in src
     assert "wireHeadMenu();" in src
+
+
+def test_the_wide_bar_keeps_only_search_and_the_tools_out_of_the_settings_menu():
+    """Nine equal buttons made the bar a wall. Settings, the HandBrake preset,
+    auto-confirm and the two site-wide maintenance actions live in one Settings
+    menu; the box sets and seasons tools stay in the bar."""
+    src = INDEX.read_text()
+    head = src.split("<header>")[1].split("</header>")[0]
+    outside, rest = head.split('<div class="menu" id="settingspanel">')
+    settings = rest.split("</div>\n    </div>")[0]
+    for piece in ('id="opensettings"', "openHandbrake()", 'id="autoconfirm"',
+                  'id="redoall"', 'id="refreshart"'):
+        assert piece in settings, piece
+    for piece in ("openBoxsets()", "openSeasons()", 'id="settingsmenu"'):
+        assert piece in outside, piece
+    # The maintenance buttons report their result in their own label, so
+    # picking one must not close the menu over it.
+    for bulk in ('id="redoall"', 'id="refreshart"'):
+        line = next(l for l in settings.splitlines() if bulk in l)
+        assert "data-stay" in line, line
 
 
 def test_a_long_file_path_in_a_card_wraps_instead_of_widening_the_page():
