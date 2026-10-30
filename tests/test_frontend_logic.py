@@ -687,6 +687,16 @@ def test_the_confirm_screen_preselects_skip_for_a_proposed_extra_and_says_why():
     assert "0:04:12" in html                     # the runtime that gives an extra away
 
 
+def test_a_job_waiting_for_the_subtitles_quota_says_so_and_queues_with_the_rips():
+    """It is asleep, not ripping, and not stuck: "identifying" in the Ripping
+    group read as a job hard at work for six hours."""
+    waiting = _job(state="identifying", lane="rip", waiting_until="2026-10-30T09:00:00+00:00")
+    working = _job(state="identifying", lane="rip")
+    assert js(f"stallBadge({waiting})")["text"] == "waiting · subtitles quota"
+    assert js(f"jobRank({waiting})") == 4 and js(f"jobRank({working})") == 3
+    assert js(f"cardKey({waiting})") != js(f"cardKey({working})")   # its own card body
+
+
 # --- the season check view and the naming-time warning ---------------------------------
 
 def test_episode_runs_read_as_ranges():

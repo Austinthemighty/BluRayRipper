@@ -725,6 +725,7 @@ function driveCapsHtml(d){
 // on disk and a Requeue carries on from it, so a bare red "stalled" sent you
 // hunting for a disc over a rip that had already succeeded.
 function stallBadge(j){
+  if (j.waiting_until) return { text:'waiting · subtitles quota', cls:'await' };
   if (j.stall_kind === 'rip_saved') return { text:'stalled · rip saved', cls:'await' };
   if (j.stalled)     return { text:'stalled', cls:'failed' };
   if (j.needs_review) return { text:'needs review', cls:'failed' };
@@ -898,6 +899,7 @@ function jobRank(j){
   if (j.lane === 'encode')                   // ── encode queue (below the rip queue) ──
     return ENC_ACTIVE.includes(s) ? 5 : 6;   // encoding now vs waiting for a worker
   // ── rip queue ──
+  if (j.waiting_until) return 4;             // asleep until OpenSubtitles' quota resets
   if (RIP_ACTIVE.includes(s)) return 3;      // actively scanning/ripping a disc
   return 4;                                  // queued / ready-to-rip
 }
@@ -1226,11 +1228,11 @@ function renderJobs(snap) {
     seen.add(j.id);
     let card = document.getElementById('job-'+j.id);
     // Rebuild the card if state changed (so forms appear/disappear); else live-update.
-    if (!card || renderedState[j.id] !== j.state) {
+    if (!card || renderedState[j.id] !== cardKey(j)) {
       card = card || Object.assign(document.createElement('div'), {id:'job-'+j.id, className:'job'});
       card.innerHTML = cardHtml(j);
       if (!card.parentNode) host.appendChild(card);
-      renderedState[j.id] = j.state;
+      renderedState[j.id] = cardKey(j);
       card.querySelector('[data-remove]').onclick = () => removeJob(j);
       if (j.state==='awaiting_titles') buildTitles(card, j);
       if (j.state==='awaiting_mapping') buildMapping(card, j);
@@ -1238,6 +1240,7 @@ function renderJobs(snap) {
       if (j.state==='awaiting_match') buildMatch(card, j);
       if (j.state==='ready') buildEdit(card, j);
       if (j.state==='done' || j.state==='failed') buildResting(card, j);
+      if (j.waiting_until) buildWaiting(card, j);
     }
     liveUpdate(card, j);
     // The preview often arrives a tick AFTER the card first entered awaiting_grain
@@ -1302,6 +1305,11 @@ function renderJobs(snap) {
   }
   renderJobs._known = allIds;
 }
+// What a card was built for. Its state, and whether it is waiting on
+// OpenSubtitles' quota, which happens partway through IDENTIFYING and needs its
+// own controls.
+function cardKey(j){ return j.state + (j.waiting_until ? ':waiting' : ''); }
+
 function renderedStateClear(){ for(const k of Object.keys(renderedState)) delete renderedState[k]; }
 
 function cardHtml(j){
@@ -1862,6 +1870,16 @@ function wireNamingButton(body, j){
     try { await api('POST','/api/jobs/'+j.id+'/remap'); }
     catch(e){ if (msg) msg.textContent = '⚠ '+e.message; }
   };
+}
+
+// Asleep until OpenSubtitles' download quota resets; it carries on by itself.
+// Set naming is the way to name it by hand instead of waiting.
+function buildWaiting(card, j){
+  const body = card.querySelector('[data-body]');
+  const at = new Date(j.waiting_until).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  body.innerHTML = `<div class="muted" style="font-size:12px;">Waiting for OpenSubtitles — its download quota resets at ${at}, and identifying the episodes carries on then by itself.</div>`
+    + `<div class="row">${namingButtonHtml(j, '')}<span data-msg class="muted"></span></div>`;
+  wireNamingButton(body, j);
 }
 
 function buildEdit(card, j){

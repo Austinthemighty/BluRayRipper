@@ -207,3 +207,180 @@ async def test_waiting_on_reference_downloads_holds_no_prep_slot(tmp_path, monke
     may_answer.set()
     await _settle()
     assert wj.state is JobState.DONE
+
+
+# --- waiting out OpenSubtitles' download quota -----------------------------------------
+
+def _soon(hours):
+    from datetime import datetime, timedelta, timezone
+    return datetime.now(timezone.utc) + timedelta(hours=hours)
+
+
+class _QuotaOsub(_FakeOsub):
+    """Gives ``allowance`` downloads, then the quota is spent until ``refill``."""
+
+    def __init__(self, allowance, reset_at=None, status=406):
+        self.allowance, self.reset_at, self.status = allowance, reset_at, status
+        self.cache: dict[int, str] = {}
+
+    def refill(self, n=99):
+        self.allowance = n
+
+    async def fetch_episode_srt(self, tmdb_id, season, episode, lang):
+        from blurayripper.services.opensubtitles import QuotaExhausted
+        if episode in self.cache:
+            return self.cache[episode]
+        if self.allowance <= 0:
+            raise QuotaExhausted("quota", reset_at=self.reset_at, status=self.status)
+        self.allowance -= 1
+        text = await super().fetch_episode_srt(tmdb_id, season, episode, lang)
+        if text:
+            self.cache[episode] = text
+        return text
+
+    def cached_episode_srt(self, tmdb_id, season, episode, lang):
+        return self.cache.get(episode)
+
+
+async def test_a_spent_quota_waits_for_the_reset_and_then_finishes(tmp_path, monkeypatch):
+    """It used to fail the job, and auto-retry tried again every few minutes all
+    day — every try spending nothing and getting nowhere until the reset."""
+    rips = {0: _srt(EP[12]), 1: _srt(EP[10]), 2: _srt(EP[11])}
+    m, wj, executed = _make_manager(tmp_path, monkeypatch, rips)
+    m.osub = osub = _QuotaOsub(allowance=2, reset_at=_soon(5))
+    notes, slept = [], []
+    m._notify = lambda title, msg, priority=None, job_id=None: notes.append(title)
+    seen_while_waiting = {}
+
+    async def sleep(seconds):
+        slept.append(seconds)
+        d = m._job_dict(wj)
+        seen_while_waiting.update(state=d["state"], waiting=d["waiting_until"],
+                                  stalled=d["stalled"], stage=wj.stage)
+        osub.refill()                                  # the reset comes
+    monkeypatch.setattr(m, "_quota_sleep", sleep)
+
+    m.set_auto_identify(1, "Show", 2020, 999, 1, [10, 11, 12], [0, 1, 2])
+    await _settle()
+
+    assert wj.state is JobState.DONE
+    assert executed["assignments"] == {0: 12, 1: 10, 2: 11}
+    assert len(slept) == 1 and 5 * 3600 < slept[0] <= 5 * 3600 + 61
+    assert seen_while_waiting["state"] == "identifying"
+    assert seen_while_waiting["waiting"] and seen_while_waiting["stalled"] is False
+    assert seen_while_waiting["stage"].startswith("Waiting for OpenSubtitles until")
+    assert any("Waiting for OpenSubtitles — the download quota resets at" in line
+               for line in wj.log)
+    assert wj._wait_until is None and m._job_dict(wj)["waiting_until"] is None
+    assert m._auto_retries == {}
+    assert sum("Waiting for OpenSubtitles" in t for t in notes) == 1
+
+
+async def test_a_partial_set_that_names_every_title_does_not_wait(tmp_path, monkeypatch):
+    """The quota ran out on an episode none of the titles turned out to be."""
+    monkeypatch.setitem(EP, 13, [f"the old lighthouse keeper sang at night {i}"
+                                 for i in range(40)])
+    rips = {0: _srt(EP[10]), 1: _srt(EP[11]), 2: _srt(EP[12])}
+    m, wj, executed = _make_manager(tmp_path, monkeypatch, rips)
+    m.osub = _QuotaOsub(allowance=3, reset_at=_soon(5))
+
+    async def sleep(seconds):
+        raise AssertionError("waited for a quota it didn't need")
+    monkeypatch.setattr(m, "_quota_sleep", sleep)
+
+    m.set_auto_identify(1, "Show", 2020, 999, 1, [10, 11, 12, 13], [0, 1, 2])
+    await _settle()
+
+    assert wj.state is JobState.DONE
+    assert executed["assignments"] == {0: 10, 1: 11, 2: 12}
+
+
+async def test_set_naming_stops_the_wait(tmp_path, monkeypatch):
+    rips = {0: _srt(EP[12]), 1: _srt(EP[10]), 2: _srt(EP[11])}
+    m, wj, executed = _make_manager(tmp_path, monkeypatch, rips)
+    m.osub = _QuotaOsub(allowance=0, reset_at=_soon(5))
+    waiting, forever = asyncio.Event(), asyncio.Event()
+
+    async def sleep(seconds):
+        waiting.set()
+        await forever.wait()
+    monkeypatch.setattr(m, "_quota_sleep", sleep)
+
+    m.set_auto_identify(1, "Show", 2020, 999, 1, [10, 11, 12], [0, 1, 2])
+    await asyncio.wait_for(waiting.wait(), 5)
+
+    m.remap(1)
+    await _settle()
+
+    assert wj.state is JobState.AWAITING_MAPPING
+    assert wj._task.cancelled()
+    assert wj._wait_until is None and "assignments" not in executed
+
+
+@pytest.mark.parametrize("reset_in_hours, status, expected", [
+    (2, 406, 2 * 3600 + 60),        # until the reset, plus a minute's grace
+    (None, 429, 60),                # a bare 429: the rate limit, over in moments
+    (None, 406, 3600),              # the daily quota with no time given: look hourly
+    (-1, 406, 60),                  # a reset already past never means "don't wait"
+    (30, 406, 24 * 3600),           # nor more than a day
+])
+async def test_how_long_a_quota_wait_lasts(tmp_path, monkeypatch, reset_in_hours,
+                                           status, expected):
+    from blurayripper.services.opensubtitles import QuotaExhausted
+    m, wj, _ = _make_manager(tmp_path, monkeypatch, {})
+    slept = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+    monkeypatch.setattr(m, "_quota_sleep", sleep)
+    reset = _soon(reset_in_hours) if reset_in_hours is not None else None
+
+    class _Rep:
+        def on_event(self, *_): pass
+
+    await m._wait_for_quota(wj, _Rep(), QuotaExhausted("q", reset_at=reset, status=status))
+    assert slept[0] == pytest.approx(expected, abs=2)
+
+
+async def test_waking_from_the_wait_is_not_read_as_a_stall(tmp_path, monkeypatch):
+    """Hours of quiet while it slept would otherwise flag it the moment it woke."""
+    from blurayripper.services.opensubtitles import QuotaExhausted
+    m, wj, _ = _make_manager(tmp_path, monkeypatch, {})
+    wj._activity_at = wj._progress_at = 0.0           # last heard from long ago
+
+    async def sleep(seconds):
+        assert m._is_stalled(wj, JobState.IDENTIFYING) is False
+    monkeypatch.setattr(m, "_quota_sleep", sleep)
+
+    class _Rep:
+        def on_event(self, *_): pass
+
+    await m._wait_for_quota(wj, _Rep(), QuotaExhausted("q", reset_at=_soon(1), status=406))
+    assert wj._activity_at > 0 and wj._progress_at > 0
+    assert m._is_stalled(wj, JobState.IDENTIFYING) is False
+
+
+async def test_one_push_for_a_spent_quota_however_many_discs_wait_on_it(
+        tmp_path, monkeypatch):
+    """The quota is one thing running out. A box set of discs waiting on it is
+    one piece of news, not one notification each."""
+    from blurayripper.services.opensubtitles import QuotaExhausted
+    m, wj, _ = _make_manager(tmp_path, monkeypatch, {})
+    notes = []
+    m._notify = lambda title, msg, priority=None, job_id=None: notes.append(job_id)
+
+    async def sleep(seconds): pass
+    monkeypatch.setattr(m, "_quota_sleep", sleep)
+
+    class _Rep:
+        def on_event(self, *_): pass
+
+    cut = QuotaExhausted("q", reset_at=_soon(3), status=406)
+    await m._wait_for_quota(wj, _Rep(), cut)
+    assert notes == [1]
+
+    earlier = WebJob(id=2, source="disc:1", state=JobState.READY)
+    earlier._wait_until = _soon(3)                 # already waiting on the same quota
+    m.jobs[2] = earlier
+    await m._wait_for_quota(wj, _Rep(), cut)
+    assert notes == [1]

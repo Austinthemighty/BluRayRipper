@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import itertools
 import json
 import re
@@ -51,7 +51,7 @@ from ..services import aacs_dump
 from ..services.drive_caps import DriveCaps
 from ..services.drive_names import DriveNames
 from ..services.notify import click_link, notify
-from ..services.opensubtitles import OpenSubtitlesClient, gather_references
+from ..services.opensubtitles import OpenSubtitlesClient, QuotaExhausted, gather_references
 from ..services.sub_match import identify, identify_two_parts
 from ..tools import discinfo
 from ..tools.makemkv import (
@@ -174,6 +174,7 @@ class WebJob:
     _grain_future: object = None  # asyncio.Future resolved when user picks grain
     _task: object = None          # the asyncio.Task running scan/process (for cancel)
     _early_rip: object = None     # the asyncio.Task ripping while it waits to be named
+    _wait_until: object = None    # aware datetime: waiting for OpenSubtitles' quota
 
 
 class _Reporter:
@@ -726,6 +727,8 @@ class JobManager:
     )
 
     def _is_stalled(self, wj: WebJob, live_state: JobState) -> bool:
+        if getattr(wj, "_wait_until", None) is not None:
+            return False  # waiting for OpenSubtitles' quota, on purpose and for hours
         if live_state in self._ACTIVE_RIP_STATES:
             return self._rip_stalled(wj, live_state)
         if live_state not in self._ACTIVE_WORKER_STATES:
@@ -1989,8 +1992,11 @@ class JobManager:
         # AWAITING_MATCH too: its confirm screen offers only the episodes that
         # were searched, so a match run against the wrong season (397: S8
         # instead of S9) had no way out at all.
+        # And a job waiting for OpenSubtitles' quota: it may wait hours, and
+        # naming it by hand is the way not to.
+        waiting = getattr(wj, "_wait_until", None) is not None
         if live not in (JobState.DONE, JobState.FAILED, JobState.READY,
-                        JobState.AWAITING_MATCH):
+                        JobState.AWAITING_MATCH) and not waiting:
             raise ValueError("This job is being worked on right now — wait for it to "
                              "finish or stop, then set the naming.")
         if wj._pipeline_job is None or wj.disc is None:
@@ -1998,7 +2004,11 @@ class JobManager:
         # A live local task means it's still prepping (rip/subs) on this box; only a
         # READY job that's merely QUEUED for a worker is safe to re-open.
         task = getattr(wj, "_task", None)
-        if task is not None and not task.done():
+        if waiting and task is not None and not task.done():
+            task.cancel()           # only sleeping; nothing is being written
+            wj._wait_until = None   # its own cleanup does this a tick later
+            wj.stage = ""
+        elif task is not None and not task.done():
             raise ValueError("Job is still running — wait for it to stop.")
         # Drop any stale worker claim so the job can't be picked up mid-rename.
         with contextlib.suppress(Exception):
@@ -2174,18 +2184,50 @@ class JobManager:
                          f"Job #{wj.id} — couldn't identify the episodes by "
                          "subtitles; set them by hand.", job_id=wj.id)
             return False
-        reporter.on_event(
-            f"Fetching reference subtitles for episodes {wj.candidate_episodes} …")
-        refs = await gather_references(
-            self.osub, wj.show_tmdb_id, wj.season, wj.candidate_episodes,
-            self.settings.languages.default,
-        )
-        if not refs:
-            raise RuntimeError(
-                "OpenSubtitles returned no subtitles for these episodes "
-                f"(show {wj.show_title!r} S{wj.season} E{wj.candidate_episodes}). "
-                "The show/season may be mismatched, or these episodes aren't on "
-                "OpenSubtitles — fix the show or map episodes manually.")
+        # Still identifying while it fetches, matches and maybe waits for the
+        # quota. Said here rather than left to identify_phase: READY in the
+        # store is a worker's to claim, and this job has no naming yet.
+        job.state = JobState.IDENTIFYING
+        while True:
+            reporter.on_event(
+                f"Fetching reference subtitles for episodes {wj.candidate_episodes} …")
+            cut = None
+            try:
+                refs = await gather_references(
+                    self.osub, wj.show_tmdb_id, wj.season, wj.candidate_episodes,
+                    self.settings.languages.default, stop_on_quota=True,
+                )
+            except QuotaExhausted as exc:
+                refs, cut = exc.partial, exc
+                reporter.on_event(
+                    "OpenSubtitles' download quota ran out before the references "
+                    f"for E{', E'.join(str(e) for e in exc.untried)} were fetched.")
+            if not refs and cut is None:
+                raise RuntimeError(
+                    "OpenSubtitles returned no subtitles for these episodes "
+                    f"(show {wj.show_title!r} S{wj.season} E{wj.candidate_episodes}). "
+                    "The show/season may be mismatched, or these episodes aren't on "
+                    "OpenSubtitles — fix the show or map episodes manually.")
+            if refs and self._match_titles(wj, rips, refs, reporter):
+                return True
+            if cut is None:
+                break
+            # Unsure, and some of the episodes these titles could be were never
+            # fetched. Asking you now would ask about a disc the references can
+            # still settle by themselves. The rips' text stays in memory, so
+            # nothing is ripped or OCR'd again.
+            await self._wait_for_quota(wj, reporter, cut)
+        wj.state = JobState.AWAITING_MATCH
+        reporter.on_event("Subtitle match needs confirmation — review in the UI.")
+        self._notify(f"📺 Confirm episodes: {self._name_of(wj)}",
+                     f"Job #{wj.id} — subtitle match needs your confirmation.",
+                     job_id=wj.id)
+        return False
+
+    def _match_titles(self, wj: WebJob, rips: dict[int, str], refs: dict[int, str],
+                      reporter) -> bool:
+        """Match the rips against the references and record a proposal per
+        title. True, with the job's naming set, when every title is confident."""
         # A title about twice the usual length may be a two-parter mastered as
         # one, holding two episodes. Those are matched against consecutive
         # pairs first, and everything else against the episodes left over.
@@ -2233,12 +2275,54 @@ class JobManager:
                 for m in sure
             }
             return True
-        wj.state = JobState.AWAITING_MATCH
-        reporter.on_event("Subtitle match needs confirmation — review in the UI.")
-        self._notify(f"📺 Confirm episodes: {self._name_of(wj)}",
-                     f"Job #{wj.id} — subtitle match needs your confirmation.",
-                     job_id=wj.id)
         return False
+
+    # Bounds on a quota wait: never spin, never sleep past the next day's reset.
+    _QUOTA_WAIT_MIN, _QUOTA_WAIT_MAX = 60.0, 24 * 3600.0
+
+    async def _quota_sleep(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)   # its own method, so tests can skip the wait
+
+    async def _wait_for_quota(self, wj: WebJob, reporter, cut: QuotaExhausted) -> None:
+        """Sleep until OpenSubtitles' download quota resets, then return.
+
+        The job stays IDENTIFYING: workers can't claim it, the store refresh
+        leaves it alone, and a restart resumes it (re-asking the API, which says
+        the reset time again). Failing it instead set auto-retry going every few
+        minutes, which cannot help until the reset."""
+        now = datetime.now(timezone.utc)
+        if cut.reset_at is not None:
+            delay = (cut.reset_at - now).total_seconds() + 60   # a minute's grace
+        else:
+            # No reset time: a bare 429 is most likely the per-second rate
+            # limit; anything else is the daily quota, so look again in an hour.
+            delay = 60.0 if cut.status == 429 else 3600.0
+        delay = min(max(delay, self._QUOTA_WAIT_MIN), self._QUOTA_WAIT_MAX)
+        until = now + timedelta(seconds=delay)
+        at = until.astimezone().strftime("%H:%M")
+        hours, mins = divmod(round(delay / 60), 60)
+        already = any(getattr(o, "_wait_until", None) is not None
+                      for o in self.jobs.values() if o is not wj)
+        wj._wait_until = until
+        wj.stage = f"Waiting for OpenSubtitles until {at}"
+        reporter.on_event(
+            f"Waiting for OpenSubtitles — the download quota resets at {at} "
+            f"(in {f'{hours}h{mins:02d}m' if hours else f'{mins}m'}). This carries on "
+            "by itself; “✎ Set naming” names it by hand instead.")
+        if not already:  # one push for a quota, however many discs wait on it
+            self._notify(f"⏳ Waiting for OpenSubtitles: {self._name_of(wj)}",
+                         f"Job #{wj.id} — the download quota resets at {at}; "
+                         "identifying carries on then.", job_id=wj.id)
+        self._persist(wj)
+        self.bus.publish()
+        try:
+            await self._quota_sleep(delay)
+        finally:
+            wj._wait_until = None
+            wj.stage = ""
+            # A fresh baseline, or the stall watchdog reads hours of quiet as a
+            # wedged job the moment the wait ends.
+            wj._activity_at = wj._progress_at = time.monotonic()
 
     # Re-OCR is background maintenance — refuse it while a job is actively being
     # ripped/subbed/encoded (by this box or a worker), so it can't clobber the
@@ -3688,6 +3772,9 @@ class JobManager:
             **dict(zip(("stall_kind", "stall_detail"),
                        self._stall_info(wj, live_state, stalled))),
             "lane": self._lane(wj, live_state),  # 'rip' | 'encode' | None (resting)
+            # Set while it sleeps until OpenSubtitles' quota resets.
+            "waiting_until": (wj._wait_until.isoformat()
+                              if getattr(wj, "_wait_until", None) else None),
             "priority": wj.priority,  # higher = bumped ahead in the encode queue
             "error": wj.error,
             "disc_name": wj.disc.disc_name if wj.disc else None,
