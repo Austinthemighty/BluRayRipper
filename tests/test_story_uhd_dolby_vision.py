@@ -169,7 +169,7 @@ def test_dolby_vision_takes_the_rpu_round_trip_in_order(tmp_path, monkeypatch):
     steps = []
 
     async def probe(src): return DV, 100.0
-    async def extract_hevc(src, out): steps.append("extract_hevc"); out.write_bytes(b"h")
+    async def extract_hevc(src, out, **kw): steps.append("extract_hevc"); out.write_bytes(b"h")
     async def extract_rpu(src, out, profile): steps.append("extract_rpu"); out.write_bytes(b"r")
     async def encode_hevc(src, out, **kw): steps.append("encode_hevc"); out.write_bytes(b"e")
     async def inject_rpu(src, rpu, out): steps.append("inject_rpu"); out.write_bytes(b"d")

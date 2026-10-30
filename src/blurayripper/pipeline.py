@@ -10,6 +10,7 @@ fingerprint is already known, the confirm gate is skipped automatically.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import re
@@ -1563,19 +1564,35 @@ class Pipeline:
         enc_hevc, dv_hevc = tmp / "enc.hevc", tmp / "enc_dv.hevc"
         try:
             report.on_event(f"Dolby Vision (profile {hdr.dv_profile}) — extracting RPU…")
-            await self.ffmpeg.extract_hevc(src, src_hevc)
+            await self.ffmpeg.extract_hevc(
+                src, src_hevc, duration=duration,
+                on_progress=lambda p: report.on_progress(
+                    _step_line("Extracting the DV video stream", p.fraction, p.eta_seconds),
+                    p.fraction))
+            report.on_progress("Extracting the DV RPU", None)
             await self.dovitool.extract_rpu(src_hevc, rpu, hdr.dv_profile)
+            video_bytes = _size_of(src_hevc)
             src_hevc.unlink(missing_ok=True)  # free space before the re-encode
             report.on_event("Re-encoding video (x265, HDR10 base)…")
             await self.ffmpeg.encode_hevc(
                 src, enc_hevc, hdr=hdr, duration=duration,
                 on_progress=lambda p: self._encode_progress(p, report),
                 tune_grain=tune_grain, low_priority=self.settings.encode.low_priority)
+            # dovi_tool and mkvmerge report nothing on a pipe, so these two read
+            # their progress off the output file. The injected stream is the
+            # encode plus the RPU; the MKV is that plus the source's non-video
+            # tracks (its size less the video stream copied out above).
             report.on_event("Injecting Dolby Vision RPU…")
-            await self.dovitool.inject_rpu(enc_hevc, rpu, dv_hevc)
+            async with self._progress_from_growth(
+                    dv_hevc, _size_of(enc_hevc) + _size_of(rpu),
+                    "Injecting Dolby Vision RPU", report):
+                await self.dovitool.inject_rpu(enc_hevc, rpu, dv_hevc)
             enc_hevc.unlink(missing_ok=True)
             report.on_event("Muxing DV + audio to MKV…")
-            await self.mkvtools.mux_dovi(dv_hevc, src, dst)
+            other_tracks = max(0, _size_of(src) - video_bytes) if video_bytes else 0
+            async with self._progress_from_growth(
+                    dst, _size_of(dv_hevc) + other_tracks, "Muxing DV + audio", report):
+                await self.mkvtools.mux_dovi(dv_hevc, src, dst)
         finally:
             for f in (src_hevc, rpu, enc_hevc, dv_hevc):
                 try:
@@ -2007,6 +2024,36 @@ class Pipeline:
             report.on_event(f"Subtitle extraction failed: {type(exc).__name__}: {exc}")
             return None
         return [(p, t) for t, p in kept]
+
+    @contextlib.asynccontextmanager
+    async def _progress_from_growth(self, out: Path, expected: int, label: str, report):
+        """Report a step that prints no progress from its output file's size.
+
+        Without it the stage line kept the finished encode's last "ETA 2s" for
+        the whole Dolby Vision inject and mux, minutes each on a UHD title. The
+        stat runs on a detached thread: staging is a NAS share, and a hung stat
+        must not freeze the worker."""
+        eta = _StepEta()
+        report.on_progress(_step_line(label, 0.0 if expected else None, None),
+                           0.0 if expected else None)
+
+        async def watch() -> None:
+            while True:
+                await asyncio.sleep(GROWTH_POLL_SECONDS)
+                try:
+                    size = (await in_detached_thread(out.stat)).st_size
+                except OSError:
+                    continue
+                frac = min(0.99, size / expected) if expected else None
+                report.on_progress(_step_line(label, frac, eta.update(frac)), frac)
+
+        task = asyncio.create_task(watch())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     def _encode_progress(self, p: EncodeProgress, report) -> None:
         parts = [p.state.lower()]
@@ -2518,6 +2565,47 @@ class _RipSpeed:
         if self._mbps <= 0:
             return ""
         return f" · {self._mbps:.1f} MB/s ({self._mbps / _BD_1X_MBPS:.1f}x)"
+
+
+# How often a step without its own progress output has its output file sized.
+GROWTH_POLL_SECONDS = 5.0
+
+
+class _StepEta:
+    """Seconds left on a step, from how far it has moved since first seen."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._start: tuple[float, float] | None = None
+
+    def update(self, fraction: float | None) -> int | None:
+        if fraction is None:
+            return None
+        now = self._clock()
+        if self._start is None:
+            self._start = (now, fraction)
+            return None
+        t0, f0 = self._start
+        moved = fraction - f0
+        if moved <= 0:
+            return None
+        return int((now - t0) * (1.0 - fraction) / moved)
+
+
+def _step_line(label: str, fraction: float | None, eta_seconds: int | None) -> str:
+    parts = [label]
+    if fraction is not None:
+        parts.append(f"{fraction:.0%}")
+    if eta_seconds:
+        parts.append(f"ETA {_fmt_eta(eta_seconds)}")
+    return " · ".join(parts)
+
+
+def _size_of(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
 
 
 def _fmt_eta(seconds: int) -> str:

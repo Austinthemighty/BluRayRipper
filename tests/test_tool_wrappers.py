@@ -560,6 +560,44 @@ async def test_the_dolby_vision_pass_reports_progress_against_the_given_runtime(
     assert [e.fraction for e in events] == [0.5]
 
 
+async def test_the_dolby_vision_video_copy_reports_progress_too(tmp_path, monkeypatch):
+    """Copying a UHD title's video out runs for tens of minutes before the
+    encode starts (20 on job 157), and it said nothing the whole time."""
+    out = tmp_path / "dovi" / "src.hevc"
+
+    def respond(cmd):
+        out.write_bytes(b"\x00\x00\x01\x40")
+        return ["out_time=00:15:00.000000", "speed=4.0x", "progress=continue"]
+
+    fake = _install(monkeypatch, FakeProcess(respond))
+    events: list = []
+
+    await _ff(tmp_path).extract_hevc(Path("/stage/t00.mkv"), out,
+                                     duration=3600.0, on_progress=events.append)
+
+    assert _val(fake.cmd, "-progress") == "pipe:1" and fake.cmd[-1] == str(out)
+    assert [(e.fraction, e.eta_seconds) for e in events] == [(0.25, 675)]
+
+
+async def test_a_finished_encode_carries_no_eta(tmp_path, monkeypatch):
+    """The end line came with the last speed sample, so a finished encode read
+    "done · 1 fps · ETA 2s" for as long as the next step stayed quiet."""
+    out = tmp_path / "dovi" / "enc.hevc"
+
+    def respond(cmd):
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"x")
+        return ["out_time=00:59:58.000000", "speed=1.0x", "progress=end"]
+
+    _install(monkeypatch, FakeProcess(respond))
+    events: list = []
+
+    await _ff(tmp_path).encode_hevc(Path("/stage/t00.mkv"), out, hdr=HDR10,
+                                    duration=3600.0, on_progress=events.append)
+
+    assert [(e.state, e.eta_seconds) for e in events] == [("done", None)]
+
+
 async def test_the_dolby_vision_encode_yields_to_ripping_like_any_other(
         tmp_path, monkeypatch):
     """The DV re-encode is the heaviest thing this software runs, and it runs on

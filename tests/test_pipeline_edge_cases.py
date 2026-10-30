@@ -8,6 +8,7 @@ the resulting decision (a path, a call, a flag) rather than the log line beside
 it — a wrong decision here still "succeeds" and is only noticed on the couch.
 """
 
+import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ import pytest
 
 from blurayripper.config import load_settings
 from blurayripper.models import DiscInfo, EpisodeAssignment, MediaKind, Title
+from blurayripper import pipeline as pipeline_mod
 from blurayripper.pipeline import Job, Pipeline, TitleResult
 from blurayripper.scheduler import EncodeScheduler
 from blurayripper.services.coverart import DiscArt
@@ -567,7 +569,7 @@ class _FakeFFmpeg:
         Path(dst).parent.mkdir(parents=True, exist_ok=True)
         Path(dst).write_text("hdr10")
 
-    async def extract_hevc(self, src, dst):
+    async def extract_hevc(self, src, dst, **kw):
         Path(dst).parent.mkdir(parents=True, exist_ok=True)
         Path(dst).write_text("raw")
 
@@ -727,6 +729,78 @@ async def test_dv_intermediates_are_removed_even_when_the_encode_dies(tmp_path, 
         await pipe._encode_dovi(tmp_path / "s.mkv", tmp_path / "out.mkv",
                                 HdrInfo(dv_profile=7), 7200.0, False, encode_dir, _Report())
     assert list((encode_dir / "dovi").iterdir()) == []
+
+
+class _Stages(_Report):
+    def __init__(self):
+        super().__init__()
+        self.stages = []
+
+    def on_progress(self, stage, fraction=None):
+        self.stages.append(stage)
+
+
+async def test_the_dv_inject_and_mux_report_their_own_progress(tmp_path, monkeypatch):
+    """dovi_tool and mkvmerge print nothing on a pipe, so after the x265 pass the
+    card kept "Encode: done · 1 fps · ETA 2s" through the whole inject and mux,
+    minutes each on a UHD title (job 157). Each reads its progress off its
+    output file as it grows: the injected stream against the encode plus the
+    RPU, the MKV against that stream."""
+    pipe, ff, dv = _dv_pipe(tmp_path, monkeypatch)
+    monkeypatch.setattr(pipeline_mod, "GROWTH_POLL_SECONDS", 0.01)
+
+    async def encode_hevc(src, dst, **kw):
+        Path(dst).write_bytes(b"e" * 900)
+    monkeypatch.setattr(ff, "encode_hevc", encode_hevc)
+
+    async def extract_rpu(src, dst, profile):
+        Path(dst).write_bytes(b"r" * 100)
+    monkeypatch.setattr(dv, "extract_rpu", extract_rpu)
+
+    async def grow(dst, total):
+        with open(dst, "wb") as f:
+            for _ in range(4):
+                f.write(b"x" * (total // 4))
+                f.flush()
+                await asyncio.sleep(0.06)
+
+    async def inject(enc, rpu, dst):
+        await grow(dst, 1000)                 # 900 encoded + 100 RPU
+    monkeypatch.setattr(dv, "inject_rpu", inject)
+
+    async def mux(video, src, dst):
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        await grow(dst, 1000)                 # the source has no other tracks here
+    monkeypatch.setattr(pipe.mkvtools, "mux_dovi", mux)
+
+    r = _Stages()
+    await pipe._encode_dovi(tmp_path / "s.mkv", tmp_path / "out.mkv",
+                            HdrInfo(dv_profile=7), 7200.0, False, tmp_path / "enc", r)
+
+    for label in ("Injecting Dolby Vision RPU", "Muxing DV + audio"):
+        seen = {s.split(" · ")[1] for s in r.stages
+                if s.startswith(label + " · ")}
+        assert seen & {"25%", "50%", "75%"}, (label, r.stages)
+
+
+def test_a_step_eta_comes_from_how_fast_it_has_moved_so_far():
+    """The first sighting only starts the clock; after that the time left is the
+    time taken so far, scaled by how much is left against how much was done."""
+    now = [100.0]
+    eta = pipeline_mod._StepEta(clock=lambda: now[0])
+    assert eta.update(0.10) is None
+    now[0] = 110.0
+    assert eta.update(0.30) == 35          # 10s for 20%, 70% to go
+    now[0] = 120.0
+    assert eta.update(0.30) == 70          # stalled: the estimate stretches out
+    assert eta.update(None) is None
+
+
+def test_a_step_line_reads_like_the_encode_line():
+    assert pipeline_mod._step_line("Muxing DV + audio", 0.42, 185) == \
+        "Muxing DV + audio · 42% · ETA 3m05s"
+    assert pipeline_mod._step_line("Extracting the DV RPU", None, None) == \
+        "Extracting the DV RPU"
 
 
 # --- rip acceptance, eject + notify after the last rip --------------------

@@ -50,8 +50,10 @@ def _progress_handler(duration: float, on_progress):
                 pass
         elif k == "progress" and on_progress is not None:
             frac = min(0.999, st["t"] / duration) if duration else None
+            # At the end there is nothing left: the last speed sample made a
+            # finished encode read "done · ETA 2s" until the next step spoke.
             eta = (int((duration - st["t"]) / st["speed"])
-                   if (duration and st["speed"]) else None)
+                   if (duration and st["speed"] and v != "end") else None)
             on_progress(EncodeProgress(
                 state="done" if v == "end" else "working",
                 fraction=1.0 if v == "end" else frac,
@@ -198,12 +200,15 @@ class FFmpeg:
             raise RuntimeError(f"ffmpeg produced no output at {dst}")
         return dst
 
-    async def extract_hevc(self, src: Path, out: Path) -> Path:
-        """Copy the source video track to a raw Annex-B HEVC file (for dovi_tool)."""
+    async def extract_hevc(self, src: Path, out: Path, *, duration: float = 0.0,
+                           on_progress=None) -> Path:
+        """Copy the source video track to a raw Annex-B HEVC file (for dovi_tool).
+        Tens of GB on a UHD title, so it reports progress the way an encode does."""
         out.parent.mkdir(parents=True, exist_ok=True)
         cmd = [self._settings.tools.require("ffmpeg"), "-y", "-i", str(src),
-               "-map", "0:v:0", "-c:v", "copy", "-f", "hevc", str(out)]
-        await process.run(cmd)
+               "-map", "0:v:0", "-c:v", "copy", "-f", "hevc",
+               "-progress", "pipe:1", "-nostats", str(out)]
+        await process.run(cmd, on_line=_progress_handler(duration, on_progress))
         if not out.exists() or out.stat().st_size == 0:
             # Same guard the two encode wrappers carry. An empty stream here
             # reaches dovi_tool, which reports a confusing RPU-extraction error
