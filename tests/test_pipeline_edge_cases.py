@@ -731,6 +731,26 @@ async def test_dv_intermediates_are_removed_even_when_the_encode_dies(tmp_path, 
     assert list((encode_dir / "dovi").iterdir()) == []
 
 
+async def test_measured_title_heights_are_kept_on_the_job(tmp_path, monkeypatch):
+    """A worker with a max encode height reads them off the job to pass over a
+    UHD job without claiming it."""
+    pipe = _pipe(tmp_path, monkeypatch)
+    ripped = pipe.settings.storage.staging_dir / "job_5" / "rip" / "t000" / "a.mkv"
+    ripped.parent.mkdir(parents=True)
+    ripped.write_text("x")
+    job = Job(source="disc:0")
+    job.selected_title_ids = [0, 1]
+    job.checkpoints = {0: {"ripped_path": "job_5/rip/t000/a.mkv"},
+                       1: {"ripped_path": "job_5/rip/t001/gone.mkv"}}
+
+    async def probe(path, report): return 2160
+    monkeypatch.setattr(pipe, "_probe_height", probe)
+
+    assert await pipe.title_heights(job, tmp_path, _Report()) == [2160, 0]
+    assert job.checkpoints[0]["height"] == 2160
+    assert "height" not in job.checkpoints[1]         # unmeasured stays unrecorded
+
+
 class _Stages(_Report):
     def __init__(self):
         super().__init__()

@@ -255,6 +255,10 @@ class ClusterSettings:
     # if every title is <= this height; taller (e.g. UHD 2160p) jobs go to the
     # workers. 0 = never encode locally (rip box only rips). 1080 = do <=1080p.
     local_encode_max_height: int = 0
+    # A WORKER's own limit: it never claims a job with a title taller than this
+    # (1080 keeps a slow box off UHD). 0 = any height. local_encode_max_height
+    # above is the rip box's and does nothing on a worker.
+    worker_max_height: int = 0
     # When True, subtitle extraction + OCR move OFF the rip box onto the workers
     # (they run right before the encode). The rip box then only rips + resolves
     # grain, so restarting `serve` never kills in-flight extraction/OCR/encode.
@@ -589,6 +593,9 @@ def load_settings(config_dir: Path | None = None, extra_overlay: dict | None = N
         local_encode_max_height=int(
             _override("BLURAYRIPPER_LOCAL_ENCODE_MAX_HEIGHT",
                       cluster_cfg.get("local_encode_max_height")) or 0),
+        worker_max_height=int(
+            _override("BLURAYRIPPER_WORKER_MAX_HEIGHT",
+                      cluster_cfg.get("worker_max_height")) or 0),
         worker_does_subs=_bool_override(
             "BLURAYRIPPER_WORKER_DOES_SUBS", cluster_cfg.get("worker_does_subs"), False),
         offline_alert_seconds=int(cluster_cfg.get("offline_alert_seconds", 300)),

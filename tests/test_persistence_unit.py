@@ -39,6 +39,7 @@ from blurayripper.persistence import (
     disc_to_dict,
     make_store,
     signal_key,
+    too_tall,
 )
 from blurayripper.pipeline import JobState
 
@@ -766,3 +767,57 @@ def test_a_heartbeat_with_no_address_keeps_the_one_already_known(monkeypatch):
     store.record_worker("ripbox-2", "1.4.0", None, "idle", "run-abc", None)
     (sql, _), = conn.executed
     assert "address = COALESCE(EXCLUDED.address, workers.address)" in sql
+
+
+# --- a worker's max encode height -----------------------------------------
+
+def _measured(job_id, *heights):
+    return JobRecord(id=job_id, source="disc:0", state="ready",
+                     selected_title_ids=list(range(len(heights))),
+                     checkpoints={str(i): {"height": h} for i, h in enumerate(heights)})
+
+
+def test_too_tall_counts_only_the_titles_already_measured():
+    """An unmeasured title is not held against a job: the worker that claims it
+    measures it and puts it back if it is too tall. Otherwise every job queued
+    before heights were recorded would be invisible to a capped worker."""
+    assert too_tall(_measured(1, 1080, 2160), 1080)
+    assert not too_tall(_measured(1, 720, 1080), 1080)
+    assert not too_tall(_measured(1, 2160), 0)                  # 0 = no limit
+    unmeasured = JobRecord(id=1, source="disc:0", state="ready", selected_title_ids=[0],
+                           checkpoints={"0": {"ripped_path": "job_1/rip/t000/a.mkv"}})
+    assert not too_tall(unmeasured, 1080)
+
+
+def test_a_capped_claim_passes_over_a_measured_uhd_job(monkeypatch):
+    store = MemoryStore()
+    store.save(_measured(1, 2160))
+    store.save(_measured(2, 1080))
+
+    assert store.claim_next("SteamMachine", ["ready"], max_height=1080).id == 2
+    assert store.claim_next("handbreak01", ["ready"]).id == 1   # uncapped takes it
+
+
+def test_the_postgres_capped_claim_reads_the_candidates_and_claims_one_that_fits(
+        monkeypatch):
+    """Same candidates and order as the one-row claim, but read in full so the
+    height check runs in Python; only the job it takes gets claimed."""
+    tall, fits = _measured(1, 2160), _measured(2, 1080)
+    store, conn = _pg(monkeypatch,
+                      [(1, tall.to_json()), (2, json.dumps(fits.to_json()))], [])
+
+    assert store.claim_next("SteamMachine", ["ready"], 90, max_height=1080) == fits
+
+    (select_sql, select_params), (update_sql, update_params) = conn.executed
+    assert select_params == (["ready"], 90)
+    assert "FOR UPDATE SKIP LOCKED" in select_sql and "LIMIT" not in select_sql
+    assert "ORDER BY COALESCE((data->>'priority')::int, 0) DESC, id ASC" in select_sql
+    assert "claimed_by IS NULL OR heartbeat < now() - make_interval(secs => %s)" in select_sql
+    assert "SET claimed_by = %s, heartbeat = now() WHERE id = %s" in update_sql
+    assert update_params == ("SteamMachine", 2)
+
+
+def test_the_postgres_capped_claim_claims_nothing_when_every_job_is_too_tall(monkeypatch):
+    store, conn = _pg(monkeypatch, [(1, _measured(1, 2160).to_json())])
+    assert store.claim_next("SteamMachine", ["ready"], max_height=1080) is None
+    assert len(conn.executed) == 1 and conn.closed      # read, but no UPDATE

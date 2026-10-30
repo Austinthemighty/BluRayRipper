@@ -66,27 +66,27 @@ def test_each_layer_in_turn_wins_over_the_one_below_it(tmp_path):
     web UI, the cluster's per-worker page, and the box's own secrets.env — so an
     inversion anywhere in the order means one of them is quietly ignored.
     """
-    _toml(tmp_path, "[cluster]\nlocal_encode_max_height = 720\n")
-    assert load_settings(tmp_path).cluster.local_encode_max_height == 720
+    _toml(tmp_path, "[cluster]\nworker_max_height = 720\n")
+    assert load_settings(tmp_path).cluster.worker_max_height == 720
 
     # 2. the web-edited overlay, written through the real save path.
-    ss.save_overlay(tmp_path, {"cluster": {"local_encode_max_height": "1080"}})
-    assert load_settings(tmp_path).cluster.local_encode_max_height == 1080
+    ss.save_overlay(tmp_path, {"cluster": {"worker_max_height": "1080"}})
+    assert load_settings(tmp_path).cluster.worker_max_height == 1080
 
     # 3. a per-worker overlay held in the shared store.
     store = Durable()
-    ss.save_settings(tmp_path, {"cluster": {"local_encode_max_height": "2160"}},
+    ss.save_settings(tmp_path, {"cluster": {"worker_max_height": "2160"}},
                      scope="w1", store=store)
     worker_overlay = store.get_worker_settings("w1")
     assert load_settings(tmp_path, extra_overlay=worker_overlay
-                         ).cluster.local_encode_max_height == 2160
+                         ).cluster.worker_max_height == 2160
     # ...and the same config dir, read WITHOUT that worker's overlay, is untouched.
-    assert load_settings(tmp_path).cluster.local_encode_max_height == 1080
+    assert load_settings(tmp_path).cluster.worker_max_height == 1080
 
     # 4. this box's secrets.env beats everything, worker overlay included.
-    _secrets(tmp_path, "BLURAYRIPPER_LOCAL_ENCODE_MAX_HEIGHT=480\n")
+    _secrets(tmp_path, "BLURAYRIPPER_WORKER_MAX_HEIGHT=480\n")
     assert load_settings(tmp_path, extra_overlay=worker_overlay
-                         ).cluster.local_encode_max_height == 480
+                         ).cluster.worker_max_height == 480
 
 
 def test_a_process_env_var_outranks_the_same_key_in_secrets_env(tmp_path, monkeypatch):
@@ -329,3 +329,11 @@ def test_an_unreachable_database_still_lets_the_box_boot_on_its_own_secrets(
 
     assert s.tmdb_api_key == "tmdb-local"
     assert s.opensubtitles_api_key is None
+
+
+def test_the_height_cap_offered_per_worker_is_the_one_a_worker_reads():
+    """Local encode max height was offered on each worker's settings page, but
+    only serve reads it and serve never applies a worker's overrides, so 1080 on
+    SteamMachine looked like a cap and did nothing."""
+    assert ("cluster", "worker_max_height") in ss._WORKER_KEYS
+    assert ("cluster", "local_encode_max_height") not in ss._WORKER_KEYS

@@ -748,6 +748,10 @@ class Pipeline:
             h = 0
             if ripped is not None and ripped.exists():
                 h = await self._probe_height(ripped, report) or 0
+            if h:
+                # Kept on the job, so a worker with a max encode height can pass
+                # over a UHD job without claiming it (persistence.too_tall).
+                cp["height"] = h
             heights.append(h)
         return heights
 

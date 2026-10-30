@@ -2634,10 +2634,10 @@ class JobManager:
                         job, staging_root, reporter, include_subs=include_subs)
                     self.pipeline._persist_mapping(job, reporter)
                     limit = self.settings.cluster.local_encode_max_height
-                    heights = (
-                        await self.pipeline.title_heights(job, staging_root, reporter)
-                        if limit else []
-                    )
+                    # Measured even when this box never encodes: title_heights
+                    # keeps them on the job, and a worker with a max encode
+                    # height reads them to pass over a job it would not take.
+                    heights = await self.pipeline.title_heights(job, staging_root, reporter)
                 encode_here = bool(limit) and bool(heights) and all(0 < h <= limit for h in heights)
                 if not encode_here:
                     job.state = JobState.READY

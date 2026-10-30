@@ -386,6 +386,31 @@ async def test_clustered_local_encode_for_sub_1080_titles(manager, monkeypatch):
     assert wj.state is JobState.DONE
 
 
+async def test_a_job_queued_for_workers_is_measured_even_with_no_local_encoding(
+        manager, monkeypatch):
+    """The heights decide which workers may take it, so they are measured even
+    when this box never encodes (local max height 0)."""
+    manager.settings.cluster.use_workers = True
+    manager.settings.cluster.local_encode_max_height = 0
+    measured = []
+
+    async def heights(job, staging_root, report):
+        measured.append(job)
+        return [2160]
+
+    encoded = _patch_cluster_encode(manager, monkeypatch, [2160])
+    monkeypatch.setattr(manager.pipeline, "title_heights", heights)
+
+    wj = manager.add_disc("disc:0")
+    await _settle()
+    manager.set_titles(wj.id, [0])
+    manager.set_mapping(wj.id, [EpisodeAssignment(0, MediaKind.MOVIE, "WarGames", 1983)])
+    await _settle()
+
+    assert measured and not encoded
+    assert wj.state is JobState.READY
+
+
 async def test_clustered_uhd_still_enqueues_for_worker(manager, monkeypatch):
     manager.settings.cluster.use_workers = True
     manager.settings.cluster.local_encode_max_height = 1080

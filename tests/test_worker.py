@@ -152,3 +152,70 @@ async def test_worker_releases_job_still_being_ripped(tmp_path, monkeypatch):
     await runner.run()
     assert processed == []                                  # never handed to _process
     assert runner.store.claim_next("w2", ["ready"]).id == 9  # released -> claimable again
+
+
+async def test_a_capped_worker_passes_over_a_job_too_tall_for_it(tmp_path, monkeypatch):
+    """SteamMachine was set to 1080 with "Local encode max height", which only
+    the rip box reads, and went on taking 4K encodes. A worker's own max encode
+    height keeps it off a taller job, including one queued before serve recorded
+    heights: measured on claim, handed back, and its heights saved so the next
+    claim skips it outright and another worker can take it."""
+    from blurayripper.pipeline import Pipeline
+
+    settings = load_settings()
+    stage = tmp_path / "stage"
+    monkeypatch.setattr(settings.storage, "staging_dir", stage)
+    monkeypatch.setattr(settings, "database_url", "memory://test")
+    settings.cluster.worker_poll_seconds = 0
+    settings.cluster.worker_max_height = 1080
+    monkeypatch.setattr("blurayripper.worker.load_settings", lambda *a, **k: settings)
+    runner = WorkerRunner(settings, worker_id="SteamMachine")
+    runner.store = MemoryStore()
+    for job_id, name in ((11, "uhd"), (12, "hd")):
+        f = stage / f"job_{job_id}" / "rip" / "t000" / f"{name}.mkv"
+        f.parent.mkdir(parents=True)
+        f.write_text("x")
+        runner.store.save(JobRecord(
+            id=job_id, source="disc:0", state="ready", selected_title_ids=[0],
+            checkpoints={"0": {"ripped_path": f"job_{job_id}/rip/t000/{name}.mkv"}}))
+
+    async def probe(self, path, report):
+        return 2160 if "uhd" in str(path) else 1080
+    monkeypatch.setattr(Pipeline, "_probe_height", probe)
+
+    processed = []
+
+    async def fake_process(rec):
+        processed.append(rec.id)
+        runner.request_stop()
+    monkeypatch.setattr(runner, "_process", fake_process)
+
+    await runner.run()
+
+    assert processed == [12]
+    uhd = next(r for r in runner.store.load_all() if r.id == 11)
+    assert uhd.checkpoints["0"]["height"] == 2160
+    assert any("Passed over by SteamMachine: 2160p" in line for line in uhd.log)
+    assert runner.store.claim_next("SteamMachine", ["ready"], max_height=1080) is None
+    assert runner.store.claim_next("handbreak01", ["ready"]).id == 11
+
+
+async def test_an_uncapped_worker_claims_exactly_as_before(tmp_path, monkeypatch):
+    """No cap, no keyword: the plain one-row claim, untouched."""
+    settings = load_settings()
+    monkeypatch.setattr(settings, "database_url", "memory://test")
+    settings.cluster.worker_poll_seconds = 0
+    monkeypatch.setattr("blurayripper.worker.load_settings", lambda *a, **k: settings)
+    runner = WorkerRunner(settings, worker_id="handbreak01")
+    runner.store = MemoryStore()
+    seen = []
+
+    def claim(*args, **kwargs):
+        seen.append(kwargs)
+        runner.request_stop()
+        return None
+    runner.store.claim_next = claim
+
+    await runner.run()
+
+    assert settings.cluster.worker_max_height == 0 and seen == [{}]

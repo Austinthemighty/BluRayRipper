@@ -112,7 +112,8 @@ SCHEMA: list[tuple[str, list[Field]]] = [
         Field("cluster", "worker_poll_seconds", "int", "Worker poll (s)", 5, "How often an idle worker checks the shared queue for a job to claim.", min=0),
         Field("cluster", "heartbeat_seconds", "int", "Heartbeat (s)", 15, "How often a busy worker proves it's still alive on its claimed job.", min=0),
         Field("cluster", "stale_after_seconds", "int", "Stale reclaim (s)", 180, "Reclaim a job for another worker if its worker goes silent this long (crash/restart/power-off).", min=0),
-        Field("cluster", "local_encode_max_height", "int", "Local encode max height", 0, "In clustered mode, the rip box encodes a job itself if every title is <= this height (e.g. 1080). 0 = rip box never encodes (workers do all).", env="BLURAYRIPPER_LOCAL_ENCODE_MAX_HEIGHT", min=0),
+        Field("cluster", "local_encode_max_height", "int", "Local encode max height", 0, "Rip box only: in clustered mode it encodes a job itself if every title is <= this height (e.g. 1080). 0 = rip box never encodes (workers do all). To keep a worker off UHD, use Worker max encode height.", env="BLURAYRIPPER_LOCAL_ENCODE_MAX_HEIGHT", min=0),
+        Field("cluster", "worker_max_height", "int", "Worker max encode height", 0, "Workers only: the tallest job this box takes (e.g. 1080 keeps it off UHD). 0 = any height. A job's titles are measured when it is queued; an older job is measured when a capped worker claims it, and put back if it is too tall.", env="BLURAYRIPPER_WORKER_MAX_HEIGHT", min=0),
         Field("cluster", "worker_does_subs", "bool", "Workers do subtitles", False, "Move subtitle extraction + OCR off the rip box onto the workers (so restarting serve never kills that work). Needs Use workers.", env="BLURAYRIPPER_WORKER_DOES_SUBS"),
         Field("cluster", "offline_alert_seconds", "int", "Offline alert (s)", 300, "Push a notification when a box that was online stops reporting for this long. The rip box watches the workers; each worker watches the rip box (an offline server can't report itself). 0 = off. Needs a shared database and a Notify URL.", min=0),
         Field("cluster", "worker_restart_after_days", "float", "Worker restart after (days)", 0, "Restart a worker once it has been up this long, for hygiene. It drains first — the restart happens between jobs, never mid-encode — so it can take longer if a job is running. 0 = off.", min=0),
@@ -184,7 +185,9 @@ _WORKER_KEYS: set[tuple[str, str]] = {
     ("subtitles", "split_long_lines"), ("subtitles", "balance_lines"),
     ("subtitles", "remove_text_for_hi"),
     ("queue", "encode_capacity"),
-    ("cluster", "local_encode_max_height"), ("cluster", "worker_does_subs"),
+    # Not local_encode_max_height: only serve reads it, and serve never applies a
+    # worker's overrides, so offering it per worker looked like a cap and was not.
+    ("cluster", "worker_max_height"), ("cluster", "worker_does_subs"),
 }
 
 

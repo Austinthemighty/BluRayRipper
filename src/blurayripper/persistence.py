@@ -112,6 +112,21 @@ class JobRecord:
         return cls(**{k: v for k, v in data.items() if k in known})
 
 
+def too_tall(record: JobRecord, max_height: int) -> bool:
+    """Has a title of this job been measured taller than ``max_height``?
+
+    0 means no limit. A title not measured yet doesn't count: the worker that
+    claims the job measures it (Worker._too_tall_here) and puts it back if it is
+    too tall, so jobs queued before heights were recorded still flow."""
+    if not max_height:
+        return False
+    for cp in (record.checkpoints or {}).values():
+        h = cp.get("height") if isinstance(cp, dict) else None
+        if isinstance(h, int) and h > max_height:
+            return True
+    return False
+
+
 # --- disc / assignment (de)serialization (shared) -----------------------
 
 def disc_to_dict(disc: DiscInfo | None) -> dict | None:
@@ -224,11 +239,13 @@ class Store(ABC):
 
     @abstractmethod
     def claim_next(
-        self, worker_id: str, states: list[str], stale_after_seconds: int = 180
+        self, worker_id: str, states: list[str], stale_after_seconds: int = 180,
+        *, max_height: int = 0,
     ) -> JobRecord | None:
         """Atomically claim one job whose state is claimable and that is either
-        unclaimed or whose worker has gone stale (no heartbeat). Returns the
-        claimed record, or None if nothing is available."""
+        unclaimed or whose worker has gone stale (no heartbeat). With
+        ``max_height``, skip a job with a title measured taller than that.
+        Returns the claimed record, or None if nothing is available."""
 
     @abstractmethod
     def heartbeat(self, job_id: int, worker_id: str) -> None:
@@ -367,12 +384,15 @@ class MemoryStore(Store):
         self._claim_owner.pop(job_id, None)
 
     def claim_next(
-        self, worker_id: str, states: list[str], stale_after_seconds: int = 180
+        self, worker_id: str, states: list[str], stale_after_seconds: int = 180,
+        *, max_height: int = 0,
     ) -> JobRecord | None:
         # Single-process: no real concurrency/heartbeat staleness to worry about.
         # Highest priority first, then oldest (lowest id).
         ordered = sorted(self._rows.items(), key=lambda kv: (-int(kv[1].get("priority", 0) or 0), kv[0]))
         for jid, data in ordered:
+            if max_height and too_tall(JobRecord.from_json(data), max_height):
+                continue
             if data.get("state") in states and jid not in self._claimed:
                 self._claimed.add(jid)
                 self._claim_owner[jid] = worker_id
@@ -511,8 +531,11 @@ class PostgresStore(Store):
             cur.execute("DELETE FROM jobs WHERE id = %s", (job_id,))
 
     def claim_next(
-        self, worker_id: str, states: list[str], stale_after_seconds: int = 180
+        self, worker_id: str, states: list[str], stale_after_seconds: int = 180,
+        *, max_height: int = 0,
     ) -> JobRecord | None:
+        if max_height:
+            return self._claim_fitting(worker_id, states, stale_after_seconds, max_height)
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE jobs SET claimed_by = %s, heartbeat = now() "
@@ -530,6 +553,36 @@ class PostgresStore(Store):
             return None
         data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
         return JobRecord.from_json(data)
+
+    def _claim_fitting(self, worker_id: str, states: list[str],
+                       stale_after_seconds: int, max_height: int) -> JobRecord | None:
+        """claim_next for a height-capped worker.
+
+        The same candidates in the same order as the one-row claim, but every
+        one is locked and read so the height check runs here in Python (see
+        too_tall) rather than in SQL over the checkpoint JSON. The locks last
+        only this transaction; SKIP LOCKED means another worker polling at the
+        same moment passes over them and tries again on its next poll."""
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, data FROM jobs"
+                "  WHERE state = ANY(%s)"
+                "    AND (claimed_by IS NULL OR heartbeat < now() - make_interval(secs => %s))"
+                "  ORDER BY COALESCE((data->>'priority')::int, 0) DESC, id ASC "
+                "  FOR UPDATE SKIP LOCKED",
+                (list(states), stale_after_seconds),
+            )
+            for job_id, data in cur.fetchall():
+                record = JobRecord.from_json(
+                    data if isinstance(data, dict) else json.loads(data))
+                if too_tall(record, max_height):
+                    continue
+                cur.execute(
+                    "UPDATE jobs SET claimed_by = %s, heartbeat = now() WHERE id = %s",
+                    (worker_id, job_id),
+                )
+                return record
+        return None
 
     def heartbeat(self, job_id: int, worker_id: str) -> None:
         with self._connect() as conn, conn.cursor() as cur:

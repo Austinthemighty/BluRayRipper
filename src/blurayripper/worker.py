@@ -178,6 +178,10 @@ class WorkerRunner:
         # file that no longer exists eventually gets parked instead of declined
         # for ever.
         self._refused_since: dict[int, float] = {}
+        # When this box last passed over each job as taller than its max encode
+        # height. The store skips such a job once its heights are saved; a job
+        # offered straight back means they did not stick.
+        self._passed_over: dict[int, float] = {}
         # Set when a drain should be followed by a git-pull + restart (from the
         # 'u' key OR a cluster-wide "update all workers" signal from the server).
         self.update_requested = False   # pull before restarting
@@ -375,10 +379,14 @@ class WorkerRunner:
                 self._register(None, hold)
                 await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
                 continue
+            cap = self.settings.cluster.worker_max_height
             try:
+                # The keyword only when capped: an uncapped worker keeps the
+                # plain one-row claim.
                 rec = self.store.claim_next(
                     self.worker_id, self._claimable_states(),
-                    self.settings.cluster.stale_after_seconds)
+                    self.settings.cluster.stale_after_seconds,
+                    **({"max_height": cap} if cap else {}))
                 last_error = None
             except Exception as exc:
                 # Transient DB outage (e.g. a storage blip): keep the worker
@@ -423,8 +431,51 @@ class WorkerRunner:
                 await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
                 continue
             self._refused = 0       # something was workable; stop reporting refusals
+            if cap and await self._too_tall_here(rec, cap):
+                continue
             self._apply_worker_settings()       # apply latest override before this job
             await self._process(rec)
+
+    async def _too_tall_here(self, rec: JobRecord, cap: int) -> bool:
+        """Measure a claimed job against this box's max encode height, and put
+        it back if a title is taller.
+
+        Serve records each title's height when it queues a job, and the claim
+        already passed over any it knew to be too tall. A job queued before that
+        has no heights, so it is measured here, and the heights are saved on the
+        job either way: the next claim then filters it in the store instead of
+        measuring it again."""
+        recorded = [(rec.checkpoints.get(str(t)) or rec.checkpoints.get(t) or {}).get("height")
+                    for t in rec.selected_title_ids]
+        if recorded and all(recorded):
+            return False               # all measured, and the claim checked them
+        job = job_from_record(rec)     # shares rec's checkpoint dicts
+        reporter = WorkerReporter(self.store, self.worker_id, rec.id, job)
+        heights = await self.pipeline.title_heights(
+            job, self.settings.storage.staging_dir / f"job_{rec.id}", reporter)
+        tallest = max(heights, default=0)
+        if tallest <= cap:
+            return False               # an unmeasurable title (0) is not refused
+        last = self._passed_over.get(rec.id)
+        self._passed_over[rec.id] = time.monotonic()
+        if last is None:
+            rec.log = list(rec.log or []) + [stamp_log(
+                f"Passed over by {self.worker_id}: {tallest}p is above its "
+                f"{cap}p max encode height.")]
+        with contextlib.suppress(Exception):
+            self.store.save_if_owner(rec, self.worker_id)
+        with contextlib.suppress(Exception):
+            self.store.release(rec.id, self.worker_id)
+        self._register(None, f"idle — passed over job {rec.id} ({tallest}p > {cap}p)")
+        print(f"Job {rec.id} is {tallest}p, above this box's {cap}p max encode "
+              "height — released for another worker.", flush=True)
+        if last is not None and time.monotonic() - last < 60:
+            # Straight back after being passed over: its heights were lost
+            # (serve re-saved the job without them) or never saved. They were
+            # just written again; pause so a store that won't keep them can't
+            # spin this box measuring the same job.
+            await asyncio.sleep(self.settings.cluster.worker_poll_seconds)
+        return True
 
     def _claimable_states(self) -> list[str]:
         """Which job states this worker may claim. The subtitle states are only
