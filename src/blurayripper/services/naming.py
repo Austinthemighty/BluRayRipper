@@ -69,11 +69,16 @@ def _normalize_separators(query: str) -> str:
     (``HOW_I_MET_YOUR_MOTHER_S3D1``) are split apart too. As one token, neither
     edge between them is a ``\\b``, so both were missed — no season, no disc, no
     box-set plan row — and "S3D1" stayed on the TMDB search.
+
+    So are a descriptor word and its number (``LANDMAN_SEASON2``,
+    ``BREAKING_BAD_S5_DISC1``). The season was read, but with no ``\b`` after
+    the word nothing peeled it, and "LANDMAN SEASON2" went to TMDB.
     """
     q = (query or "").strip().replace("_", " ")
     if "." in q and " " not in q:
         q = q.replace(".", " ")
     q = re.sub(r"\b(s0*\d{1,2})(d0*\d{1,2})\b", r"\1 \2", q, flags=re.IGNORECASE)
+    q = re.sub(r"\b(season|disc|disk)(\d{1,2})\b", r"\1 \2", q, flags=re.IGNORECASE)
     return re.sub(r"\s{2,}", " ", q).strip()
 
 
@@ -250,6 +255,32 @@ def clean_tmdb_query(query: str, kind: str = "movie") -> tuple[str, int | None, 
 
     q = re.sub(r"\s{2,}", " ", q).strip()
     return (q or query.strip()), year, season
+
+
+# What a label is made of besides the show: descriptors, their numbers, and
+# separators. A label of nothing else (SEASON_1_DISC_1) names no show.
+_DESCRIPTOR_TOKEN = re.compile(
+    rf"^(?:season|seasons|disc|disk|vol|volume|ntsc|pal|s0*\d+|d0*\d+|\d+|"
+    rf"{_NUMBER_WORD_RE}|{_ORDINAL_WORD_RE})$", re.IGNORECASE)
+
+
+def label_stem(label: str | None) -> str | None:
+    """The show part of a disc label, folded so every disc of one set gives the
+    same answer: ``HIMYM_S1_D3`` and ``HIMYM_S2_D1`` both give ``"himym"``.
+
+    Box-set mode uses it to find the earlier discs of a set. None when the label
+    names no show at all (``SEASON_1_DISC_1``, ``DISC_1``): two such discs are
+    no more likely to be one set than any other two, and treating them as one
+    would name the second after the first."""
+    raw = (label or "").strip()
+    title, _year, _season = clean_tmdb_query(raw, "tv")
+    words = re.sub(r"[^0-9a-z]+", " ",
+                   _normalize_separators(title).replace("&", " and ").casefold()).split()
+    # clean_tmdb_query hands back the whole label when peeling leaves nothing.
+    # A show that is itself a number (24_SEASON_1_DISC_1 -> "24") was peeled to.
+    if not words or (title == raw and all(_DESCRIPTOR_TOKEN.match(w) for w in words)):
+        return None
+    return " ".join(words)
 
 
 def _title_with_year(title: str, year: int | None) -> str:

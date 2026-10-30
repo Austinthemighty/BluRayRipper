@@ -306,3 +306,34 @@ def test_a_title_holding_two_episodes_is_named_for_both():
     assert a.episodes == [11, 12]
     assert EpisodeAssignment(3, MediaKind.TV, "X", season=8, episode=13).episodes == [13]
     assert EpisodeAssignment(0, MediaKind.MOVIE, "X").episodes == []
+
+
+# --- a descriptor glued to its number, and the show part of a label ---------------------
+
+def test_a_season_or_disc_word_run_into_its_number_is_still_peeled():
+    """LANDMAN_SEASON2 read as season 2, but "SEASON2" stayed on the TMDB
+    search: with no word boundary after "SEASON" the tail never peeled it."""
+    assert naming.clean_tmdb_query("LANDMAN_SEASON2", "tv") == ("LANDMAN", None, 2)
+    assert naming.clean_tmdb_query("BREAKING_BAD_S5_DISC1", "tv") == ("BREAKING BAD", None, 5)
+    assert naming.disc_number("BREAKING_BAD_S5_DISC1") == 1
+    assert naming.disc_number("THE_WIRE_SEASON_1_DISK2") == 2
+
+
+def test_every_disc_of_a_set_has_the_same_label_stem():
+    stem = naming.label_stem
+    assert stem("HIMYM_S1_D3") == stem("HIMYM_S2_D1") == stem("HIMYM_S1D3") == "himym"
+    assert (stem("HOW_I_MET_YOUR_MOTHER_S2_D1_US")
+            == stem("How I Met Your Mother: Season 1 (Disc 3)")
+            == stem("HOW_I_MET_YOUR_MOTHER_S9") == "how i met your mother")
+    assert stem("LANDMAN_SEASON2") == stem("LANDMAN_SEASON_1") == "landman"
+    assert stem("Law & Order S1 D1") == stem("LAW_AND_ORDER_S2_D1")
+    assert stem("HIMYM_S1_D3") != stem("HAWAII_FIVE_0_S1_D4")
+
+
+def test_a_label_of_nothing_but_descriptors_names_no_show():
+    """Two discs labelled SEASON_1_DISC_1 are no more one set than any other
+    two; giving them a shared stem would name the second after the first."""
+    for label in ("SEASON_1_DISC_1", "DISC_1", "S1_D2", "", None):
+        assert naming.label_stem(label) is None, label
+    assert naming.label_stem("24_SEASON_1_DISC_1") == "24"   # a show that is a number
+    assert naming.label_stem("LANDMAN") == "landman"         # nothing to peel at all
