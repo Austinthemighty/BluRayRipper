@@ -905,7 +905,7 @@ def test_notify_test_says_unconfigured_without_sending(client, manager, monkeypa
     import blurayripper.web.app as app_mod
     sent = []
 
-    async def fake_notify(url, title, message, priority):
+    async def fake_notify(url, title, message, priority, click=None):
         sent.append(url)
         return True
     monkeypatch.setattr(app_mod, "send_notify", fake_notify)
@@ -920,7 +920,7 @@ def test_notify_test_sends_at_the_attention_priority(client, app, monkeypatch):
     import blurayripper.web.app as app_mod
     calls = []
 
-    async def fake_notify(url, title, message, priority):
+    async def fake_notify(url, title, message, priority, click=None):
         calls.append((url, title, priority))
         return True
     monkeypatch.setattr(app_mod, "send_notify", fake_notify)
@@ -945,7 +945,7 @@ def test_settings_notify_test_uses_the_settings_just_saved(client, monkeypatch, 
 
     seen = {}
 
-    async def fake_notify(url, title, message, priority):
+    async def fake_notify(url, title, message, priority, click=None):
         seen["url"], seen["priority"] = url, priority
         return True
     monkeypatch.setattr(notify_mod, "notify", fake_notify)
@@ -966,7 +966,7 @@ def test_settings_notify_test_reports_an_unreachable_url(client, monkeypatch, tm
     fresh.notify_url = "https://ntfy.example/bad"
     monkeypatch.setattr(config_mod, "load_settings", lambda *a, **k: fresh)
 
-    async def fake_notify(url, title, message, priority):
+    async def fake_notify(url, title, message, priority, click=None):
         return False
     monkeypatch.setattr(notify_mod, "notify", fake_notify)
 

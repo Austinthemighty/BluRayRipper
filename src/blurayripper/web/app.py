@@ -34,6 +34,7 @@ from ..settings_store import save_settings, settings_ui_payload
 from ..models import EpisodeAssignment, MediaKind
 from ..services import naming
 from ..services.metadata import MetadataError, TMDBClient
+from ..services.notify import click_link
 from ..services.notify import notify as send_notify
 from ..services.opensubtitles import OpenSubtitlesError
 from ..tools.eject import TRAY_TIMEOUT, close_tray, eject
@@ -733,7 +734,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"configured": False}
         ok = await send_notify(
             url, "🔔 BluRayRipper test",
-            "Test notification — if you see this, notifications are working.", "3")
+            "Test notification — if you see this, notifications are working. "
+            "Tap it to open the web UI.", "3", click_link(settings))
         return {"configured": True, "ok": ok, "url": url}
 
     @app.get("/api/opensubtitles/quota")
@@ -856,8 +858,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"ok": False, "detail": "No ntfy URL is set. Save one first."}
         sent = await _notify(
             fresh.notify_url, "✅ BluRayRipper test",
-            "If you can read this, alerts are working. Sent from the Settings page.",
-            fresh.notify_priority)
+            "If you can read this, alerts are working. Sent from the Settings page. "
+            "Tap it to open the web UI.",
+            fresh.notify_priority, click_link(fresh))
         return {"ok": bool(sent),
                 "detail": (f"Delivered to {fresh.notify_url} at priority "
                            f"'{fresh.notify_priority}'." if sent else

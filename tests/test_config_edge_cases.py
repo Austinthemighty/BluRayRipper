@@ -727,7 +727,7 @@ async def test_an_offline_alert_is_skipped_when_no_notify_url_is_set(tmp_path, m
     a fire-and-forget task, where nothing reports it."""
     sent = []
 
-    async def fake_notify(url, title, message, priority=None):
+    async def fake_notify(url, title, message, priority=None, click=None):
         sent.append((url, title))
 
     monkeypatch.setattr("blurayripper.services.notify.notify", fake_notify)

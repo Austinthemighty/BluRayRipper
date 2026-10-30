@@ -597,6 +597,15 @@ function jobPageOf(jobs, id, size){
   const per = size === 'all' ? Math.max(jobs.length, 1) : (parseInt(size) || 50);
   return Math.floor(idx / per);
 }
+// A tapped notification opens /#job-N: bring that job into view once the queue
+// has loaded, then drop the hash so a reload doesn't jump back to it.
+function openLinkedJob(){
+  const m = /^#job-(\d+)$/.exec(window.location.hash || '');
+  if (!m || !renderJobs._lastSnap) return;
+  goToJob(Number(m[1]));
+  window.history.replaceState(null, '', window.location.pathname + window.location.search);
+}
+
 // Bring a job into view: clear any search or filter that hides it, turn to
 // its page, and flash its card.
 function goToJob(id){
@@ -2743,7 +2752,8 @@ loadDrives();
 setInterval(loadDrives, 10000);   // keep the drive list / loaded discs current
 refreshMaintenance();
 setInterval(refreshMaintenance, 30000);  // countdown to the window, kept honest
-fetch('/api/jobs').then(r=>r.json()).then(renderJobs).catch(()=>{});
+fetch('/api/jobs').then(r=>r.json()).then(snap => { renderJobs(snap); openLinkedJob(); }).catch(()=>{});
+window.addEventListener('hashchange', openLinkedJob);
 </script>
 </body>
 </html>

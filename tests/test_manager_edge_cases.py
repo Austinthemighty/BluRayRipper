@@ -346,7 +346,7 @@ async def test_worker_progress_lands_on_the_job_and_pushes_the_done_alert(manage
                     outputs=["/library/WarGames (1983).mkv"])
     manager.store.load_all = lambda: [rec]
     sent = []
-    manager._notify = lambda t, m, priority=None: sent.append(t)
+    manager._notify = lambda t, m, priority=None, job_id=None: sent.append(t)
     _poll_for(manager, 3)
 
     await manager._refresh_from_store()
@@ -1054,7 +1054,7 @@ def test_with_retries_disabled_the_failure_is_still_announced(manager, monkeypat
     src.write_bytes(b"x")
     sent = []
     monkeypatch.setattr(manager, "_notify",
-                        lambda t, m, priority=None: sent.append((t, priority)))
+                        lambda t, m, priority=None, job_id=None: sent.append((t, priority)))
     spawned = []
     monkeypatch.setattr(manager, "_spawn",
                         lambda coro: (spawned.append(coro), coro.close())[1])

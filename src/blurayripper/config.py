@@ -342,6 +342,10 @@ class Settings:
     # ntfy priority for those pushes: min/low/default/high/urgent (or 1..5).
     # "high" is what makes a phone actually ring rather than sit silent.
     notify_priority: str = "default"
+    # The web UI address a tapped notification opens, as the phone reaches it
+    # (e.g. a ZeroTier address that works away from home). Blank = serve's own
+    # LAN address and web port, when it listens beyond localhost.
+    notify_click_url: str | None = None
     min_length_seconds: int = 120
     web_host: str = "127.0.0.1"  # set to 0.0.0.0 to allow LAN access (no auth!)
     web_port: int = 8723
@@ -635,6 +639,8 @@ def load_settings(config_dir: Path | None = None, extra_overlay: dict | None = N
         notify_url=_override("BLURAYRIPPER_NOTIFY_URL", serve_cfg.get("notify_url")),
         notify_priority=(_override("BLURAYRIPPER_NOTIFY_PRIORITY",
                                    serve_cfg.get("notify_priority")) or "default"),
+        notify_click_url=_override("BLURAYRIPPER_NOTIFY_CLICK_URL",
+                                   serve_cfg.get("notify_click_url")) or None,
         min_length_seconds=int(scan_cfg.get("min_length_seconds", 120)),
         web_host=web_cfg.get("host", "127.0.0.1"),
         web_port=int(web_cfg.get("port", 8723)),

@@ -198,7 +198,7 @@ def shelf(tmp_path, monkeypatch):
 
     monkeypatch.setattr(manager.pipeline.handbrake, "encode", fake_encode)
 
-    async def fake_notify(url, title, message, priority=None):
+    async def fake_notify(url, title, message, priority=None, click=None):
         return True
 
     monkeypatch.setattr(manager_mod, "notify", fake_notify)

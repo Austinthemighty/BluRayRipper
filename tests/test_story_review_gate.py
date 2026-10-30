@@ -98,7 +98,7 @@ def _capture_pushes(settings, monkeypatch):
     monkeypatch.setattr(settings, "notify_url", "http://ntfy.example/blurayripper")
     pushed = []
 
-    async def fake_notify(url, title, message, priority=None):
+    async def fake_notify(url, title, message, priority=None, click=None):
         pushed.append((title, message))
         return True
 

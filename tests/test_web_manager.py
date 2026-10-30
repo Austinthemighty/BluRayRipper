@@ -1276,7 +1276,7 @@ def test_bump_unknown_job_raises(manager):
 
 def test_done_notification_fires_once(manager):
     notes = []
-    manager._notify = lambda title, msg, priority=None: notes.append((title, msg))
+    manager._notify = lambda title, msg, priority=None, job_id=None: notes.append((title, msg))
     wj = WebJob(id=1, source="disc:0", state=JobState.DONE, outputs=["/lib/WALL-E.mkv"])
     wj.disc = DiscInfo(source="disc:0", disc_name="WALL-E", titles=[])
 
@@ -1291,7 +1291,7 @@ def test_done_notification_fires_once(manager):
 
 def test_done_notification_not_refired_for_startup_history(manager):
     notes = []
-    manager._notify = lambda title, msg, priority=None: notes.append(title)
+    manager._notify = lambda title, msg, priority=None, job_id=None: notes.append(title)
     # A job already DONE at startup is pre-seeded so recovery never re-notifies.
     manager._done_notified.add(7)
     wj = WebJob(id=7, source="disc:0", state=JobState.DONE, outputs=["/lib/x.mkv"])
@@ -1739,7 +1739,7 @@ def test_notifies_when_a_worker_goes_offline_and_returns(manager, monkeypatch):
     manager._worker_watch = presence.PresenceWatch(threshold_seconds=300)
     sent = []
     monkeypatch.setattr(manager, "_notify",
-                        lambda t, m, priority=None: sent.append((t, m, priority)))
+                        lambda t, m, priority=None, job_id=None: sent.append((t, m, priority)))
 
     manager._workers_cache = [_wi("SteamMachine", 5)]
     manager._check_worker_presence()
@@ -1765,7 +1765,7 @@ def test_worker_presence_ignores_the_servers_own_heartbeat(manager, monkeypatch)
     manager._worker_watch = presence.PresenceWatch(threshold_seconds=300)
     sent = []
     monkeypatch.setattr(manager, "_notify",
-                        lambda t, m, priority=None: sent.append((t, m, priority)))
+                        lambda t, m, priority=None, job_id=None: sent.append((t, m, priority)))
 
     manager._workers_cache = [_wi(presence.serve_id("RIPBOX"), 5)]
     manager._check_worker_presence()
@@ -1784,7 +1784,7 @@ def test_offline_alerts_can_be_switched_off(manager, monkeypatch):
     manager._worker_watch = presence.PresenceWatch(threshold_seconds=0)
     sent = []
     monkeypatch.setattr(manager, "_notify",
-                        lambda t, m, priority=None: sent.append(t))
+                        lambda t, m, priority=None, job_id=None: sent.append(t))
     manager._workers_cache = [_wi("SteamMachine", 5)]
     manager._check_worker_presence()
     manager._workers_cache = [_wi("SteamMachine", 99999)]

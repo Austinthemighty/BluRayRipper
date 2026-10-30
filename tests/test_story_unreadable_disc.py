@@ -133,7 +133,7 @@ def _capture_pushes(settings, monkeypatch) -> list[tuple[str, str]]:
     settings.notify_url = "http://ntfy.example/blurayripper"
     pushed: list[tuple[str, str]] = []
 
-    async def fake_notify(url, title, message, priority=None):
+    async def fake_notify(url, title, message, priority=None, click=None):
         pushed.append((title, message))
         return True
 

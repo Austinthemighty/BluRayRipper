@@ -50,7 +50,7 @@ from ..services import library, naming, season_check
 from ..services import aacs_dump
 from ..services.drive_caps import DriveCaps
 from ..services.drive_names import DriveNames
-from ..services.notify import notify
+from ..services.notify import click_link, notify
 from ..services.opensubtitles import OpenSubtitlesClient, gather_references
 from ..services.sub_match import identify, identify_two_parts
 from ..tools import discinfo
@@ -211,7 +211,7 @@ class _Reporter:
 
     def notify(self, title: str, message: str) -> None:
         """Pipeline asked to push a user notification (e.g. disc finished ripping)."""
-        self._m._notify(title, message)
+        self._m._notify(title, message, job_id=self._wj.id)
 
     def ejected(self, device: str | None) -> None:
         """Pipeline auto-ejected the disc — forget the drive's cached disc name so
@@ -241,7 +241,7 @@ class _Reporter:
         self._m._persist(wj)
         self._m.bus.publish()
         self._m._notify(f"🎚 Grain choice: {self._m._name_of(wj)}",
-                        f"Job #{wj.id} — pick grain on/off in the UI.")
+                        f"Job #{wj.id} — pick grain on/off in the UI.", job_id=wj.id)
         chosen = await wj._grain_future
         # Gate resolved — hand the live state back to the pipeline. Without this,
         # wj.state stays AWAITING_GRAIN (a parked state), so _live_state keeps
@@ -1068,7 +1068,8 @@ class JobManager:
                     f"💿 Disc back for review: {name}",
                     f"Job #{waiting[0].id} was waiting for this disc."
                     if len(waiting) == 1 else
-                    f"{len(waiting)} parked jobs match this disc.")
+                    f"{len(waiting)} parked jobs match this disc.",
+                    job_id=waiting[0].id if len(waiting) == 1 else None)
                 continue
             self._last_disc[d.index] = name
             self.add_disc(source)  # new disc -> scan it
@@ -1236,7 +1237,8 @@ class JobManager:
         reporter.on_event(f"Auto-rip: matched “{c.title} ({c.year})” — ripping automatically. "
                           "(Use Rename if it's wrong.)")
         self._notify(f"⏩ Auto-ripping: {c.title} ({c.year})",
-                     f"Job #{wj.id} matched automatically and started ripping.")
+                     f"Job #{wj.id} matched automatically and started ripping.",
+                     job_id=wj.id)
         self._start_job(wj)
         return True
 
@@ -1342,7 +1344,8 @@ class JobManager:
             f"{len(result.assignments)} title(s) — ripping automatically. "
             "(Use Rename if the show is wrong.)")
         self._notify(f"⏩ Auto-ripping: {row.show} S{result.season:02d}{span}",
-                     f"Job #{wj.id} matched the box-set plan and started ripping.")
+                     f"Job #{wj.id} matched the box-set plan and started ripping.",
+                     job_id=wj.id)
         self._start_job(wj)
         return True
 
@@ -2124,7 +2127,7 @@ class JobManager:
                 "episodes by hand. The rip is kept.")
             self._notify(f"🟡 Needs your input: {self._name_of(wj)}",
                          f"Job #{wj.id} — couldn't identify the episodes by "
-                         "subtitles; set them by hand.")
+                         "subtitles; set them by hand.", job_id=wj.id)
             return False
         reporter.on_event(
             f"Fetching reference subtitles for episodes {wj.candidate_episodes} …")
@@ -2188,7 +2191,8 @@ class JobManager:
         wj.state = JobState.AWAITING_MATCH
         reporter.on_event("Subtitle match needs confirmation — review in the UI.")
         self._notify(f"📺 Confirm episodes: {self._name_of(wj)}",
-                     f"Job #{wj.id} — subtitle match needs your confirmation.")
+                     f"Job #{wj.id} — subtitle match needs your confirmation.",
+                     job_id=wj.id)
         return False
 
     # Re-OCR is background maintenance — refuse it while a job is actively being
@@ -2460,7 +2464,8 @@ class JobManager:
                 self._persist(wj)
                 self.bus.publish()
                 self._notify(f"🟡 Needs your input: {self._name_of(wj)}",
-                             f"Job #{wj.id} scanned — {'confirm the name' if wj.state is JobState.AWAITING_MAPPING else 'pick titles'} in the UI.")
+                             f"Job #{wj.id} scanned — {'confirm the name' if wj.state is JobState.AWAITING_MAPPING else 'pick titles'} in the UI.",
+                             job_id=wj.id)
                 if wj.state is JobState.AWAITING_MAPPING:
                     self._start_early_rip(wj)
         except Exception as exc:
@@ -2490,7 +2495,8 @@ class JobManager:
             wj.aacs_dump = str(dest)
             reporter.on_event(aacs_dump.advice(dest))
             self._notify(f"🔑 Unknown disc key: {self._name_of(wj)}",
-                         f"Job #{wj.id} — AACS dump saved for submission.")
+                         f"Job #{wj.id} — AACS dump saved for submission.",
+                         job_id=wj.id)
         except Exception as exc:
             reporter.on_event(f"(Couldn't keep the AACS dump: {type(exc).__name__}.)")
 
@@ -2592,7 +2598,8 @@ class JobManager:
             self._persist(wj)
             self.bus.publish()
             self._notify(f"🟡 Needs your input: {mkv_set.base}",
-                         f"Job #{wj.id} — {len(titles)} episode file(s) to name.")
+                         f"Job #{wj.id} — {len(titles)} episode file(s) to name.",
+                         job_id=wj.id)
         except Exception as exc:
             wj.state = JobState.FAILED
             wj.error = f"{type(exc).__name__}: {exc}"
@@ -2962,14 +2969,15 @@ class JobManager:
         if hint:
             wj.log.append(stamp_log(hint))
             self._notify(f"💿 {self._name_of(wj)} needs attention",
-                         f"Job #{wj.id}: {hint}")
+                         f"Job #{wj.id}: {hint}", job_id=wj.id)
             return
         n = self._auto_retries.get(wj.id, 0)
         if n >= self.settings.auto_retry_max:
             if self.settings.auto_retry_max:
                 wj.log.append(stamp_log(f"Auto-retry exhausted ({n}) — hit Retry to try again."))
             self._notify(f"❌ Failed: {self._name_of(wj)}",
-                         f"Job #{wj.id} failed: {wj.error}", priority="high")
+                         f"Job #{wj.id} failed: {wj.error}", priority="high",
+                         job_id=wj.id)
             return
         self._auto_retries[wj.id] = n + 1
         delay = min(30 * (2 ** n), 300)
@@ -3226,15 +3234,18 @@ class JobManager:
         self.bus.publish()
         wj._task = self._spawn(self._run_job(wj))
 
-    def _notify(self, title: str, message: str, priority: str | None = None) -> None:
+    def _notify(self, title: str, message: str, priority: str | None = None,
+                *, job_id: int | None = None) -> None:
         """Fire-and-forget push (if a notify_url is configured).
 
         An explicit priority (a per-alert escalation) wins; otherwise the
         configured default applies, which is what lets a phone actually ring for
-        these instead of collecting them silently."""
+        these instead of collecting them silently. Tapping it opens the web UI,
+        at ``job_id`` when the alert is about one job."""
         if self.settings.notify_url:
             self._spawn(notify(self.settings.notify_url, title, message,
-                               priority or self.settings.notify_priority))
+                               priority or self.settings.notify_priority,
+                               click_link(self.settings, job_id)))
 
     def _maybe_notify_done(self, wj: WebJob) -> None:
         """Push a 'finished encoding' notification the first time a job reaches
@@ -3247,7 +3258,8 @@ class JobManager:
         n = len(wj.outputs)
         self._notify(
             f"✅ Done: {name}",
-            f"{name} finished encoding — {n} file{'' if n == 1 else 's'} placed in your library.")
+            f"{name} finished encoding — {n} file{'' if n == 1 else 's'} placed in your library.",
+            job_id=wj.id)
 
     def _name_of(self, wj: WebJob) -> str:
         return self._display_name(wj)

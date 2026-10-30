@@ -638,11 +638,12 @@ class WorkerRunner:
         garbage-collected mid-flight and the notification silently lost."""
         if not self.settings.notify_url:
             return
-        from .services.notify import notify
+        from .services.notify import click_link, notify
 
         with contextlib.suppress(Exception):
             task = asyncio.get_running_loop().create_task(
-                notify(self.settings.notify_url, title, message, priority))
+                notify(self.settings.notify_url, title, message, priority,
+                       click_link(self.settings, derive=False)))
             self._notify_tasks.add(task)
             task.add_done_callback(self._notify_tasks.discard)
 

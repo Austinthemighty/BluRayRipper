@@ -161,6 +161,26 @@ def test_a_long_file_path_in_a_card_wraps_instead_of_widening_the_page():
     rule = src.split("  .job {", 1)[1].split("}", 1)[0]
     assert "overflow-wrap: break-word" in rule, rule
 
+
+def test_a_notification_link_to_a_job_opens_the_page_at_that_job():
+    """ntfy opens /#job-N when a job's alert is tapped. The page brings that
+    job into view once the queue has loaded, then drops the hash so a reload
+    doesn't jump back to it."""
+    out = js("window.location.hash = '#job-431';"
+             "let replaced = null;"
+             "window.history = {replaceState(a, b, url) { replaced = url; }};"
+             "window.location.pathname = '/'; window.location.search = '';"
+             "renderJobs._lastSnap = {jobs: []};"
+             "let went = null; goToJob = (id) => { went = id; };"
+             "openLinkedJob();"
+             "const first = [went, replaced];"
+             "went = null; window.location.hash = '#queue'; openLinkedJob();"
+             "[first, went]")
+    assert out == [[431, "/"], None]
+    src = INDEX.read_text()
+    assert "renderJobs(snap); openLinkedJob();" in src
+    assert "addEventListener('hashchange', openLinkedJob)" in src
+
 def test_a_job_that_merely_moved_onto_this_page_is_not_treated_as_new():
     """The "new job" set was the ids on the CURRENT PAGE, so deleting a job —
     which pulls the next one up from page 2 — made that job look new and scrolled

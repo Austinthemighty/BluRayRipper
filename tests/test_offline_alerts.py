@@ -113,7 +113,7 @@ async def test_notification_task_is_not_garbage_collected(monkeypatch, tmp_path)
 
     delivered = []
 
-    async def fake_notify(url, title, message, priority=None):
+    async def fake_notify(url, title, message, priority=None, click=None):
         await asyncio.sleep(0)          # yield, so a lost task never resumes
         delivered.append(title)
         return True

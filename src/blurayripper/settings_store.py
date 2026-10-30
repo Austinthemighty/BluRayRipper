@@ -145,6 +145,7 @@ SCHEMA: list[tuple[str, list[Field]]] = [
     ("Notifications", [
         Field("serve", "notify_url", "str", "ntfy URL", "", "Where alerts are pushed: https://ntfy.sh/your-topic, or your own server, e.g. https://ntfy.example.com/blurayripper. Any endpoint taking a plain-text POST works. Blank = notifications off. Save, then use Send test to confirm it arrives.", env="BLURAYRIPPER_NOTIFY_URL"),
         Field("serve", "notify_priority", "choice", "Priority", "default", "ntfy priority. 'high' or 'urgent' break through a phone's silent mode; 'low'/'min' arrive without a sound. Alerts only fire when a job needs you, fails, or a box goes offline.", choices=("min", "low", "default", "high", "urgent"), env="BLURAYRIPPER_NOTIFY_PRIORITY"),
+        Field("serve", "notify_click_url", "str", "Notification link", "", "What tapping a notification opens: this web UI as your phone reaches it, e.g. http://10.147.17.38:8723 for an address that works away from home. A notification about a job opens the page at that job. Blank = this box's LAN address and web port.", env="BLURAYRIPPER_NOTIFY_CLICK_URL"),
     ]),
     ("Scan", [
         Field("scan", "min_length_seconds", "int", "Min title length (s)", 120, "Ignore disc titles shorter than this — drops menus, trailers, and studio logos.", min=0),

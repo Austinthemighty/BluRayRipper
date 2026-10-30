@@ -82,7 +82,7 @@ async def test_a_job_already_done_before_the_restart_is_not_notified_again(
     monkeypatch.setattr(settings, "notify_url", "https://ntfy.example/blurayripper")
     pushes = []
 
-    async def fake_notify(url, title, message, priority=None):
+    async def fake_notify(url, title, message, priority=None, click=None):
         pushes.append(title)
         return True
 

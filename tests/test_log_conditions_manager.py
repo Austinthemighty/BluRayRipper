@@ -108,7 +108,7 @@ def _pushes(m, monkeypatch):
     """Capture the phone alerts instead of firing them."""
     out = []
     monkeypatch.setattr(m, "_notify",
-                        lambda title, message, priority=None: out.append(
+                        lambda title, message, priority=None, job_id=None: out.append(
                             (title, message, priority)))
     return out
 

@@ -127,7 +127,7 @@ def rig(tmp_path, monkeypatch):
     monkeypatch.setattr(metadata.TMDBClient, "search_movie", fake_search_movie)
     monkeypatch.setattr(metadata.TMDBClient, "movie_artwork", fake_movie_artwork)
 
-    async def fake_notify(url, title, message, priority=None):
+    async def fake_notify(url, title, message, priority=None, click=None):
         notes.append((title, message))
         return True
 

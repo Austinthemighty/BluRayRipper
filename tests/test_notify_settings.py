@@ -15,7 +15,8 @@ def test_ntfy_has_its_own_settings_group():
     titles = [title for title, _ in SCHEMA]
     assert "Notifications" in titles
     fields = next(f for t, f in SCHEMA if t == "Notifications")
-    assert {f.key for f in fields} == {"notify_url", "notify_priority"}
+    assert {f.key for f in fields} == {"notify_url", "notify_priority",
+                                       "notify_click_url"}
 
 
 def test_the_url_still_defers_to_secrets_env():
@@ -48,7 +49,7 @@ def test_a_configured_priority_is_used_when_an_alert_does_not_set_one(monkeypatc
 
     sent = []
     monkeypatch.setattr("blurayripper.web.manager.notify",
-                        lambda url, title, msg, prio: sent.append(prio))
+                        lambda url, title, msg, prio, click=None: sent.append(prio))
     monkeypatch.setattr(m, "_spawn", lambda coro: None)
     m._notify("t", "m")
     assert sent == ["high"]
@@ -56,3 +57,22 @@ def test_a_configured_priority_is_used_when_an_alert_does_not_set_one(monkeypatc
     sent.clear()
     m._notify("t", "m", "urgent")     # an explicit escalation still wins
     assert sent == ["urgent"]
+
+
+def test_an_alert_about_a_job_links_to_that_job(monkeypatch):
+    """Tapping "✅ Done: …" or "❌ Failed: …" opens the page at that job."""
+    from blurayripper.persistence import MemoryStore
+    from blurayripper.web.manager import JobManager
+
+    settings = load_settings()
+    settings.notify_url = "https://ntfy.example.com/topic"
+    settings.notify_click_url = "http://10.147.17.38:8723"
+    m = JobManager(settings, store=MemoryStore())
+
+    sent = []
+    monkeypatch.setattr("blurayripper.web.manager.notify",
+                        lambda url, title, msg, prio, click=None: sent.append(click))
+    monkeypatch.setattr(m, "_spawn", lambda coro: None)
+    m._notify("❌ Failed: Titanic", "Job #158 failed", job_id=158)
+    m._notify("🔌 Worker offline: handbreak02", "No heartbeat")
+    assert sent == ["http://10.147.17.38:8723/#job-158", "http://10.147.17.38:8723"]

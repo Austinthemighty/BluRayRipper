@@ -347,7 +347,7 @@ async def test_a_database_outage_does_not_page_you_about_a_worker_that_is_fine(m
     on the night a worker actually dies.
     """
     sent: list[str] = []
-    manager._notify = lambda title, msg, priority=None: sent.append(title)
+    manager._notify = lambda title, msg, priority=None, job_id=None: sent.append(title)
     manager.settings.cluster.offline_alert_seconds = 300
     manager.store.workers = [WorkerInfo("enc1", "v1", None, "idle", 2.0)]
 

@@ -271,7 +271,7 @@ def rig(tmp_path, monkeypatch):
     monkeypatch.setattr(manager.pipeline.handbrake, "encode", fake_encode)
 
     # --- the push itself --------------------------------------------------
-    async def fake_notify(url, title, message, priority=None):
+    async def fake_notify(url, title, message, priority=None, click=None):
         notes.append((title, message, priority))
         return True
 

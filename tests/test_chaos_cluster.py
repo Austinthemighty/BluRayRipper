@@ -332,7 +332,7 @@ def _rip_box(cfg: Path, store: ChaosStore, monkeypatch):
     manager = JobManager(load_settings(cfg), store=store)
     alerts: list[tuple] = []
     monkeypatch.setattr(manager, "_notify",
-                        lambda title, message, priority=None:
+                        lambda title, message, priority=None, job_id=None:
                         alerts.append((title, message, priority)))
     return manager, alerts
 
