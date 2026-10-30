@@ -402,6 +402,7 @@ class JobManager:
             show_tmdb_id=wj.show_tmdb_id,
             season=wj.season,
             candidate_episodes=list(wj.candidate_episodes),
+            match_candidates=list(wj.match_candidates),
             aacs_dump=wj.aacs_dump,
             show_title=wj.show_title,
             show_year=wj.show_year,
@@ -422,6 +423,7 @@ class JobManager:
         wj.auto_identify = rec.auto_identify
         wj.show_tmdb_id, wj.season = rec.show_tmdb_id, rec.season
         wj.candidate_episodes = list(rec.candidate_episodes)
+        wj.match_candidates = list(rec.match_candidates or [])
         wj.show_title, wj.show_year = rec.show_title, rec.show_year
         wj.aacs_dump = getattr(rec, 'aacs_dump', None)
         job = Job(source=rec.source)
@@ -446,8 +448,8 @@ class JobManager:
         records = self.store.load_all()
         max_id = 0
         resumed = 0
-        parked = (JobState.DONE, JobState.FAILED,
-                  JobState.AWAITING_TITLES, JobState.AWAITING_MAPPING)
+        parked = (JobState.DONE, JobState.FAILED, JobState.AWAITING_TITLES,
+                  JobState.AWAITING_MAPPING, JobState.AWAITING_MATCH)
         # Rip-box work (rip + subtitles + grain). In clustered mode the rip box
         # ONLY re-runs these; READY / worker-owned states are left for workers to
         # claim from the store (so we don't stampede re-prepping everything).
@@ -481,6 +483,12 @@ class JobManager:
             # An auto-identify job that hasn't been identified yet must re-run on
             # the rip box (workers can't rip/OCR/match), even at READY.
             needs_identify = wj.auto_identify and not wj.assignments
+            # A subtitle match waiting for you to confirm it waits on: its
+            # proposals are kept. A row saved before they were has nothing for
+            # the confirm screen to show, so that one identifies again. The rip
+            # and the downloaded references are reused; only the OCR re-runs.
+            rematch = (wj.state is JobState.AWAITING_MATCH and needs_identify
+                       and not wj.match_candidates)
             # A disc job at READY whose rip never finished is nobody's: serve skips
             # READY as "worker-owned", but a worker refuses it (_fully_ripped) since
             # there's no ripped file to encode — so it's claimed and released
@@ -522,7 +530,7 @@ class JobManager:
                     "this disc”, or Remove it. Nothing has been read or re-ripped."))
                 self._persist(wj)
             elif clustered:
-                if (wj.state in prep_states
+                if (wj.state in prep_states or rematch
                         or (needs_identify and wj.state is JobState.READY)):
                     self._resume(wj)
                     resumed += 1
@@ -534,7 +542,7 @@ class JobManager:
                         wj._pipeline_job.state = JobState.READY
                     self._persist(wj)
                 # else READY / ENCODING / PLACING -> leave for workers
-            elif wj.state not in parked or interrupted_fail:
+            elif wj.state not in parked or interrupted_fail or rematch:
                 self._resume(wj)
                 resumed += 1
         if max_id:

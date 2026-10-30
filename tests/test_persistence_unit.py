@@ -74,6 +74,9 @@ def _full_record() -> JobRecord:
         log=["[2026-08-21 10:00:00] Ripping title 3 …", "字幕 OCR 完了", "naïve café"],
         worker="ripbox-2", auto_identify=True, show_tmdb_id=1234, season=2,
         candidate_episodes=[5, 6, 7], show_title="Bäbylon 5", show_year=1994,
+        match_candidates=[{"title_id": 3, "episode": 7, "score": 0.41, "runner_up": 6,
+                           "runner_up_score": 0.39, "confident": False,
+                           "episode_end": None}],
         aacs_dump="Z:/dumps/aacs-babylon5.bin",
     )
 
@@ -190,6 +193,7 @@ def test_job_record_round_trips_every_field_through_real_json():
     assert revived.checkpoints["3"]["ripped_path"] == "Z:/rips/t03.mkv"
     assert revived.aacs_dump == "Z:/dumps/aacs-babylon5.bin"
     assert revived.candidate_episodes == [5, 6, 7]
+    assert revived.match_candidates[0]["runner_up"] == 6
     assert disc_from_dict(revived.disc).title(3).source_filename == "00071.mpls"
     assert assignment_from_dict(revived.assignments[0]).episode_title == "Geheimnis"
 

@@ -95,6 +95,10 @@ class JobRecord:
     candidate_episodes: list[int] = field(default_factory=list)
     show_title: str | None = None
     show_year: int | None = None
+    # The proposals a job at AWAITING_MATCH is waiting for you to confirm. Lost,
+    # the confirm screen had nothing to show, and the only way on was to
+    # identify the disc all over again.
+    match_candidates: list = field(default_factory=list)
     aacs_dump: str | None = None   # kept dump for a disc with no known key
 
     def to_json(self) -> dict:

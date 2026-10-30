@@ -136,6 +136,75 @@ async def test_recover_resumes_interrupted_failed_job(tmp_path, monkeypatch):
     assert manager.jobs[9].state is JobState.FAILED    # real failure stays failed
 
 
+def _awaiting_match(job_id: int, candidates: list) -> JobRecord:
+    """A disc identified by its subtitles, waiting for you to confirm the match."""
+    return JobRecord(
+        id=job_id, source="disc:0", state="awaiting_match", disc=_disc_dict(),
+        selected_title_ids=[0], checkpoints={"0": {"ripped_path": "/x.mkv"}},
+        auto_identify=True, show_tmdb_id=1100, season=1, candidate_episodes=[1, 2],
+        show_title="How I Met Your Mother", show_year=2005,
+        match_candidates=candidates)
+
+
+_PROPOSAL = [{"title_id": 0, "episode": 2, "score": 0.31, "runner_up": 1,
+              "runner_up_score": 0.29, "confident": False, "episode_end": None}]
+
+
+async def _recover_with(settings, store, monkeypatch):
+    manager = JobManager(settings, store=store)
+    identified = []
+
+    async def fake_identify(wj, reporter):
+        identified.append(wj.id)
+        wj.state = JobState.AWAITING_MATCH
+        return False
+
+    monkeypatch.setattr(manager, "_auto_identify", fake_identify)
+    n = manager.recover()
+    await _settle()
+    return manager, n, identified
+
+
+async def test_a_match_awaiting_confirmation_keeps_its_proposals_over_a_restart(
+        tmp_path, monkeypatch):
+    """Not kept, a restart either identified the disc all over again (single
+    box: re-OCR every title) or left the confirm screen with nothing on it
+    (clustered). The proposals are saved now, so the job just waits on."""
+    for clustered in (False, True):
+        settings = load_settings()
+        monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+        monkeypatch.setattr(settings.storage, "staging_dir", tmp_path / "staging")
+        settings.cluster.use_workers = clustered
+        store = MemoryStore()
+        store.save(_awaiting_match(30, _PROPOSAL))
+
+        manager, n, identified = await _recover_with(settings, store, monkeypatch)
+
+        assert (n, identified) == (0, []), clustered
+        wj = manager.jobs[30]
+        assert wj.state is JobState.AWAITING_MATCH
+        assert wj.match_candidates == _PROPOSAL
+        assert manager._to_record(wj).match_candidates == _PROPOSAL  # and saved again
+
+
+async def test_a_match_saved_without_its_proposals_is_identified_again(
+        tmp_path, monkeypatch):
+    """A row from before the proposals were saved: nothing to confirm, so the
+    disc is identified again rather than parked behind an empty screen."""
+    for clustered in (False, True):
+        settings = load_settings()
+        monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
+        monkeypatch.setattr(settings.storage, "staging_dir", tmp_path / "staging")
+        settings.cluster.use_workers = clustered
+        store = MemoryStore()
+        store.save(_awaiting_match(31, []))
+
+        manager, n, identified = await _recover_with(settings, store, monkeypatch)
+
+        assert (n, identified) == (1, [31]), clustered
+        assert manager.jobs[31].state is JobState.AWAITING_MATCH
+
+
 async def test_jobs_persist_to_store_on_transitions(tmp_path, monkeypatch):
     settings = load_settings()
     monkeypatch.setattr(settings.storage, "output_dir", tmp_path)
