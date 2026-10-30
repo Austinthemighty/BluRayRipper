@@ -278,6 +278,60 @@ def test_resolve_leaves_source_when_no_match(monkeypatch):
     assert job.source == "disc:0"   # untouched -> rip fails with the reinsert message
 
 
+def _all_ripped(pipe, job, tmp_path):
+    """Give every title of ``job`` a ripped file, as after its rip."""
+    pipe.settings.storage.staging_dir = tmp_path
+    job.selected_title_ids = [0, 1]
+    for t in (0, 1):
+        f = tmp_path / f"job_1/rip/t{t:03d}/a.mkv"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"x")
+        job.checkpoints[t] = {"ripped_path": f"job_1/rip/t{t:03d}/a.mkv"}
+
+
+def test_a_ripped_job_does_not_go_looking_for_its_disc(monkeypatch, tmp_path):
+    """Its disc was ejected after the rip; the drive may hold the next disc by
+    now. Searching for it fingerprint-scans the other drives, one of which
+    another job may be ripping from."""
+    pipe = _pipe()
+    job = _disc_job("disc:0", "SV_S2_D1", _titles())
+    _all_ripped(pipe, job, tmp_path)
+    asked = []
+
+    async def fake_list(timeout=60):
+        asked.append(1)
+        return [Drive(0, "E", "E:", "NEXT_DISC"), Drive(1, "F", "F:", "SV_S2_D1")]
+    monkeypatch.setattr(pipe.makemkv, "list_drives", fake_list)
+    asyncio.run(pipe._resolve_source_drive(job, _report()))
+    assert asked == [] and job.source == "disc:0"
+
+    # One title's file gone: that title is ripped again, so the disc is wanted.
+    (tmp_path / "job_1/rip/t001/a.mkv").unlink()
+    asyncio.run(pipe._resolve_source_drive(job, _report()))
+    assert asked == [1] and job.source == "disc:1"
+
+
+def test_a_ripped_job_takes_cover_art_only_from_what_it_saved(monkeypatch, tmp_path):
+    """Read from the drive after the eject, the "disc art" is the next disc's."""
+    from blurayripper.models import EpisodeAssignment, MediaKind
+    from blurayripper.services import coverart
+    pipe = _pipe()
+    pipe.settings.extract_cover_art = True
+    job = _disc_job("disc:0", "SV_S2_D1", _titles())
+    _all_ripped(pipe, job, tmp_path)
+    job.assignments = {t: EpisodeAssignment(t, MediaKind.TV, "Show", 2001, 2, t + 1)
+                       for t in (0, 1)}
+    read_from_drive = []
+    monkeypatch.setattr(coverart, "extract_art",
+                        lambda root, *a, **kw: read_from_drive.append(root))
+    asyncio.run(pipe._place_cover_art(job, _report(), tmp_path / "job_1"))
+    assert read_from_drive == []
+
+    job.checkpoints[1] = {}                     # a title left to rip: disc still in
+    asyncio.run(pipe._place_cover_art(job, _report(), tmp_path / "job_1"))
+    assert read_from_drive                      # E:\ read as before
+
+
 def test_ensure_ripped_clears_stale_partial(tmp_path, monkeypatch):
     """A leftover .mkv from a failed prior attempt is removed before re-ripping,
     so rip_title's newly-appeared-file detection works (no false 'no output')."""

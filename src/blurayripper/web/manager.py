@@ -3040,6 +3040,13 @@ class JobManager:
         src = (wj.source or "").strip().lower()
         return src if src.startswith(("disc:", "dev:")) else None
 
+    def _needs_drive(self, wj: WebJob) -> bool:
+        """Does this job still have to read its disc? Asked of the ripped files
+        themselves (a checkpoint whose file is gone means a re-rip), and True
+        whenever that can't be answered yet."""
+        job = wj._pipeline_job
+        return job is None or not self.pipeline._all_ripped(job)
+
     @contextlib.asynccontextmanager
     async def _prep_slot(self, wj: WebJob):
         """Hold this job's drive (if it needs one) and a prep slot.
@@ -3052,9 +3059,14 @@ class JobManager:
 
         The drive lock is taken OUTSIDE the semaphore on purpose. Waiting on a
         drive while holding a slot would let every slot fill with jobs queued
-        behind a drive whose owner can no longer get a slot to finish."""
+        behind a drive whose owner can no longer get a slot to finish.
+
+        A job whose titles are all ripped takes no drive at all: everything it
+        has left works from the ripped files. Otherwise a disc identified by its
+        dialogue, ejected long ago, queued for its prep behind the NEXT disc's
+        rip in the same drive."""
         key = self._drive_key(wj)
-        if key is None:
+        if key is None or not self._needs_drive(wj):
             async with self._prep_sem:              # file/ISO: no drive to contend for
                 yield
             return

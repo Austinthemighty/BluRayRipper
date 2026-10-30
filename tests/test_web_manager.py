@@ -2505,6 +2505,57 @@ async def test_waiting_for_a_grain_choice_does_not_hold_the_drive(manager):
     assert manager._drive_locks["disc:0"].locked() is False
 
 
+async def test_a_job_with_every_title_ripped_does_not_queue_for_its_drive(
+        manager, tmp_path):
+    """Identified by its dialogue, the disc was ejected long ago; what is left
+    (subtitles, the encode) reads the ripped files. Behind the drive lock it
+    waited for the NEXT disc's whole rip in that drive."""
+    from blurayripper.pipeline import Job
+    manager.settings.storage.staging_dir = tmp_path
+    ripping = WebJob(id=610, source="disc:0", state=JobState.RIPPING)
+    done = WebJob(id=611, source="disc:0", state=JobState.READY, selected_title_ids=[3])
+    done._pipeline_job = Job(source="disc:0")
+    done._pipeline_job.selected_title_ids = [3]
+    rip = tmp_path / "job_611" / "rip" / "t003" / "a.mkv"
+    rip.parent.mkdir(parents=True)
+    rip.write_bytes(b"x")
+    done._pipeline_job.checkpoints = {3: {"ripped_path": "job_611/rip/t003/a.mkv"}}
+    manager.jobs.update({610: ripping, 611: done})
+
+    holding, got_in = asyncio.Event(), asyncio.Event()
+
+    async def rip_next_disc():
+        async with manager._prep_slot(ripping):
+            holding.set()
+            await got_in.wait()
+
+    async def finish_the_ripped_job():
+        await holding.wait()
+        async with manager._prep_slot(done):
+            got_in.set()
+
+    await asyncio.wait_for(asyncio.gather(rip_next_disc(), finish_the_ripped_job()), 5)
+
+    # Its file gone, the title has to be ripped again, so it waits its turn.
+    rip.unlink()
+    holding.clear()
+    got_in.clear()
+
+    async def try_while_held():
+        async with manager._prep_slot(ripping):
+            holding.set()
+            await asyncio.sleep(0.05)
+            assert not got_in.is_set()
+
+    async def wants_the_drive():
+        await holding.wait()
+        async with manager._prep_slot(done):
+            got_in.set()
+
+    await asyncio.wait_for(asyncio.gather(try_while_held(), wants_the_drive()), 5)
+    assert got_in.is_set()
+
+
 async def test_merging_duplicates_keeps_the_rip_not_just_the_naming(manager, monkeypatch):
     """Job 369 ripped the disc; job 370 was its duplicate and absorbed it. The
     merge carried the naming across and then called remove() on 369 — which

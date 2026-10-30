@@ -777,7 +777,12 @@ class Pipeline:
 
         # Phase 1 — rip every title back-to-back. With a disc copy the disc
         # is ejected before the first title rather than after the last,
-        # which is what this phase's docstring always wanted.
+        # which is what this phase's docstring always wanted. The disc's own art
+        # is saved first, as rip_titles does: by the time the naming is known
+        # and the art is placed, the disc is out and the drive may hold another.
+        if not self._all_ripped(job):
+            await self._resolve_source_drive(job, report)
+            await self._stash_disc_art(job, staging_root, report)
         await self._prepare_disc_once(job, staging_root, report)
         ripped_paths: dict[int, Path] = {}
         for title_id in job.selected_title_ids:
@@ -1235,6 +1240,12 @@ class Pipeline:
         library.cleanup(staging_root / "disc")
         job._rip_source = None
         report.on_event("Disc copy removed — every title has been made from it.")
+
+    def _all_ripped(self, job: Job) -> bool:
+        """Every selected title has its ripped file, so nothing left in this
+        job needs the disc — which has likely been ejected, and the drive given
+        another."""
+        return bool(job.selected_title_ids) and not self._titles_left_to_rip(job)
 
     def _titles_left_to_rip(self, job: Job) -> list[int]:
         """Selected titles with no ripped file to reuse — the same test
@@ -2110,6 +2121,11 @@ class Pipeline:
         src = job.source or ""
         if not src.startswith("disc:") or job.disc is None:
             return  # only for scanned disc jobs
+        if self._all_ripped(job):
+            # Ripped already; the disc is likely out and another in its place.
+            # Searching for it would scan the other drives' discs, one of which
+            # another job may be ripping.
+            return
         try:
             cur_idx = int(src.split(":", 1)[1])
         except ValueError:
@@ -2226,6 +2242,9 @@ class Pipeline:
         src = job.disc.source or ""
         iso = src[len("iso:"):] if src.startswith("iso:") else None
         root = coverart.disc_root(job.disc)
+        if (root is not None and src.startswith(("disc:", "dev:"))
+                and self._all_ripped(job)):
+            root = None  # ejected after its rip: the drive may hold another disc now
         saved = staging_root / "disc_art" if staging_root is not None else None
         if saved is not None and not (saved.is_dir() and any(saved.iterdir())):
             saved = None

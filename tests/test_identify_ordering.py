@@ -53,6 +53,48 @@ async def test_identify_rips_all_before_any_ocr(tmp_path, monkeypatch):
     assert [e[1] for e in order if e[0] == "rip"] == [0, 1, 2]
 
 
+async def test_identify_saves_the_disc_art_before_its_rip_ejects_the_disc(
+        tmp_path, monkeypatch):
+    """The art is placed once the episodes are known, after the OCR and the
+    match, by when the disc is out and the drive may hold another. Saved
+    first, as the rip-ahead does, it is this disc's art."""
+    settings = load_settings()
+    monkeypatch.setattr(settings.storage, "staging_dir", tmp_path)
+    pipe = Pipeline(settings)
+    job = Job(source="disc:0")
+    job.disc = DiscInfo(source="disc:0",
+                        titles=[Title(title_id=i, duration_seconds=1500) for i in (0, 1)])
+    job.selected_title_ids = [0, 1]
+    order = []
+
+    async def resolve(job, report): order.append("resolve")
+    async def stash(job, sr, report): order.append("stash")
+
+    async def fake_ripped(job, tid, sr, report):
+        order.append(("rip", tid))
+        p = sr / "rip" / f"t{tid:03d}" / "a.mkv"
+        p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(b"x")
+        job.checkpoints[tid] = {"ripped_path": str(p.relative_to(tmp_path))}
+        return p
+
+    async def no_subs(ripped, sub_dir, report): return []
+    async def no_captions(ripped, sub_dir, report): return None
+    monkeypatch.setattr(pipe, "_resolve_source_drive", resolve)
+    monkeypatch.setattr(pipe, "_stash_disc_art", stash)
+    monkeypatch.setattr(pipe, "_ensure_ripped", fake_ripped)
+    monkeypatch.setattr(pipe, "_extract_subs", no_subs)
+    monkeypatch.setattr(pipe, "_caption_text", no_captions)
+
+    await pipe.identify_phase(job, tmp_path / "job_1", _R())
+    assert order == ["resolve", "stash", ("rip", 0), ("rip", 1)]
+
+    # Identified again later (a restart), everything already ripped: the
+    # drive belongs to whichever disc is in it now, so it is not read.
+    order.clear()
+    await pipe.identify_phase(job, tmp_path / "job_1", _R())
+    assert "resolve" not in order and "stash" not in order
+
+
 class _Log:
     def __init__(self): self.events = []
     def on_event(self, m): self.events.append(m)
