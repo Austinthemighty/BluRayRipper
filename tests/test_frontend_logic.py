@@ -130,6 +130,17 @@ def test_on_a_phone_the_pinned_bar_is_slim_with_the_actions_behind_a_menu():
     assert "header.menu-open .head-actions {" in src
     assert "wireHeadMenu();" in src
 
+
+def test_a_long_file_path_in_a_card_wraps_instead_of_widening_the_page():
+    """A failed rip's error and a finished job's output line carry paths like
+    /mnt/TrueNas/achopra/MakeMKV/... with no spaces to wrap at, which pushed a
+    phone's page out to ~480px so it dragged sideways. Cards must break a long
+    word; break-word rather than anywhere, which would also squeeze the title
+    tables' columns."""
+    src = INDEX.read_text()
+    rule = src.split("  .job {", 1)[1].split("}", 1)[0]
+    assert "overflow-wrap: break-word" in rule, rule
+
 def test_a_job_that_merely_moved_onto_this_page_is_not_treated_as_new():
     """The "new job" set was the ids on the CURRENT PAGE, so deleting a job —
     which pulls the next one up from page 2 — made that job look new and scrolled

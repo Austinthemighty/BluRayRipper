@@ -81,7 +81,11 @@
   .drive-info { min-width:0; flex:1; }
   .drive-info b, .drive-info .disc-name { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .drive-btns { flex-shrink:0; display:flex; gap:6px; align-items:center; }
-  .job { border:1px solid #30363d; border-radius:8px; padding:12px; margin-bottom:12px; }
+  .job { border:1px solid #30363d; border-radius:8px; padding:12px; margin-bottom:12px;
+         /* A file path in an error or the output line has no spaces to wrap at,
+            so it pushed a phone's page out to ~480px and let it drag sideways.
+            break-word, not anywhere: it leaves the title tables' sizing alone. */
+         overflow-wrap: break-word; }
   .thumb { height:44px; max-width:66px; border-radius:4px; object-fit:cover; border:1px solid #30363d; flex-shrink:0; }
   /* Newly-added/auto-opened job: a brief green pulse so it's not missed. */
   .job.flash { animation: jobflash 2.2s ease-out; }
