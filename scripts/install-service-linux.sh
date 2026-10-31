@@ -16,10 +16,14 @@
 # NAS: pass --requires-mount for each mount the job needs (repeatable). systemd
 #   then refuses to start until it's actually mounted, instead of failing every
 #   job with "no such file or directory" after a reboot race.
+#   A mount that isn't set up yet is set up first (scripts/setup-nas-linux.sh:
+#   cifs-utils, a root-only credentials file, the /etc/fstab line, a write test).
+#   Name the share with --nas, or you're asked for it; Enter skips.
 #
 # Usage (from the repo root):
 #   ./scripts/install-service-linux.sh --role worker
 #   ./scripts/install-service-linux.sh --role serve --requires-mount /mnt/nas
+#   ./scripts/install-service-linux.sh --role worker --requires-mount /mnt/nas --nas //192.168.1.10/Share
 #   ./scripts/install-service-linux.sh --role worker --system --user-name austin
 #   ./scripts/install-service-linux.sh --role worker --status
 #   ./scripts/install-service-linux.sh --role worker --uninstall
@@ -31,6 +35,7 @@ WORKER_NAME=""
 RUN_AS="$(id -un)"
 STOP_TIMEOUT="1h"
 MOUNTS=()
+NAS_SHARE=""
 ACTION="install"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -43,7 +48,8 @@ while [ $# -gt 0 ]; do
     --uninstall) ACTION="uninstall"; shift ;;
     --status) ACTION="status"; shift ;;
     --print) ACTION="print"; shift ;;   # show the unit file, install nothing
-    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    --nas) NAS_SHARE="$2"; shift 2 ;;
+    -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -52,6 +58,10 @@ case "$ROLE" in
   serve|worker) ;;
   *) echo "Pass --role serve  or  --role worker" >&2; exit 2 ;;
 esac
+if [ -n "$NAS_SHARE" ] && [ "${#MOUNTS[@]}" -ne 1 ]; then
+  echo "--nas needs exactly one --requires-mount: the path to mount the share at." >&2
+  exit 2
+fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 UNIT="blurayripper-${ROLE}.service"
@@ -159,6 +169,32 @@ if [ "$ACTION" = "print" ]; then
   printf '%s' "$UNIT_TEXT"
   exit 0
 fi
+
+# The NAS before the service: the unit waits for these mounts, so a mount that
+# was never set up would hold it at "starting" forever.
+mount_known() {   # mounted now, or at least in /etc/fstab to mount at boot
+  findmnt -n "$1" >/dev/null 2>&1 && return 0
+  # Through the environment: awk -v would decode the \040 that fstab spells a space.
+  MP="${1// /\\040}" awk '$1 !~ /^#/ && $2 == ENVIRON["MP"] { found = 1 } END { exit !found }' \
+    /etc/fstab 2>/dev/null
+}
+for m in ${MOUNTS+"${MOUNTS[@]}"}; do
+  share="$NAS_SHARE"
+  if [ -z "$share" ]; then
+    mount_known "$m" && continue
+    warn "$m isn't mounted, and /etc/fstab doesn't mount it."
+    if [ -t 0 ]; then
+      read -r -p "    NAS share to mount there, e.g. //192.168.1.10/Share (Enter to skip): " share
+    fi
+    if [ -z "$share" ]; then
+      warn "Skipped: the service will wait until $m is mounted. To set it up later:"
+      warn "  ./scripts/setup-nas-linux.sh --share //SERVER/SHARE --mount $m --owner $RUN_AS"
+      continue
+    fi
+  fi
+  info "Setting up the NAS share at $m"
+  "$REPO_ROOT/scripts/setup-nas-linux.sh" --share "$share" --mount "$m" --owner "$RUN_AS"
+done
 
 info "Installing $UNIT ($SCOPE scope)"
 mkdir -p "$UNIT_DIR" 2>/dev/null || sudo mkdir -p "$UNIT_DIR"

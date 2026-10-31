@@ -90,6 +90,18 @@ in Postgres, losing this means re-issuing your TMDB and OpenSubtitles keys.
 
 Do this **first**. Several later steps check that storage is writable.
 
+The script does all of it: it installs cifs-utils, asks for the NAS username and
+password on your terminal, keeps them in a root-only file, writes the fstab line
+below, mounts the share and checks the service account can write to it.
+
+```bash
+./scripts/setup-nas-linux.sh --share //192.168.1.10/Share --mount /mnt/TrueNas
+```
+
+`install-service-linux.sh` runs it for you when a `--requires-mount` path isn't
+set up yet. Use the same mount path on every box, or add a Path map entry.
+Re-running it is safe. By hand, it is:
+
 ```bash
 sudo apt install -y cifs-utils && sudo mkdir -p /mnt/TrueNas
 sudo install -m 600 /dev/null /etc/cifs-truenas.cred
@@ -210,12 +222,13 @@ Install the service:
 Nothing to configure: it inherits settings and credentials from Postgres.
 
 ```bash
-./scripts/install-service-linux.sh --role worker --requires-mount /mnt/TrueNas
+./scripts/install-service-linux.sh --role worker --requires-mount /mnt/TrueNas --nas //192.168.1.10/Share
 ```
 
 `--requires-mount` makes systemd hold the worker until the NAS is up. Without
 it, a worker that wins the boot race against the mount claims jobs it cannot
-read.
+read. If that path isn't mounted yet, the share named by `--nas` is set up
+there first (step 1). Without `--nas` you're asked for it; Enter skips.
 
 Two workers on one host need distinct ids:
 
